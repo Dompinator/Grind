@@ -1,7 +1,17 @@
-GRIND v0.3 — Multiplayer Meme Currency Market (Premium + English)
+GRIND v0.3.5 — Multiplayer Meme Currency Market (Premium + English)
 ================================================================
 
 Complete version for GitHub Pages + Supabase.
+
+NEW IN v0.3.5
+- Login / sign up with EMAIL + password only. A unique username is auto-created
+  from the email; change it in Account -> Username.
+- Price impact depends on price: relative change = amount / (price * 15).
+  $10 at $1 = +67%, $5 at $50 = +0.67%. (Tune LIQUIDITY in app.js.)
+- Every buy/sell shows a bubble on the coin timeline with the trader's profile
+  picture and the amount. Timeline scrolls sideways, works for every coin.
+- escapeHtml fixed (it did not escape anything before).
+- No new SQL needed.
 
 NEW IN v0.3
 - Full English UI with premium design (gradients, shadows, better polish)

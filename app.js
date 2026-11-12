@@ -1,5 +1,5 @@
 // ============================================================
-// GRIND v0.3 — Multiplayer · Premium · English
+// GRIND v0.3.5 — Multiplayer · Premium · English
 // ============================================================
 const SUPABASE_URL = 'https://zcrkywpyjrofphxnxtlc.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_PKSD898kwnfs6msIDiW9_g_yeoTBduD';
@@ -27,12 +27,16 @@ let timeInterval = null;
 
 // ---------- Helpers ----------
 function money(n) { return '$' + Number(n || 0).toFixed(2); }
+function priceFmt(n) {
+  n = Number(n || 0);
+  return '$' + n.toFixed(n < 1 ? 4 : 2);
+}
 function escapeHtml(s = '') {
   return String(s).replace(/[&<>"']/g, c => ({
-    '&': '&',
-    '<': '<',
-    '>': '>',
-    '"': '"',
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
     "'": '&#39;'
   }[c]));
 }
@@ -55,20 +59,16 @@ function formatTime(seconds) {
 
 // ---------- Auth (robust) ----------
 function setAuthMode(mode) {
-  const tabs = document.querySelectorAll('.auth-tab');
-  tabs.forEach(b => b.classList.toggle('active', b.dataset.auth === mode));
+  document.querySelectorAll('.auth-tab').forEach(b => b.classList.toggle('active', b.dataset.auth === mode));
   const btn = document.getElementById('authSubmit');
   if (btn) btn.textContent = mode === 'signup' ? 'Create account' : 'Log in';
-  const emailLabel = document.getElementById('emailLabel');
-  const emailInput = document.getElementById('authEmail');
-  if (emailLabel) emailLabel.classList.toggle('hidden', mode !== 'signup');
-  if (emailInput) emailInput.required = mode === 'signup';
+  const pw = document.getElementById('authPassword');
+  if (pw) pw.autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
   const msg = document.getElementById('authMessage');
   if (msg) msg.textContent = '';
 }
 window.setAuthMode = setAuthMode;
 
-// Attach listeners immediately and also on DOM ready
 function attachAuthListeners() {
   document.querySelectorAll('.auth-tab').forEach(b => {
     b.onclick = () => setAuthMode(b.dataset.auth);
@@ -77,54 +77,58 @@ function attachAuthListeners() {
 attachAuthListeners();
 document.addEventListener('DOMContentLoaded', attachAuthListeners);
 
+// Build a unique default username from the email (user can change it in Account)
+async function makeUniqueUsername(email) {
+  let base = (email.split('@')[0] || 'player').replace(/[^A-Za-z0-9_]/g, '').slice(0, 14);
+  if (base.length < 3) base = (base + 'user').slice(0, 14);
+  let name = base;
+  for (let i = 0; i < 6; i++) {
+    const { data } = await sb.from('profiles').select('id').ilike('username', name).maybeSingle();
+    if (!data) return name;
+    name = base + Math.floor(1000 + Math.random() * 9000);
+  }
+  return base + Date.now().toString().slice(-5);
+}
+
+async function createProfile(user) {
+  const username = await makeUniqueUsername(user.email);
+  return sb.from('profiles').insert({
+    id: user.id,
+    username,
+    email: user.email,
+    cash: 15,
+    is_premium: false,
+    net_worth: 15,
+    time_played: 0
+  });
+}
+
 $('#authForm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   if (!sb) return authMsg('Supabase not ready. Check your API key in app.js.');
-  const username = $('#authUsername').value.trim();
+  const email = $('#authEmail').value.trim();
   const password = $('#authPassword').value;
   const mode = document.querySelector('.auth-tab.active')?.dataset.auth || 'login';
-  if (username.length < 3) return authMsg('Username must be at least 3 characters.');
+  if (!email || !email.includes('@')) return authMsg('Please enter a valid email.');
 
   if (mode === 'signup') {
-    const email = $('#authEmail').value.trim();
-    if (!email || !email.includes('@')) return authMsg('Please enter a valid email.');
-    
     const { data, error } = await sb.auth.signUp({ email, password });
     if (error) return authMsg(error.message);
     if (!data.user) return authMsg('Signup failed. Try again.');
 
-    // Create profile
-    const { error: pErr } = await sb.from('profiles').insert({
-      id: data.user.id,
-      username: username,
-      email: email,
-      cash: 15,
-      is_premium: false,
-      net_worth: 15,
-      time_played: 0
-    });
-    if (pErr) return authMsg('Profile error: ' + pErr.message);
-
-    // Try to log in immediately
+    // Log in (needed before we may create the profile row)
     const { error: loginErr } = await sb.auth.signInWithPassword({ email, password });
     if (loginErr) {
       authMsg('Account created! Check your email to confirm, then log in.');
       setAuthMode('login');
       return;
     }
-    await loadProfile();
+    await loadProfile();   // creates the profile with an auto username if missing
     enterApp();
-    toast('Welcome to GRIND!');
+    toast('Welcome to GRIND! Set your username under Account.');
   } else {
-    // Login
-    let email = username;
-    if (!username.includes('@')) {
-      const { data: profile } = await sb.from('profiles').select('email').eq('username', username).maybeSingle();
-      if (!profile?.email) return authMsg('Username not found.');
-      email = profile.email;
-    }
     const { error } = await sb.auth.signInWithPassword({ email, password });
-    if (error) return authMsg('Wrong username/email or password.');
+    if (error) return authMsg('Wrong email or password.');
     await loadProfile();
     enterApp();
   }
@@ -141,14 +145,8 @@ async function loadProfile() {
   if (!user) return;
   const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).single();
   if (error || !data) {
-    await sb.from('profiles').insert({
-      id: user.id,
-      username: user.email.split('@')[0],
-      email: user.email,
-      cash: 15,
-      net_worth: 15,
-      time_played: 0
-    });
+    const { error: cErr } = await createProfile(user);
+    if (cErr) { authMsg('Profile error: ' + cErr.message); return; }
     return loadProfile();
   }
   currentUser = data;
@@ -159,12 +157,14 @@ function updateUIProfile() {
   if (!currentUser) return;
   $('#sideName').textContent = currentUser.username;
   $('#sidePremium').textContent = currentUser.is_premium ? 'Premium' : 'Member';
-  const av = currentUser.avatar_url ? `<img src="${currentUser.avatar_url}">` : escapeHtml(currentUser.username[0].toUpperCase());
+  const av = currentUser.avatar_url ? `<img src="${escapeHtml(currentUser.avatar_url)}">` : escapeHtml(currentUser.username[0].toUpperCase());
   $('#sideAvatar').innerHTML = av;
   $('#topAvatar').innerHTML = av;
   $('#topCash').textContent = money(currentUser.cash);
   $('#moneyCash').textContent = money(currentUser.cash);
   $('#profileInitial').textContent = currentUser.username[0].toUpperCase();
+  const un = $('#accountUsername');
+  if (un && document.activeElement !== un) un.value = currentUser.username;
   if (currentUser.avatar_url) {
     $('#profilePreview').src = currentUser.avatar_url;
     $('#profilePreview').classList.remove('hidden');
@@ -272,13 +272,13 @@ function renderFeed() {
   $('#feedGrid').innerHTML = list.map(c => `
     <article class="coin-card" data-coin="${c.id}">
       <div class="coin-top">
-        <div class="coin-logo">${c.image_url ? `<img src="${c.image_url}">` : escapeHtml(c.ticker[0])}</div>
+        <div class="coin-logo">${c.image_url ? `<img src="${escapeHtml(c.image_url)}">` : escapeHtml(c.ticker[0])}</div>
         <div>
           <div class="coin-name">${escapeHtml(c.name)}</div>
           <div class="coin-ticker">$${escapeHtml(c.ticker)}</div>
         </div>
       </div>
-      <div class="coin-price">${money(c.price)}</div>
+      <div class="coin-price">${priceFmt(c.price)}</div>
       <div class="coin-change ${(c.change_pct || 0) >= 0 ? 'up' : 'down'}">${(c.change_pct || 0) >= 0 ? '↗ +' : '↘ '}${Number(c.change_pct || 0).toFixed(2)}% today</div>
       <p class="coin-desc">${escapeHtml(c.description || 'Community currency.')}</p>
     </article>
@@ -349,23 +349,23 @@ async function renderCoinDetail() {
   const { data: trades } = await sb.from('trades')
     .select('*, profiles(username, avatar_url)')
     .eq('coin_id', c.id)
-    .order('created_at', { ascending: true })
-    .limit(80);
+    .order('created_at', { ascending: false })
+    .limit(100);
 
   $('#coinDetail').innerHTML = `
     <div class="coin-detail-hero">
-      <div class="coin-logo">${c.image_url ? `<img src="${c.image_url}">` : escapeHtml(c.ticker[0])}</div>
+      <div class="coin-logo">${c.image_url ? `<img src="${escapeHtml(c.image_url)}">` : escapeHtml(c.ticker[0])}</div>
       <div>
         <h3>${escapeHtml(c.name)} <span class="muted">$${escapeHtml(c.ticker)}</span></h3>
         <p>${escapeHtml(c.description || '')}</p>
         <p class="muted tiny">Community created</p>
       </div>
     </div>
-    <div class="detail-price">${money(c.price)}</div>
+    <div class="detail-price">${priceFmt(c.price)}</div>
     <div class="coin-change ${(c.change_pct || 0) >= 0 ? 'up' : 'down'}">${(c.change_pct || 0) >= 0 ? '↗ +' : '↘ '}${Number(c.change_pct || 0).toFixed(2)}%</div>
     <div class="chart-wrap">
-      <div class="chart-head"><strong>Price history + trades</strong><span class="muted tiny">Bubbles = buys/sells</span></div>
-      <canvas id="priceChart" width="900" height="250"></canvas>
+      <div class="chart-head"><strong>Price history + trades</strong><span class="muted tiny">Bubbles = who bought / sold &amp; for how much</span></div>
+      <div class="chart-scroll" id="chartScroll"><div class="chart-inner" id="chartInner"><canvas id="priceChart"></canvas></div></div>
     </div>
     <div class="trade-panel">
       <h3>Trade $${escapeHtml(c.ticker)}</h3>
@@ -389,14 +389,16 @@ async function renderCoinDetail() {
   $('#buyBtn')?.addEventListener('click', () => buy(c, selectedAmount));
   $('#sellBtn')?.addEventListener('click', () => sell(c, shares * 0.25));
 
-  drawChartWithBubbles(c, trades || []);
+  drawChartWithBubbles(c, (trades || []).slice().reverse());
 }
 
+// Market impact: every dollar moves the price by a fixed amount (1/LIQUIDITY),
+// so the RELATIVE change = amount / (price * LIQUIDITY).
+//   $10 buy at $1   -> +$0.67  = +67%   (huge)
+//   $5  buy at $50  -> +$0.33  = +0.67% (tiny)
+const LIQUIDITY = 15;
 function calculateImpact(amount, price) {
-  const priceFactor = Math.max(0.35, 1 / Math.sqrt(Math.max(0.2, price)));
-  const dollarFactor = amount / 25;
-  let impact = dollarFactor * priceFactor * 0.07;
-  return Math.min(0.12, Math.max(0.004, impact));
+  return amount / (Math.max(price, 0.0001) * LIQUIDITY);   // fraction, e.g. 0.67 = +67%
 }
 
 async function updateNetWorth() {
@@ -409,8 +411,14 @@ async function updateNetWorth() {
   $('#totalValue').textContent = money(nw);
 }
 
+async function freshCoin(coin) {
+  const { data } = await sb.from('coins').select('*').eq('id', coin.id).single();
+  return data || coin;
+}
+
 async function buy(coin, amount) {
   if (!currentUser || currentUser.cash < amount) return $('#tradeMessage').textContent = 'Not enough cash.';
+  coin = await freshCoin(coin);   // use the live price, not a stale one
   const impact = calculateImpact(amount, coin.price);
   const newPrice = coin.price * (1 + impact);
   const shares = amount / coin.price;
@@ -425,7 +433,7 @@ async function buy(coin, amount) {
   const newShares = (existing?.shares || 0) + shares;
   await sb.from('holdings').upsert({ user_id: currentUser.id, coin_id: coin.id, shares: newShares });
 
-  await sb.from('trades').insert({
+  const { error: tErr } = await sb.from('trades').insert({
     coin_id: coin.id,
     user_id: currentUser.id,
     type: 'buy',
@@ -433,13 +441,14 @@ async function buy(coin, amount) {
     shares,
     price_after: newPrice
   });
+  if (tErr) toast('Trade log error: ' + tErr.message);
 
   currentUser.cash = newCash;
   coin.price = newPrice;
   coin.change_pct = (coin.change_pct || 0) + impact * 100;
   updateUIProfile();
   await updateNetWorth();
-  toast(`Bought for ${money(amount)}!`);
+  toast(`Bought for ${money(amount)}! Price ${priceFmt(coin.price)} (+${(impact * 100).toFixed(impact < 0.1 ? 2 : 0)}%)`);
   await loadCoins();
   selectedCoin = coins.find(x => x.id === coin.id) || coin;
   renderCoinDetail();
@@ -447,17 +456,18 @@ async function buy(coin, amount) {
 
 async function sell(coin, sharesToSell) {
   if (!currentUser || sharesToSell <= 0) return $('#tradeMessage').textContent = 'No shares to sell.';
+  coin = await freshCoin(coin);
   const { data: hold } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
   const owned = hold?.shares || 0;
   const sellShares = Math.min(sharesToSell, owned);
   if (sellShares <= 0) return;
   const proceeds = sellShares * coin.price;
   const impact = calculateImpact(proceeds, coin.price) * 0.6;
-  const newPrice = Math.max(0.01, coin.price * (1 - impact));
+  const newPrice = Math.max(0.01, coin.price / (1 + impact));   // never drops below 0 / over 100%
   const newCash = currentUser.cash + proceeds;
 
   await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
-  await sb.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) - impact * 100 }).eq('id', coin.id);
+  await sb.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) - (1 - newPrice / coin.price) * 100 }).eq('id', coin.id);
   await sb.from('holdings').update({ shares: owned - sellShares }).eq('user_id', currentUser.id).eq('coin_id', coin.id);
   await sb.from('trades').insert({
     coin_id: coin.id,
@@ -480,54 +490,89 @@ async function sell(coin, sharesToSell) {
 
 function drawChartWithBubbles(coin, trades) {
   const canvas = $('#priceChart');
-  if (!canvas) return;
+  const inner = $('#chartInner');
+  const scroll = $('#chartScroll');
+  if (!canvas || !inner || !scroll) return;
+
+  const STEP = 78;                     // px per trade -> bubbles never overlap
+  const PAD_X = 46, PAD_TOP = 64, PAD_BOT = 24;
+  const H = 300;
+  const W = Math.max(scroll.clientWidth, PAD_X * 2 + Math.max(trades.length, 1) * STEP);
+  inner.style.width = W + 'px';
+  inner.style.height = H + 'px';
+
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
   const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  ctx.clearRect(0, 0, w, h);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
 
-  const points = [{ price: 1, time: 0 }];
-  trades.forEach(t => points.push({ price: t.price_after, time: new Date(t.created_at).getTime() }));
-  if (points.length === 1) points.push({ price: coin.price, time: Date.now() });
+  // Points: start at $1 (creation), then one point per trade (works for every coin)
+  const points = [{ price: 1, trade: null }];
+  trades.forEach(t => points.push({ price: Number(t.price_after) || coin.price, trade: t }));
+  if (!trades.length) points.push({ price: Number(coin.price), trade: null });
 
-  const min = Math.min(...points.map(p => p.price)) * 0.92;
-  const max = Math.max(...points.map(p => p.price)) * 1.08;
-  const range = max - min || 1;
-  const minTime = points[0].time || Date.now() - 3600000;
-  const maxTime = points[points.length - 1].time || Date.now();
-  const timeRange = maxTime - minTime || 1;
+  const prices = points.map(p => p.price);
+  let min = Math.min(...prices), max = Math.max(...prices);
+  if (max === min) { min *= 0.9; max *= 1.1; }
+  const padv = (max - min) * 0.08;
+  min -= padv; max += padv;
+  const plotH = H - PAD_TOP - PAD_BOT;
+  const xAt = i => points.length === 1 ? W / 2 : PAD_X + (i * (W - PAD_X * 2)) / (points.length - 1);
+  const yAt = p => PAD_TOP + plotH - ((p - min) / (max - min)) * plotH;
 
+  // grid + price labels
+  ctx.font = '11px sans-serif';
+  ctx.fillStyle = 'rgba(190,165,225,.55)';
   ctx.strokeStyle = 'rgba(190,165,225,.12)';
   ctx.lineWidth = 1;
-  for (let i = 1; i < 5; i++) {
-    ctx.beginPath(); ctx.moveTo(0, h * i / 5); ctx.lineTo(w, h * i / 5); ctx.stroke();
+  for (let i = 0; i <= 4; i++) {
+    const y = PAD_TOP + (plotH * i) / 4;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    const val = max - ((max - min) * i) / 4;
+    ctx.fillText('$' + val.toFixed(val < 1 ? 3 : 2), 4, y - 3);
   }
 
+  // line
   ctx.beginPath();
-  points.forEach((p, i) => {
-    const x = ((p.time - minTime) / timeRange) * w;
-    const y = h - ((p.price - min) / range) * (h - 30) - 15;
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  });
+  points.forEach((p, i) => { const x = xAt(i), y = yAt(p.price); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
   ctx.strokeStyle = '#c084fc';
   ctx.lineWidth = 3;
   ctx.lineJoin = 'round';
   ctx.stroke();
 
-  const wrap = canvas.parentElement;
-  wrap.querySelectorAll('.bubble').forEach(b => b.remove());
-  trades.forEach(t => {
-    const x = ((new Date(t.created_at).getTime() - minTime) / timeRange) * w;
-    const y = h - ((t.price_after - min) / range) * (h - 30) - 15;
-    if (x < 0 || x > w) return;
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    bubble.style.left = (x - 15) + 'px';
-    bubble.style.top = (y - 42) + 'px';
-    const avatar = t.profiles?.avatar_url;
-    bubble.innerHTML = avatar ? `<img src="${avatar}">` : `<span>${(t.profiles?.username || '?')[0].toUpperCase()}</span>`;
-    bubble.title = `${t.profiles?.username || 'Someone'} ${t.type === 'buy' ? 'bought' : 'sold'} for $${t.amount_usd}`;
-    wrap.appendChild(bubble);
+  // dots
+  points.forEach((p, i) => {
+    ctx.beginPath();
+    ctx.arc(xAt(i), yAt(p.price), 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = p.trade?.type === 'sell' ? '#f87171' : '#34d399';
+    ctx.fill();
   });
+
+  // bubbles: profile picture + amount
+  inner.querySelectorAll('.bubble').forEach(b => b.remove());
+  points.forEach((p, i) => {
+    const t = p.trade;
+    if (!t) return;
+    const isBuy = t.type !== 'sell';
+    const name = t.profiles?.username || 'Someone';
+    const avatar = t.profiles?.avatar_url;
+    const amt = Number(t.amount_usd || 0);
+    const b = document.createElement('div');
+    b.className = 'bubble ' + (isBuy ? 'buy' : 'sell');
+    b.style.left = xAt(i) + 'px';
+    b.style.top = (yAt(p.price) - 8) + 'px';
+    b.innerHTML = `
+      <div class="bubble-pfp">${avatar ? `<img src="${escapeHtml(avatar)}" alt="">` : `<span>${escapeHtml(name[0].toUpperCase())}</span>`}</div>
+      <div class="bubble-amt">${isBuy ? '' : '−'}${money(amt)}</div>`;
+    b.title = `${name} ${isBuy ? 'bought' : 'sold'} ${money(amt)} · price after ${priceFmt(t.price_after)}`;
+    inner.appendChild(b);
+  });
+
+  scroll.scrollLeft = scroll.scrollWidth;   // show the latest trades
 }
 
 // ---------- Money / Portfolio ----------
@@ -541,7 +586,7 @@ async function renderMoney() {
   $('#holdingsList').innerHTML = list.map(h => `
     <div class="holding" data-coin="${h.coin_id}">
       <div class="holding-left">
-        <div class="coin-logo">${h.coins?.image_url ? `<img src="${h.coins.image_url}">` : (h.coins?.ticker || '?')[0]}</div>
+        <div class="coin-logo">${h.coins?.image_url ? `<img src="${escapeHtml(h.coins.image_url)}">` : (h.coins?.ticker || '?')[0]}</div>
         <div>
           <strong>${escapeHtml(h.coins?.name || '')}</strong>
           <div class="muted tiny">${h.shares.toFixed(4)} $${escapeHtml(h.coins?.ticker || '')}</div>
@@ -570,7 +615,7 @@ async function renderLeaderboard() {
   $('#leaderboardList').innerHTML = list.map((p, i) => `
     <div class="lb-row">
       <div class="lb-rank ${i < 3 ? 'top3' : ''}">#${i + 1}</div>
-      <div class="avatar">${p.avatar_url ? `<img src="${p.avatar_url}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
+      <div class="avatar">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
       <div class="lb-info">
         <strong>${escapeHtml(p.username || 'Unknown')} ${p.is_premium ? '★' : ''}</strong>
         <div class="muted tiny">${lbMode === 'networth' ? 'Net worth' : 'Time played'}</div>
@@ -580,6 +625,23 @@ async function renderLeaderboard() {
   `).join('');
   $('#emptyLeaderboard').classList.toggle('hidden', list.length > 0);
 }
+
+// ---------- Username (Account menu) ----------
+$('#saveUsernameBtn')?.addEventListener('click', async () => {
+  if (!currentUser || !sb) return;
+  const msg = $('#accountMessage');
+  const name = $('#accountUsername').value.trim();
+  if (!/^[A-Za-z0-9_]{3,20}$/.test(name)) { msg.textContent = 'Username: 3–20 characters, letters/numbers/underscore only.'; return; }
+  if (name === currentUser.username) { msg.textContent = ''; return toast('That is already your username.'); }
+  const { data: taken } = await sb.from('profiles').select('id').ilike('username', name).neq('id', currentUser.id).maybeSingle();
+  if (taken) { msg.textContent = 'That username is taken.'; return; }
+  const { error } = await sb.from('profiles').update({ username: name }).eq('id', currentUser.id);
+  if (error) { msg.textContent = error.code === '23505' ? 'That username is taken.' : error.message; return; }
+  currentUser.username = name;
+  msg.textContent = '';
+  updateUIProfile();
+  toast('Username saved!');
+});
 
 // ---------- Profile image ----------
 $('#profileImage')?.addEventListener('change', async (e) => {

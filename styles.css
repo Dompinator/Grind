@@ -123,7 +123,9 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .coin-detail-hero { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
 .detail-price { font-size: 40px; font-weight: 800; }
 .chart-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 18px; margin: 18px 0; position: relative; }
-.chart-wrap canvas { width: 100%; height: 230px; display: block; }
+.chart-scroll { overflow-x: auto; overflow-y: hidden; margin-top: 10px; scrollbar-color: #4b3a66 transparent; }
+.chart-inner { position: relative; }
+.chart-inner canvas { display: block; }
 .trade-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 20px; }
 .trade-buttons { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 14px; }
 .amount-btn { background: #201a2d; border: 1px solid var(--line); border-radius: 10px; padding: 13px 5px; color: #d8cde8; font-weight: 700; cursor: pointer; transition: .15s; }
@@ -146,8 +148,14 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 /* Chart bubbles */
-.bubble { position: absolute; width: 30px; height: 30px; border-radius: 50%; border: 2px solid white; overflow: hidden; pointer-events: none; box-shadow: 0 3px 8px rgba(0,0,0,.45); background: #2a203b; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: white; }
-.bubble img { width: 100%; height: 100%; object-fit: cover; }
+.bubble { position: absolute; transform: translate(-50%, -100%); display: flex; flex-direction: column; align-items: center; gap: 3px; pointer-events: auto; cursor: default; }
+.bubble-pfp { width: 34px; height: 34px; border-radius: 50%; border: 2px solid #34d399; overflow: hidden; background: #2a203b; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: white; box-shadow: 0 3px 8px rgba(0,0,0,.45); }
+.bubble.sell .bubble-pfp { border-color: #f87171; }
+.bubble-pfp img { width: 100%; height: 100%; object-fit: cover; }
+.bubble-amt { background: #34d399; color: #052e16; font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 999px; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,.4); }
+.bubble.sell .bubble-amt { background: #f87171; color: #3b0a0a; }
+.username-edit { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 8px; }
+.username-edit label { flex: 1; margin: 0; }
 
 @media (max-width: 850px) {
   .sidebar { width: 72px; padding: 16px 8px; }
