@@ -25,6 +25,15 @@ let realtimeChannel = null;
 let sessionStart = null;
 let timeInterval = null;
 let chartZoom = 1.0;
+let selectedLbCoinId = null;
+let currentPage = 'feed';
+let adsCache = null;
+let adsCacheTime = 0;
+let adTimerInterval = null;
+let activeAdToken = 0;
+let lastAdName = null;
+let adLocked = false;
+let adClaimed = false;
 
 // ---------- Helpers ----------
 function money(n) { return '$' + Number(n || 0).toFixed(2); }
@@ -280,15 +289,19 @@ $('#logoutBtn')?.addEventListener('click', async () => {
 
 // ---------- Navigation ----------
 function showPage(page) {
-  $$('.page').forEach(p => p.classList.add('hidden'));
+  const wasAds = currentPage === 'ads';
+  if (wasAds && page !== 'ads') cleanupAds();
+  currentPage = page;
+  $('.page').forEach(p => p.classList.add('hidden'));
   const target = $('#page-' + page);
   if (target) target.classList.remove('hidden');
-  $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === page));
+  $('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   const titles = {
     feed: 'Discover currencies',
     create: 'Create currency',
     money: 'Your money',
     global: 'Global leaderboards',
+    ads: 'Ads',
     account: 'Account settings',
     notifications: 'Notifications',
     coin: 'Currency'
@@ -297,6 +310,7 @@ function showPage(page) {
   if (page === 'feed') renderFeed();
   if (page === 'money') renderMoney();
   if (page === 'global') renderLeaderboard();
+  if (page === 'ads' && !(wasAds && adLocked)) startAdsPage();
   if (page === 'account') updatePremiumSection();
   if (page === 'notifications' && isDompinator()) loadRequests();
 }
@@ -322,16 +336,57 @@ $$('.feed-tab').forEach(b => {
 // ---------- Coins & Feed ----------
 async function loadCoins() {
   if (!sb) return;
-  const { data, error } = await sb.from('coins').select('*').order('created_at', { ascending: false });
-  if (!error) coins = data || [];
+  let res = await sb.from('coins').select('*, profiles(username, is_premium)').order('created_at', { ascending: false });
+  if (res.error) {
+    res = await sb.from('coins').select('*').order('created_at', { ascending: false });
+  }
+  if (!res.error) {
+    const list = res.data || [];
+    const stats = new Map();
+    try {
+      const { data: tradeRows } = await sb.from('trades').select('coin_id, amount_usd, created_at');
+      const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+      (tradeRows || []).forEach(t => {
+        if (!t.coin_id) return;
+        const s = stats.get(t.coin_id) || { total: 0, recent: 0, volume: 0 };
+        s.total += 1;
+        s.volume += Number(t.amount_usd || 0);
+        if (t.created_at && new Date(t.created_at).getTime() >= dayAgo) s.recent += 1;
+        stats.set(t.coin_id, s);
+      });
+    } catch (e) {}
+    coins = list.map(c => {
+      const st = stats.get(c.id) || { total: 0, recent: 0, volume: 0 };
+      return {
+        ...c,
+        trade_count: st.total,
+        recent_trade_count: st.recent,
+        volume_usd: st.volume,
+        creator_is_premium: Boolean(c.profiles?.is_premium)
+      };
+    });
+  }
   renderFeed();
 }
 
 function renderFeed() {
   let list = [...coins];
+  if (feedMode === 'cheap') list.sort((a, b) => Number(a.price) - Number(b.price));
   if (feedMode === 'new') list.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  if (feedMode === 'popular') list.sort((a, b) => (b.trade_count || 0) - (a.trade_count || 0));
-  if (feedMode === 'cheap') list.sort((a, b) => a.price - b.price);
+  if (feedMode === 'trending') {
+    list.sort((a, b) => {
+      const scoreA = (a.recent_trade_count || 0) * 1000 + (a.trade_count || 0) * 100 + (a.volume_usd || 0) + Math.abs(Number(a.change_pct || 0));
+      const scoreB = (b.recent_trade_count || 0) * 1000 + (b.trade_count || 0) * 100 + (b.volume_usd || 0) + Math.abs(Number(b.change_pct || 0));
+      if (scoreB !== scoreA) return scoreB - scoreA;
+      return new Date(b.created_at) - new Date(a.created_at);
+    });
+  }
+  if (feedMode === 'expensive') list.sort((a, b) => Number(b.price) - Number(a.price));
+  if (feedMode === 'premium') {
+    list = list
+      .filter(c => Boolean(c.creator_is_premium || c.profiles?.is_premium))
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  }
   $('#feedGrid').innerHTML = list.map(c => `
     <article class="coin-card" data-coin="${c.id}">
       <div class="coin-top">
@@ -519,6 +574,13 @@ async function renderCoinDetail() {
         <button class="delete-coin-btn" id="deleteCoinBtn">🗑 Delete currency (Dompinator admin)</button>
       ` : ''}
     </div>
+    <div class="coin-leaderboard">
+      <div class="eyebrow purple-text" style="margin-bottom:4px;">CURRENCY LEADERBOARD</div>
+      <h4>Most spent on ${escapeHtml(c.ticker)}</h4>
+      <div id="coinLeaderboardList" class="leaderboard-list">
+        <p class="muted tiny">Loading leaderboard...</p>
+      </div>
+    </div>
   `;
 
   $$('[data-buy]').forEach(b => b.addEventListener('click', () => {
@@ -582,6 +644,12 @@ async function renderCoinDetail() {
   }
 
   drawChartWithBubbles(c, trades.slice().reverse());
+  getCoinSpendLeaderboard(c.id).then(rows => {
+    const el = $('#coinLeaderboardList');
+    if (el && selectedCoin && selectedCoin.id === c.id) {
+      el.innerHTML = renderSpendRows(rows, 'No one has bought this currency yet.');
+    }
+  });
 }
 
 // Market impact:
@@ -847,16 +915,91 @@ async function renderMoney() {
   $$('.holding').forEach(el => el.addEventListener('click', () => openCoin(el.dataset.coin)));
 }
 
-// ---------- Global Leaderboards ----------
+// ---------- Currency & Global Leaderboards ----------
+async function getCoinSpendLeaderboard(coinId) {
+  if (!sb || !coinId) return [];
+  const { data, error } = await sb
+    .from('trades')
+    .select('user_id, amount_usd, profiles(username, avatar_url, is_premium)')
+    .eq('coin_id', coinId)
+    .eq('type', 'buy');
+  if (error || !data) return [];
+
+  const totals = new Map();
+  for (const t of data) {
+    if (!t.user_id) continue;
+    const prev = totals.get(t.user_id) || {
+      user_id: t.user_id,
+      username: t.profiles?.username || 'Unknown',
+      avatar_url: t.profiles?.avatar_url || null,
+      is_premium: Boolean(t.profiles?.is_premium),
+      spent: 0,
+      buys: 0
+    };
+    prev.spent += Number(t.amount_usd || 0);
+    prev.buys += 1;
+    totals.set(t.user_id, prev);
+  }
+  return Array.from(totals.values()).sort((a, b) => b.spent - a.spent);
+}
+
+function renderSpendRows(rows, emptyText = 'No buyers yet.') {
+  if (!rows.length) {
+    return `<div class="empty-state" style="padding:24px 12px;"><p>${escapeHtml(emptyText)}</p></div>`;
+  }
+  return rows.map((p, i) => `
+    <div class="lb-row">
+      <div class="lb-rank ${i < 3 ? 'top3' : ''}">#${i + 1}</div>
+      <div class="avatar">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
+      <div class="lb-info">
+        <strong>${escapeHtml(p.username || 'Unknown')} ${p.is_premium ? '★' : ''}</strong>
+        <div class="muted tiny">${p.buys} buy${p.buys === 1 ? '' : 's'}</div>
+      </div>
+      <div class="lb-value">${money(p.spent)} spent</div>
+    </div>
+  `).join('');
+}
+
+$('#lbCurrencySelect')?.addEventListener('change', e => {
+  selectedLbCoinId = e.target.value;
+  renderLeaderboard();
+});
+
 async function renderLeaderboard() {
   if (!sb) return;
+  const bar = $('#lbCurrencyBar');
+  if (lbMode === 'currency') {
+    if (bar) bar.classList.remove('hidden');
+    if (!coins.length) await loadCoins();
+    const sel = $('#lbCurrencySelect');
+    if (sel) {
+      if (!coins.length) {
+        sel.innerHTML = '<option value="">No currencies yet</option>';
+        $('#leaderboardList').innerHTML = '';
+        $('#emptyLeaderboard').classList.remove('hidden');
+        return;
+      }
+      if (!selectedLbCoinId || !coins.some(c => c.id === selectedLbCoinId)) {
+        selectedLbCoinId = coins[0].id;
+      }
+      sel.innerHTML = coins.map(c =>
+        `<option value="${escapeHtml(c.id)}" ${c.id === selectedLbCoinId ? 'selected' : ''}>${escapeHtml(c.name)} (${escapeHtml(c.ticker)})</option>`
+      ).join('');
+    }
+    const rows = await getCoinSpendLeaderboard(selectedLbCoinId);
+    $('#leaderboardList').innerHTML = rows.length ? renderSpendRows(rows) : '';
+    $('#emptyLeaderboard').classList.toggle('hidden', rows.length > 0);
+    return;
+  }
+
+  if (bar) bar.classList.add('hidden');
   let query = sb.from('profiles').select('username, avatar_url, net_worth, time_played, is_premium');
   if (lbMode === 'networth') {
     query = query.order('net_worth', { ascending: false }).limit(100);
   } else {
     query = query.order('time_played', { ascending: false }).limit(100);
   }
-  const { data, error } = await query;
+  const { data } = await query;
   const list = data || [];
   $('#leaderboardList').innerHTML = list.map((p, i) => `
     <div class="lb-row">
@@ -871,6 +1014,283 @@ async function renderLeaderboard() {
   `).join('');
   $('#emptyLeaderboard').classList.toggle('hidden', list.length > 0);
 }
+
+// ---------- Ads ----------
+const AD_IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg', '.avif'];
+const AD_VIDEO_EXTS = ['.mp4', '.webm', '.mov', '.m4v'];
+
+function getAdType(filename) {
+  const lower = String(filename || '').toLowerCase();
+  if (AD_VIDEO_EXTS.some(ext => lower.endsWith(ext))) return 'video';
+  if (AD_IMAGE_EXTS.some(ext => lower.endsWith(ext))) return 'image';
+  return null;
+}
+
+function detectGitHubRepo() {
+  const host = window.location.hostname || '';
+  const parts = (window.location.pathname || '').split('/').filter(Boolean);
+  if (host.endsWith('.github.io')) {
+    const owner = host.replace('.github.io', '');
+    const repo = parts[0] || 'Grind';
+    return `${owner}/${repo}`;
+  }
+  return 'Dompinator/Grind';
+}
+
+async function loadAdsList(force = false) {
+  if (!force && adsCache && Date.now() - adsCacheTime < 60000) return adsCache;
+  let items = [];
+  const repo = detectGitHubRepo();
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/contents/ads`, { cache: "no-store" });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        items = data
+          .filter(f => f.type === 'file' && getAdType(f.name))
+          .map(f => ({
+            name: f.name,
+            type: getAdType(f.name),
+            url: 'ads/' + encodeURIComponent(f.name),
+            fallbackUrl: f.download_url || null
+          }));
+      }
+    }
+  } catch (e) {}
+
+  if (!items.length) {
+    try {
+      const res = await fetch('ads/manifest.json');
+      if (res.ok) {
+        const list = await res.json();
+        if (Array.isArray(list)) {
+          items = list
+            .filter(name => getAdType(name))
+            .map(name => ({
+              name,
+              type: getAdType(name),
+              url: 'ads/' + encodeURIComponent(name),
+              fallbackUrl: null
+            }));
+        }
+      }
+    } catch (e) {}
+  }
+
+  adsCache = items;
+  adsCacheTime = Date.now();
+  return items;
+}
+
+function cleanupAds() {
+  activeAdToken += 1;
+  adLocked = false;
+  if (adTimerInterval) {
+    clearInterval(adTimerInterval);
+    adTimerInterval = null;
+  }
+  const vid = $('#adVideo');
+  if (vid) {
+    try { vid.pause(); } catch (e) {}
+  }
+}
+
+async function startAdsPage() {
+  cleanupAds();
+  const stage = $('#adStage');
+  const statusEl = $('#adStatusText');
+  const skipBtn = $('#adSkipBtn');
+  const claimBtn = $('#adClaimBtn');
+  const nextBtn = $('#adNextBtn');
+  if (!stage) return;
+
+  skipBtn?.classList.add('hidden');
+  claimBtn?.classList.add('hidden');
+  nextBtn?.classList.add('hidden');
+  if (statusEl) statusEl.textContent = 'Finding an ad...';
+  stage.innerHTML = '<p class="muted">Loading random ad...</p>';
+
+  const list = await loadAdsList(true);
+  loadRandomAd(list);
+}
+
+function loadRandomAd(preloadedList) {
+  cleanupAds();
+  const token = activeAdToken;
+  const list = preloadedList || adsCache || [];
+  const stage = $('#adStage');
+  const statusEl = $('#adStatusText');
+  const skipBtn = $('#adSkipBtn');
+  const claimBtn = $('#adClaimBtn');
+  const nextBtn = $('#adNextBtn');
+  if (!stage) return;
+
+  skipBtn?.classList.add('hidden');
+  claimBtn?.classList.add('hidden');
+  nextBtn?.classList.add('hidden');
+
+  if (!list.length) {
+    stage.innerHTML = `
+      <div>
+        <div class="empty-icon">▶</div>
+        <h3>No ads in the ads/ folder yet</h3>
+        <p class="muted">Add .mp4 or image files into the <code>ads/</code> folder on GitHub to display ads here.</p>
+      </div>`;
+    if (statusEl) statusEl.textContent = '';
+    return;
+  }
+
+  let pool = list;
+  if (list.length > 1 && lastAdName) {
+    pool = list.filter(a => a.name !== lastAdName);
+  }
+  const ad = pool[Math.floor(Math.random() * pool.length)];
+  lastAdName = ad.name;
+
+  if (ad.type === 'image') {
+    adLocked = true;
+    let remaining = 60;
+    stage.innerHTML = `<img id="adImageEl" src="${escapeHtml(ad.url)}" alt="Ad">`;
+    const imgEl = $('#adImageEl');
+    if (imgEl && ad.fallbackUrl) {
+      imgEl.onerror = () => {
+        if (imgEl.dataset.fallbackTried) return;
+        imgEl.dataset.fallbackTried = '1';
+        imgEl.src = ad.fallbackUrl;
+      };
+    }
+
+    if (skipBtn) {
+      skipBtn.classList.remove('hidden');
+      skipBtn.disabled = true;
+      skipBtn.textContent = `Skip in ${remaining}s`;
+    }
+    if (statusEl) statusEl.textContent = `Watch this image ad for ${remaining} seconds before skipping.`;
+
+    adTimerInterval = setInterval(() => {
+      if (token !== activeAdToken || currentPage !== 'ads') {
+        clearInterval(adTimerInterval);
+        adTimerInterval = null;
+        return;
+      }
+      if (document.hidden) return;
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearInterval(adTimerInterval);
+        adTimerInterval = null;
+        adLocked = false;
+        if (skipBtn) {
+          skipBtn.disabled = false;
+          skipBtn.textContent = 'Skip Ad';
+        }
+        if (statusEl) statusEl.textContent = 'You can skip this ad now.';
+      } else {
+        if (skipBtn) skipBtn.textContent = `Skip in ${remaining}s`;
+        if (statusEl) statusEl.textContent = `Watch this image ad for ${remaining} seconds before skipping.`;
+      }
+    }, 1000);
+  } else {
+    adLocked = true;
+    adClaimed = false;
+    let videoEnded = false;
+    let maxWatchedTime = 0;
+
+    stage.innerHTML = `<video id="adVideo" src="${escapeHtml(ad.url)}" playsinline controls autoplay></video>`;
+    const video = $('#adVideo');
+    if (video) {
+      video.onerror = () => {
+        if (ad.fallbackUrl && !video.dataset.fallbackTried) {
+          video.dataset.fallbackTried = '1';
+          video.src = ad.fallbackUrl;
+          video.play().catch(() => {});
+          return;
+        }
+        adLocked = false;
+        if (statusEl) statusEl.textContent = 'Could not load video ad.';
+        nextBtn?.classList.remove('hidden');
+      };
+    }
+
+    if (claimBtn) {
+      claimBtn.classList.remove('hidden');
+      claimBtn.disabled = true;
+      claimBtn.textContent = 'Wait until video ends ($1.00)';
+    }
+    if (statusEl) statusEl.textContent = 'Watch the full video to claim your $1.00 reward.';
+
+    if (video) {
+      video.play().catch(() => {
+        video.muted = true;
+        video.play().catch(() => {});
+      });
+
+      video.addEventListener('timeupdate', () => {
+        if (token !== activeAdToken) return;
+        if (!video.seeking && video.currentTime > maxWatchedTime) {
+          maxWatchedTime = video.currentTime;
+        }
+        if (video.duration && !videoEnded) {
+          const left = Math.max(0, Math.ceil(video.duration - video.currentTime));
+          if (statusEl) statusEl.textContent = `Watch until the end to claim $1.00 (${left}s left)`;
+        }
+      });
+
+      video.addEventListener('seeking', () => {
+        if (video.currentTime > maxWatchedTime + 1.0) {
+          video.currentTime = maxWatchedTime;
+        }
+      });
+
+      video.addEventListener('ended', () => {
+        if (token !== activeAdToken) return;
+        videoEnded = true;
+        adLocked = false;
+        if (claimBtn) {
+          claimBtn.disabled = false;
+          claimBtn.textContent = 'Claim $1.00 Reward';
+          claimBtn.dataset.ready = '1';
+        }
+        if (statusEl) statusEl.textContent = 'Video finished! Claim your $1.00 reward.';
+      });
+    }
+  }
+}
+
+$('#adSkipBtn')?.addEventListener('click', () => {
+  if ($('#adSkipBtn').disabled) return;
+  loadRandomAd();
+});
+
+$('#adNextBtn')?.addEventListener('click', () => {
+  loadRandomAd();
+});
+
+$('#adClaimBtn')?.addEventListener('click', async () => {
+  const btn = $('#adClaimBtn');
+  if (!btn || btn.disabled || btn.dataset.ready !== '1' || adClaimed || !currentUser || !sb) return;
+  adClaimed = true;
+  btn.disabled = true;
+  btn.textContent = 'Claiming...';
+
+  const newCash = Number(currentUser.cash || 0) + 1;
+  const { error } = await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
+  if (error) {
+    adClaimed = false;
+    btn.disabled = false;
+    btn.textContent = 'Claim $1.00 Reward';
+    toast('Error claiming reward: ' + error.message);
+    return;
+  }
+
+  currentUser.cash = newCash;
+  updateUIProfile();
+  await updateNetWorth();
+  btn.textContent = 'Claimed $1.00 ✓';
+  $('#adNextBtn')?.classList.remove('hidden');
+  const statusEl = $('#adStatusText');
+  if (statusEl) statusEl.textContent = '$1.00 added to your cash!';
+  toast('Claimed $1.00 reward!');
+});
 
 // ---------- Username (Account menu) ----------
 $('#accountUsername')?.addEventListener('keydown', e => {
@@ -982,7 +1402,9 @@ function startRealtime() {
   realtimeChannel = sb.channel('grind-live')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'coins' }, () => loadCoins())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
-      if (selectedCoin) renderCoinDetail();
+      loadCoins();
+      if (selectedCoin && currentPage === 'coin') renderCoinDetail();
+      if (currentPage === 'global' && lbMode === 'currency') renderLeaderboard();
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, () => {
       if (currentUser) loadProfile();

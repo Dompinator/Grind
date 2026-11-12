@@ -38,6 +38,7 @@
         <button class="nav-btn" data-page="create"><span>＋</span> Create</button>
         <button class="nav-btn" data-page="money"><span>▣</span> Money</button>
         <button class="nav-btn" data-page="global"><span>🌍</span> Global</button>
+        <button class="nav-btn" data-page="ads"><span>▶</span> Ads</button>
         <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
         <button class="nav-btn hidden" id="navNotifications" data-page="notifications"><span>🔔</span> Notifications</button>
       </nav>
@@ -75,9 +76,11 @@
             <div class="hero-orb"><span>G</span></div>
           </div>
           <div class="feed-tabs">
-            <button class="feed-tab active" data-feed="new">Newest</button>
-            <button class="feed-tab" data-feed="popular">Popular</button>
             <button class="feed-tab" data-feed="cheap">Cheapest</button>
+            <button class="feed-tab active" data-feed="new">Newest</button>
+            <button class="feed-tab" data-feed="trending">Trending</button>
+            <button class="feed-tab" data-feed="expensive">Expensive</button>
+            <button class="feed-tab" data-feed="premium">Premium</button>
           </div>
           <div id="feedGrid" class="coin-grid"></div>
           <div id="emptyFeed" class="empty-state hidden">
@@ -149,10 +152,40 @@
           <div class="feed-tabs" id="leaderboardTabs">
             <button class="feed-tab active" data-lb="networth">Net Worth</button>
             <button class="feed-tab" data-lb="time">Time Played</button>
+            <button class="feed-tab" data-lb="currency">Currency</button>
+          </div>
+          <div id="lbCurrencyBar" class="lb-currency-bar hidden">
+            <label>Currency
+              <select id="lbCurrencySelect"></select>
+            </label>
           </div>
           <div id="leaderboardList" class="leaderboard-list"></div>
           <div id="emptyLeaderboard" class="empty-state hidden">
             <p>No players yet.</p>
+          </div>
+        </section>
+
+        <!-- ADS -->
+        <section id="page-ads" class="page hidden">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow purple-text">SPONSORED</div>
+              <h3>Ads</h3>
+              <p class="muted">Watch a random ad. Images can be skipped after 60s. Watch .mp4 ads to the end to claim a $1.00 reward.</p>
+            </div>
+          </div>
+          <div class="form-card ad-card">
+            <div id="adStage" class="ad-stage">
+              <p class="muted">Loading ad...</p>
+            </div>
+            <div class="ad-controls">
+              <div id="adStatusText" class="muted tiny"></div>
+              <div class="ad-actions">
+                <button class="primary-btn hidden" id="adSkipBtn" type="button" disabled>Skip in 60s</button>
+                <button class="buy-btn hidden" id="adClaimBtn" type="button" disabled>Wait until video ends ($1.00)</button>
+                <button class="zoom-btn hidden" id="adNextBtn" type="button">Next random ad</button>
+              </div>
+            </div>
           </div>
         </section>
 
