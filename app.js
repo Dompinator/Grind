@@ -48,13 +48,38 @@ function toast(msg) {
   setTimeout(() => el.classList.remove('show'), 2400);
 }
 function isDompinator() {
-  return currentUser && currentUser.username.toLowerCase() === 'dompinator';
+  return currentUser && currentUser.username && currentUser.username.toLowerCase() === 'dompinator';
 }
 function formatTime(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
+}
+
+// Compress uploaded images using canvas so any image works regardless of file size
+function compressImg(file, cb) {
+  const r = new FileReader();
+  r.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const max = 256;
+      let w = img.width, h = img.height;
+      if (w > h) {
+        if (w > max) { h = Math.round(h * max / w); w = max; }
+      } else {
+        if (h > max) { w = Math.round(w * max / h); h = max; }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      cb(canvas.toDataURL('image/jpeg', 0.85));
+    };
+    img.src = r.result;
+  };
+  r.readAsDataURL(file);
 }
 
 // ---------- Auth (robust) ----------
@@ -97,7 +122,7 @@ async function createProfile(user) {
     username,
     email: user.email,
     cash: 15,
-    is_premium: false,
+    is_premium: username.toLowerCase() === 'dompinator',
     net_worth: 15,
     time_played: 0
   });
@@ -169,6 +194,9 @@ function updateUIProfile() {
     $('#profilePreview').src = currentUser.avatar_url;
     $('#profilePreview').classList.remove('hidden');
     $('#profileInitial').classList.add('hidden');
+  } else {
+    $('#profilePreview').classList.add('hidden');
+    $('#profileInitial').classList.remove('hidden');
   }
   $('#navNotifications').classList.toggle('hidden', !isDompinator());
   updatePremiumSection();
@@ -288,16 +316,18 @@ function renderFeed() {
   $$('.coin-card').forEach(card => card.addEventListener('click', () => openCoin(card.dataset.coin)));
 }
 
+// Make preview box clickable to choose picture
+$('#coinPreview')?.addEventListener('click', () => {
+  $('#coinImage')?.click();
+});
+
 $('#coinImage')?.addEventListener('change', e => {
   const file = e.target.files[0];
   if (!file) return;
-  if (file.size > 400 * 1024) return toast('Image must be under 400 KB');
-  const r = new FileReader();
-  r.onload = () => {
-    pendingCoinImage = r.result;
-    $('#coinPreview').innerHTML = `<img src="${r.result}" style="width:100%;height:100%;object-fit:cover;border-radius:14px">`;
-  };
-  r.readAsDataURL(file);
+  compressImg(file, dataUrl => {
+    pendingCoinImage = dataUrl;
+    $('#coinPreview').innerHTML = `<img src="${dataUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:14px">`;
+  });
 });
 
 $('#createForm')?.addEventListener('submit', async (e) => {
@@ -305,14 +335,14 @@ $('#createForm')?.addEventListener('submit', async (e) => {
   if (!currentUser || !sb) return;
   const { count } = await sb.from('coins').select('*', { count: 'exact', head: true }).eq('creator_id', currentUser.id);
   const max = currentUser.is_premium ? 3 : 1;
-  if (count >= max) return $('#createMessage').textContent = `Max ${max} coin${max > 1 ? 's' : ''} for your account.`;
+  if (!isDompinator() && count !== null && count >= max) return $('#createMessage').textContent = `Max ${max} coin${max > 1 ? 's' : ''} for your account.`;
 
   const name = $('#coinName').value.trim();
   const ticker = $('#coinTicker').value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
   if (!ticker) return $('#createMessage').textContent = 'Invalid ticker.';
   const description = $('#coinDescription').value.trim();
 
-  const { error } = await sb.from('coins').insert({
+  const { data, error } = await sb.from('coins').insert({
     creator_id: currentUser.id,
     name,
     ticker,
@@ -320,16 +350,25 @@ $('#createForm')?.addEventListener('submit', async (e) => {
     image_url: pendingCoinImage,
     price: 1,
     change_pct: 0
-  });
+  }).select().maybeSingle();
 
-  if (error) return $('#createMessage').textContent = error.message;
+  if (error) {
+    $('#createMessage').textContent = error.message;
+    toast('Error: ' + error.message);
+    return;
+  }
+
   pendingCoinImage = null;
   $('#createForm').reset();
   $('#coinPreview').textContent = '＋';
   $('#createMessage').textContent = 'Currency created!';
   toast('Your coin is live!');
   await loadCoins();
-  showPage('feed');
+  if (data) {
+    openCoin(data.id);
+  } else {
+    showPage('feed');
+  }
 });
 
 // ---------- Coin detail + trading ----------
@@ -346,16 +385,23 @@ async function renderCoinDetail() {
   const { data: hold } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', c.id).maybeSingle();
   const shares = hold?.shares || 0;
 
-  const { data: trades } = await sb.from('trades')
+  const { data: dbTrades } = await sb.from('trades')
     .select('*, profiles(username, avatar_url)')
     .eq('coin_id', c.id)
     .order('created_at', { ascending: false })
     .limit(100);
 
+  // Combine with any local session trades
+  const tradeMap = new Map();
+  (dbTrades || []).forEach(t => tradeMap.set(t.id || (t.created_at + t.shares), t));
+  (c.localTrades || []).forEach(t => tradeMap.set(t.id || (t.created_at + t.shares), t));
+  const trades = Array.from(tradeMap.values());
+  trades.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+
   $('#coinDetail').innerHTML = `
     <div class="coin-detail-hero">
       <div class="coin-logo">${c.image_url ? `<img src="${escapeHtml(c.image_url)}">` : escapeHtml(c.ticker[0])}</div>
-      <div>
+      <div style="flex:1;">
         <h3>${escapeHtml(c.name)} <span class="muted">$${escapeHtml(c.ticker)}</span></h3>
         <p>${escapeHtml(c.description || '')}</p>
         <p class="muted tiny">Community created</p>
@@ -378,6 +424,9 @@ async function renderCoinDetail() {
       </div>
       <p class="muted tiny" style="margin-top:10px">You own: ${shares.toFixed(4)} shares · Worth ${money(shares * c.price)} · Cash ${money(currentUser.cash)}</p>
       <p class="form-message" id="tradeMessage"></p>
+      ${isDompinator() ? `
+        <button class="delete-coin-btn" id="deleteCoinBtn">🗑 Delete currency (Dompinator admin)</button>
+      ` : ''}
     </div>
   `;
 
@@ -389,16 +438,37 @@ async function renderCoinDetail() {
   $('#buyBtn')?.addEventListener('click', () => buy(c, selectedAmount));
   $('#sellBtn')?.addEventListener('click', () => sell(c, shares * 0.25));
 
-  drawChartWithBubbles(c, (trades || []).slice().reverse());
+  // Dompinator Delete Handler
+  if (isDompinator()) {
+    $('#deleteCoinBtn')?.addEventListener('click', async () => {
+      if (!confirm(`Are you sure you want to delete ${c.name} ($${c.ticker})? This action is permanent.`)) return;
+      try {
+        await sb.from('holdings').delete().eq('coin_id', c.id);
+        await sb.from('trades').delete().eq('coin_id', c.id);
+        const { error } = await sb.from('coins').delete().eq('id', c.id);
+        if (error) {
+          toast('Delete failed: ' + error.message);
+          return;
+        }
+      } catch (err) {
+        console.error('Delete error:', err);
+      }
+      coins = coins.filter(x => x.id !== c.id);
+      toast(`Deleted currency $${c.ticker}`);
+      await loadCoins();
+      showPage('feed');
+    });
+  }
+
+  drawChartWithBubbles(c, trades.slice().reverse());
 }
 
-// Market impact: every dollar moves the price by a fixed amount (1/LIQUIDITY),
-// so the RELATIVE change = amount / (price * LIQUIDITY).
-//   $10 buy at $1   -> +$0.67  = +67%   (huge)
-//   $5  buy at $50  -> +$0.33  = +0.67% (tiny)
-const LIQUIDITY = 15;
+// Market impact:
+// If price is low (e.g. 1), moves price by a HUGE difference!
+// If price is high (e.g. 50), moves price much less.
 function calculateImpact(amount, price) {
-  return amount / (Math.max(price, 0.0001) * LIQUIDITY);   // fraction, e.g. 0.67 = +67%
+  const p = Math.max(Number(price) || 1, 0.2);
+  return (amount * 0.3) / Math.pow(p, 2.2);
 }
 
 async function updateNetWorth() {
@@ -443,6 +513,23 @@ async function buy(coin, amount) {
   });
   if (tErr) toast('Trade log error: ' + tErr.message);
 
+  // Store local trade for immediate timeline bubble rendering
+  coin.localTrades = coin.localTrades || [];
+  coin.localTrades.unshift({
+    id: 'trd_' + Date.now(),
+    coin_id: coin.id,
+    user_id: currentUser.id,
+    type: 'buy',
+    amount_usd: amount,
+    shares,
+    price_after: newPrice,
+    created_at: new Date().toISOString(),
+    profiles: {
+      username: currentUser.username,
+      avatar_url: currentUser.avatar_url
+    }
+  });
+
   currentUser.cash = newCash;
   coin.price = newPrice;
   coin.change_pct = (coin.change_pct || 0) + impact * 100;
@@ -476,6 +563,22 @@ async function sell(coin, sharesToSell) {
     amount_usd: proceeds,
     shares: sellShares,
     price_after: newPrice
+  });
+
+  coin.localTrades = coin.localTrades || [];
+  coin.localTrades.unshift({
+    id: 'trd_' + Date.now(),
+    coin_id: coin.id,
+    user_id: currentUser.id,
+    type: 'sell',
+    amount_usd: proceeds,
+    shares: sellShares,
+    price_after: newPrice,
+    created_at: new Date().toISOString(),
+    profiles: {
+      username: currentUser.username,
+      avatar_url: currentUser.avatar_url
+    }
   });
 
   currentUser.cash = newCash;
@@ -558,15 +661,15 @@ function drawChartWithBubbles(coin, trades) {
     const t = p.trade;
     if (!t) return;
     const isBuy = t.type !== 'sell';
-    const name = t.profiles?.username || 'Someone';
-    const avatar = t.profiles?.avatar_url;
+    const name = t.profiles?.username || (t.user_id === currentUser?.id ? currentUser.username : 'Someone');
+    const avatar = t.profiles?.avatar_url || (t.user_id === currentUser?.id ? currentUser.avatar_url : null);
     const amt = Number(t.amount_usd || 0);
     const b = document.createElement('div');
     b.className = 'bubble ' + (isBuy ? 'buy' : 'sell');
     b.style.left = xAt(i) + 'px';
     b.style.top = (yAt(p.price) - 8) + 'px';
     b.innerHTML = `
-      <div class="bubble-pfp">${avatar ? `<img src="${escapeHtml(avatar)}" alt="">` : `<span>${escapeHtml(name[0].toUpperCase())}</span>`}</div>
+      <div class="bubble-pfp">${avatar ? `<img src="${escapeHtml(avatar)}">` : `<span>${escapeHtml(name[0].toUpperCase())}</span>`}</div>
       <div class="bubble-amt">${isBuy ? '' : '−'}${money(amt)}</div>`;
     b.title = `${name} ${isBuy ? 'bought' : 'sold'} ${money(amt)} · price after ${priceFmt(t.price_after)}`;
     inner.appendChild(b);
@@ -627,6 +730,13 @@ async function renderLeaderboard() {
 }
 
 // ---------- Username (Account menu) ----------
+$('#accountUsername')?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    $('#saveUsernameBtn')?.click();
+  }
+});
+
 $('#saveUsernameBtn')?.addEventListener('click', async () => {
   if (!currentUser || !sb) return;
   const msg = $('#accountMessage');
@@ -646,18 +756,17 @@ $('#saveUsernameBtn')?.addEventListener('click', async () => {
 // ---------- Profile image ----------
 $('#profileImage')?.addEventListener('change', async (e) => {
   const file = e.target.files[0];
-  if (!file || file.size > 400 * 1024) return toast('Image must be under 400 KB');
-  const r = new FileReader();
-  r.onload = async () => {
-    const dataUrl = r.result;
+  if (!file) return;
+  compressImg(file, async (dataUrl) => {
     const { error } = await sb.from('profiles').update({ avatar_url: dataUrl }).eq('id', currentUser.id);
     if (!error) {
       currentUser.avatar_url = dataUrl;
       updateUIProfile();
       toast('Profile picture updated!');
+    } else {
+      toast('Error saving picture: ' + error.message);
     }
-  };
-  r.readAsDataURL(file);
+  });
 });
 
 // ---------- Premium requests ----------

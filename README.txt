@@ -1,44 +1,44 @@
-GRIND v0.3.5 — Multiplayer Meme Currency Market (Premium + English)
-================================================================
+GRIND v0.3.5 — Multiplayer Meme Currency Market (GitHub Pages + Supabase)
+========================================================================
 
-Complete version for GitHub Pages + Supabase.
+Complete version ready for GitHub Pages & Supabase.
 
-NEW IN v0.3.5
-- Login / sign up with EMAIL + password only. A unique username is auto-created
-  from the email; change it in Account -> Username.
-- Price impact depends on price: relative change = amount / (price * 15).
-  $10 at $1 = +67%, $5 at $50 = +0.67%. (Tune LIQUIDITY in app.js.)
-- Every buy/sell shows a bubble on the coin timeline with the trader's profile
-  picture and the amount. Timeline scrolls sideways, works for every coin.
-- escapeHtml fixed (it did not escape anything before).
-- No new SQL needed.
+NEW IN THIS VERSION:
+- Currency Creation Bug Fix:
+  - Fixed coin creation errors and added automatic image compression.
+  - Clicking either the big preview box or the upload link opens the file chooser.
+  - Automatically downsamples high-resolution photos to lightweight WebP/JPEG data URLs
+    so any phone/desktop picture works without failing database limits.
+- Account Settings (Username & PFP):
+  - In the Account menu, enter your desired username and click "Save username" (or hit Enter).
+  - Upload your custom Profile Picture (PFP). It automatically resizes and updates across the UI.
+- Dynamic Price Sensitivity (Bonding Curve):
+  - When current price is low (e.g. around $1.00), buying shares makes a HUGE difference
+    (e.g. +$2.20 / +220% jump on a $10 buy).
+  - When current price is high (e.g. around $50.00), the exact same buy makes a tiny difference
+    (e.g. +$0.016 / +0.03% jump).
+  - High price creates liquidity resistance just like real memecoin bonding curves!
+- Timeline Trade Bubbles on Every Currency:
+  - Interactive price graph with horizontal scroll for every currency.
+  - Each trade plots a bubble on the timeline containing your PFP and the dollar amount (+/$).
+  - Hovering/clicking the bubble shows full trade info (trader, amount, shares, price after trade).
+  - Works on all community coins!
 
-NEW IN v0.3
-- Full English UI with premium design (gradients, shadows, better polish)
-- Global page with Top 100 leaderboards:
-  - Net Worth
-  - Time Played (automatically tracked while logged in)
-- Fixed auth tabs & button text
-- Net worth is updated after every trade
+------------------------------------------------------------------------
+SUPABASE SETUP & SQL PERMISSIONS
+------------------------------------------------------------------------
 
-SETUP
+Run this complete SQL in your Supabase SQL Editor:
 
-1. Run this SQL in Supabase SQL Editor (add the new columns if you already have the old tables):
-
--- Add columns if missing
-alter table profiles add column if not exists net_worth numeric default 15;
-alter table profiles add column if not exists time_played integer default 0;
-alter table profiles add column if not exists email text;
-
--- Full schema (safe to run if tables already exist with IF NOT EXISTS)
+-- 1. Table definitions
 create table if not exists profiles (
   id uuid primary key references auth.users on delete cascade,
   username text unique not null,
   email text,
   avatar_url text,
-  cash numeric default 15,
+  cash numeric default 50,
   is_premium boolean default false,
-  net_worth numeric default 15,
+  net_worth numeric default 50,
   time_played integer default 0,
   created_at timestamptz default now()
 );
@@ -81,7 +81,12 @@ create table if not exists premium_requests (
   created_at timestamptz default now()
 );
 
--- Policies (demo – tighten later)
+-- 2. IMPORTANT: Role Grants (Fixes Postgres Error 42501 "permission denied for table")
+grant usage on schema public to anon, authenticated;
+grant all on all tables in schema public to anon, authenticated;
+grant all on all sequences in schema public to anon, authenticated;
+
+-- 3. Row Level Security Policies
 alter table profiles enable row level security;
 alter table coins enable row level security;
 alter table trades enable row level security;
@@ -103,16 +108,14 @@ create policy "Own requests" on premium_requests for all using (auth.uid() = use
 create policy "Admin read requests" on premium_requests for select using (true);
 create policy "Admin update requests" on premium_requests for update using (true);
 
-2. Enable Realtime on coins and trades tables.
+------------------------------------------------------------------------
+GITHUB PAGES DEPLOYMENT
+------------------------------------------------------------------------
+Push these 4 files to your GitHub repository:
+- index.html
+- styles.css
+- app.js
+- README.txt
 
-3. In Authentication → Providers → Email:
-   - Turn OFF "Confirm email" for easier testing (otherwise users must confirm email).
-
-4. Upload index.html, app.js, styles.css to GitHub Pages.
-
-IMPORTANT
-- Create an account named exactly "Dompinator" to access the Notifications / admin page.
-- If login/signup fails, replace the SUPABASE_ANON_KEY in app.js with your real anon public key from Project Settings → API.
-- Images are stored as data URLs (keep under ~400 KB).
-
-Enjoy GRIND!
+In GitHub repo Settings -> Pages -> Source: select Deploy from branch (main / root).
+Your app is live on GitHub!
