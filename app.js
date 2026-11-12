@@ -1324,14 +1324,18 @@ function renderDailyModal(activeDay, claimedToday, currentStreak) {
       const day = idx + 1;
       const isClaimed = claimedToday ? day <= currentStreak : day < activeDay;
       const isCurrent = !claimedToday && day === activeDay;
+      const hasProOrBetter = Boolean(currentUser?.is_pro || currentUser?.is_premium);
       const rewardText = r === 'PRO'
-        ? ((currentUser?.is_pro || currentUser?.is_premium) ? '$30' : 'Free PRO')
+        ? (hasProOrBetter ? '$30' : 'Free PRO Tier Upgrade')
         : money(r * mult);
+      const subText = day === 7
+        ? (hasProOrBetter ? 'Bonus Cash' : '')
+        : (mult === 2 ? '2X Active' : 'Cash');
       return `
         <div class="daily-day ${day === 7 ? 'day-7' : ''} ${isClaimed ? 'claimed' : ''} ${isCurrent ? 'current' : ''}">
           <span class="muted tiny">DAY ${day}</span>
           <strong>${rewardText}</strong>
-          <span class="tiny">${day === 7 ? 'Gold Crown + 2X' : (mult === 2 ? '2X Active' : 'Cash')}</span>
+          ${subText ? `<span class="tiny">${subText}</span>` : ''}
         </div>`;
     }).join('');
   }
@@ -1348,7 +1352,7 @@ function renderDailyModal(activeDay, claimedToday, currentStreak) {
       claimBtn.disabled = false;
       const r = DAILY_REWARDS[activeDay - 1];
       const label = r === 'PRO'
-        ? ((currentUser?.is_pro || currentUser?.is_premium) ? 'Claim $30.00' : 'Claim Free PRO')
+        ? ((currentUser?.is_pro || currentUser?.is_premium) ? 'Claim $30.00' : 'Claim Free PRO Tier Upgrade')
         : `Claim ${money(r * mult)}`;
       claimBtn.textContent = label;
       if (statusEl) statusEl.textContent = `Day ${activeDay} of 7 ready to claim!`;
@@ -1383,7 +1387,7 @@ $('#claimDailyBtn')?.addEventListener('click', async () => {
     });
     if (error) {
       btn.disabled = false;
-      btn.textContent = 'Claim Free PRO';
+      btn.textContent = 'Claim Free PRO Tier Upgrade';
       toast('Error unlocking PRO: ' + error.message);
       return;
     }
