@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#100d1c">
+  <title>GRIND — The Meme Currency Market</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="authView" class="auth-shell">
+    <section class="auth-card">
+      <div class="brand-mark">G</div>
+      <div class="eyebrow">THE MEME CURRENCY MARKET</div>
+      <h1>GRIND<span>.</span></h1>
+      <p class="muted">Create, discover and trade community currencies.</p>
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-auth="login">Log in</button>
+        <button class="auth-tab" data-auth="signup">Sign up</button>
+      </div>
+      <form id="authForm">
+        <label>Username<input id="authUsername" autocomplete="username" minlength="3" maxlength="20" required placeholder="Your username"></label>
+        <label id="emailLabel" class="hidden">Email<input id="authEmail" type="email" autocomplete="email" placeholder="you@example.com"></label>
+        <label>Password<input id="authPassword" type="password" autocomplete="current-password" minlength="4" required placeholder="Password"></label>
+        <button class="primary-btn full" id="authSubmit" type="submit">Log in</button>
+      </form>
+      <p class="tiny muted">Version 0.1 · Local demo. Accounts are not yet online.</p>
+      <p id="authMessage" class="form-message" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <div id="appView" class="app hidden">
+    <aside class="sidebar">
+      <a class="brand" href="#" aria-label="GRIND home"><span class="brand-icon">G</span><span>GRIND<span class="brand-dot">.</span></span></a>
+      <div class="side-label">MARKET</div>
+      <nav class="main-nav">
+        <button class="nav-btn active" data-page="feed"><span>◈</span> Feed</button>
+        <button class="nav-btn" data-page="create"><span>＋</span> Create</button>
+        <button class="nav-btn" data-page="money"><span>▣</span> Money</button>
+        <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="mini-profile"><div class="avatar" id="sideAvatar">G</div><div><strong id="sideName">Trader</strong><small>GRIND member</small></div></div>
+        <button id="logoutBtn" class="logout-btn">↗ Log out</button>
+        <div class="version">GRIND v0.1</div>
+      </div>
+    </aside>
+
+    <section class="main-area">
+      <header class="topbar">
+        <div><div class="eyebrow">WELCOME TO THE MARKET</div><h2 id="pageTitle">Discover currencies</h2></div>
+        <div class="top-actions"><div class="cash-pill"><span class="cash-dot"></span><span id="topCash">$15.00</span><small> CASH</small></div><button class="top-avatar" id="topAvatar">G</button></div>
+      </header>
+      <div class="content">
+        <section id="page-feed" class="page">
+          <div class="hero-panel">
+            <div><div class="eyebrow purple-text">YOUR MARKETPLACE</div><h3>Find your next<br><em>big thing.</em></h3><p>Explore currencies created by the GRIND community.</p></div>
+            <div class="hero-orb"><span>G</span></div>
+          </div>
+          <div class="section-head"><div><h3>Explore currencies</h3><p class="muted">Discover what's happening across the market.</p></div></div>
+          <div class="feed-tabs"><button class="feed-tab active" data-feed="new">New</button><button class="feed-tab" data-feed="popular">Popular</button><button class="feed-tab" data-feed="safe">Safe</button></div>
+          <div id="feedGrid" class="coin-grid"></div>
+          <div id="emptyFeed" class="empty-state hidden"><div class="empty-icon">✳</div><h3>No currencies yet</h3><p>Be the first to create one for the community.</p><button class="primary-btn" data-goto="create">Create a currency</button></div>
+        </section>
+
+        <section id="page-create" class="page hidden">
+          <div class="section-head"><div><div class="eyebrow purple-text">MAKE YOUR MARK</div><h3>Create a currency</h3><p class="muted">Launch a community currency. Normal accounts can create one.</p></div></div>
+          <div class="form-card">
+            <form id="createForm">
+              <div class="upload-row">
+                <label class="image-upload" for="coinImage"><span id="coinPreview">＋</span><small>Upload logo</small></label>
+                <div><strong>Currency picture</strong><p class="muted tiny">Choose an image people will recognize in the feed and currency page.</p><label class="upload-link" for="coinImage">Choose picture</label><input id="coinImage" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden></div>
+              </div>
+              <div class="form-grid">
+                <label>Currency name<input id="coinName" maxlength="28" required placeholder="e.g. Banana Coin"></label>
+                <label>Ticker symbol<input id="coinTicker" maxlength="8" required placeholder="e.g. BANA"></label>
+              </div>
+              <label>Description<textarea id="coinDescription" maxlength="180" rows="3" placeholder="What's your currency about?"></textarea></label>
+              <div class="form-grid">
+                <label>Starting price <div class="input-prefix"><span>$</span><input id="coinPrice" type="number" min="0.01" max="100000" step="0.01" value="1.00" required></div></label>
+                <label>Total supply<input id="coinSupply" type="number" min="1" max="1000000000" step="1" value="100000" required></label>
+              </div>
+              <div class="notice">Your currency picture will appear on its card in Feed and on its currency page.</div>
+              <button class="primary-btn full" type="submit">Create currency <span>↗</span></button>
+              <p id="createMessage" class="form-message"></p>
+            </form>
+          </div>
+        </section>
+
+        <section id="page-money" class="page hidden">
+          <div class="section-head"><div><div class="eyebrow purple-text">YOUR PORTFOLIO</div><h3>Your money</h3><p class="muted">See the currencies you own and what they're worth.</p></div></div>
+          <div class="portfolio-summary"><div><span class="muted tiny">AVAILABLE CASH</span><strong id="moneyCash">$15.00</strong></div><div><span class="muted tiny">PORTFOLIO VALUE</span><strong id="portfolioValue">$0.00</strong></div><div><span class="muted tiny">TOTAL VALUE</span><strong id="totalValue">$15.00</strong></div></div>
+          <div class="section-head compact"><h3>Your currencies</h3></div>
+          <div id="holdingsList" class="holdings-list"></div>
+          <div id="emptyHoldings" class="empty-state"><div class="empty-icon">▣</div><h3>Your portfolio is empty</h3><p>Explore the feed and find a currency to buy.</p><button class="primary-btn" data-goto="feed">Explore currencies</button></div>
+        </section>
+
+        <section id="page-account" class="page hidden">
+          <div class="section-head"><div><div class="eyebrow purple-text">YOUR PROFILE</div><h3>Account settings</h3><p class="muted">Make your GRIND profile yours.</p></div></div>
+          <div class="form-card">
+            <form id="accountForm">
+              <div class="profile-edit"><label class="profile-upload" for="profileImage"><img id="profilePreview" alt="" class="hidden"><span id="profileInitial">G</span><i>＋</i></label><div><strong>Profile picture</strong><p class="muted tiny">PNG, JPG or WEBP. Used beside your username.</p><label class="upload-link" for="profileImage">Upload picture</label><input id="profileImage" type="file" accept="image/png,image/jpeg,image/webp" hidden></div></div>
+              <label>Account name<input id="accountName" minlength="3" maxlength="20" required></label>
+              <button class="primary-btn full" type="submit">Save changes</button>
+              <p id="accountMessage" class="form-message"></p>
+            </form>
+          </div>
+        </section>
+
+        <section id="page-coin" class="page hidden">
+          <button class="back-link" id="backToFeed">← Back to feed</button>
+          <div id="coinDetail"></div>
+        </section>
+      </div>
+    </section>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>
