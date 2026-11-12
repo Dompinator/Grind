@@ -132,7 +132,7 @@ async function createProfile(user) {
     email: user.email,
     cash: 15,
     is_premium: username.toLowerCase() === 'dompinator',
-    net_worth: 0,
+    net_worth: 15,
     time_played: 0
   });
 }
@@ -189,7 +189,7 @@ async function loadProfile() {
         email: user.email,
         cash: 15,
         is_premium: (user.email || '').toLowerCase().includes('dompinator'),
-        net_worth: 0,
+        net_worth: 15,
         time_played: 0
       };
       updateUIProfile();
@@ -251,7 +251,6 @@ function enterApp() {
   showPage('feed');
   startRealtime();
   loadCoins();
-  updateNetWorth();
   startTimeTracking();
 }
 
@@ -373,6 +372,7 @@ async function loadCoins() {
     });
   }
   renderFeed();
+  if (currentUser) updateNetWorth();
 }
 
 function renderFeed() {
@@ -499,6 +499,7 @@ $('#createForm')?.addEventListener('submit', async (e) => {
     if (msgEl) msgEl.textContent = 'Currency created!';
     toast('Your coin is live!');
     await loadCoins();
+    await updateNetWorth();
     if (data && data.id) {
       openCoin(data.id);
     } else {
@@ -671,12 +672,20 @@ function calculateImpact(amount, price) {
 
 async function updateNetWorth() {
   if (!currentUser || !sb) return;
-  const { data: holds } = await sb.from('holdings').select('shares, coins(price)').eq('user_id', currentUser.id);
-  const portValue = (holds || []).reduce((s, h) => s + (h.shares || 0) * (h.coins?.price || 0), 0);
-  const nw = portValue;
+  const [{ data: holds }, { data: myCoins }] = await Promise.all([
+    sb.from('holdings').select('shares, coins(price)').eq('user_id', currentUser.id),
+    sb.from('coins').select('price').eq('creator_id', currentUser.id)
+  ]);
+  const holdingsValue = (holds || []).reduce((s, h) => s + Number(h.shares || 0) * Number(h.coins?.price || 0), 0);
+  const createdValue = (myCoins || []).reduce((s, c) => s + Number(c.price || 0), 0);
+  const portValue = holdingsValue + createdValue;
+  const nw = Number(currentUser.cash || 0) + portValue;
   currentUser.net_worth = nw;
   await sb.from('profiles').update({ net_worth: nw }).eq('id', currentUser.id);
-  $('#totalValue').textContent = money(nw);
+  const portEl = $('#portfolioValue');
+  if (portEl) portEl.textContent = money(portValue);
+  const totalEl = $('#totalValue');
+  if (totalEl) totalEl.textContent = money(nw);
 }
 
 async function freshCoin(coin) {
@@ -901,30 +910,53 @@ function drawChartWithBubbles(coin, trades) {
 // ---------- Money / Portfolio ----------
 async function renderMoney() {
   if (!currentUser || !sb) return;
-  const { data: holds } = await sb.from('holdings').select('*, coins(name, ticker, price, image_url)').eq('user_id', currentUser.id).gt('shares', 0);
+  const [{ data: holds }, { data: myCoins }] = await Promise.all([
+    sb.from('holdings').select('*, coins(name, ticker, price, image_url)').eq('user_id', currentUser.id).gt('shares', 0),
+    sb.from('coins').select('*').eq('creator_id', currentUser.id).order('created_at', { ascending: false })
+  ]);
   const list = holds || [];
-  const value = list.reduce((s, h) => s + h.shares * (h.coins?.price || 0), 0);
+  const created = myCoins || [];
+  const holdingsValue = list.reduce((s, h) => s + Number(h.shares || 0) * Number(h.coins?.price || 0), 0);
+  const createdValue = created.reduce((s, c) => s + Number(c.price || 0), 0);
+  const value = holdingsValue + createdValue;
+  const nw = Number(currentUser.cash || 0) + value;
+  currentUser.net_worth = nw;
+  await sb.from('profiles').update({ net_worth: nw }).eq('id', currentUser.id);
   $('#portfolioValue').textContent = money(value);
-  $('#totalValue').textContent = money(value);
-  if (Math.abs((currentUser.net_worth || 0) - value) > 0.001) {
-    currentUser.net_worth = value;
-    sb.from('profiles').update({ net_worth: value }).eq('id', currentUser.id);
-  }
-  $('#holdingsList').innerHTML = list.map(h => `
+  $('#totalValue').textContent = money(nw);
+
+  const createdHtml = created.map(c => `
+    <div class="holding" data-coin="${c.id}">
+      <div class="holding-left">
+        <div class="coin-logo">${c.image_url ? `<img src="${escapeHtml(c.image_url)}">` : escapeHtml((c.ticker || '?')[0])}</div>
+        <div>
+          <strong>${escapeHtml(c.name || '')}</strong>
+          <div class="muted tiny">Your created currency · $${escapeHtml(c.ticker || '')}</div>
+        </div>
+      </div>
+      <div class="holding-right">
+        <strong>${money(c.price || 0)}</strong>
+      </div>
+    </div>
+  `).join('');
+
+  const holdsHtml = list.map(h => `
     <div class="holding" data-coin="${h.coin_id}">
       <div class="holding-left">
         <div class="coin-logo">${h.coins?.image_url ? `<img src="${escapeHtml(h.coins.image_url)}">` : (h.coins?.ticker || '?')[0]}</div>
         <div>
           <strong>${escapeHtml(h.coins?.name || '')}</strong>
-          <div class="muted tiny">${h.shares.toFixed(4)} $${escapeHtml(h.coins?.ticker || '')}</div>
+          <div class="muted tiny">${Number(h.shares || 0).toFixed(4)} $${escapeHtml(h.coins?.ticker || '')}</div>
         </div>
       </div>
       <div class="holding-right">
-        <strong>${money(h.shares * (h.coins?.price || 0))}</strong>
+        <strong>${money(Number(h.shares || 0) * Number(h.coins?.price || 0))}</strong>
       </div>
     </div>
   `).join('');
-  $('#emptyHoldings').classList.toggle('hidden', list.length > 0);
+
+  $('#holdingsList').innerHTML = createdHtml + holdsHtml;
+  $('#emptyHoldings').classList.toggle('hidden', created.length > 0 || list.length > 0);
   $$('.holding').forEach(el => el.addEventListener('click', () => openCoin(el.dataset.coin)));
 }
 
@@ -975,6 +1007,7 @@ function renderSpendRows(rows, emptyText = 'No buyers yet.') {
 
 async function renderLeaderboard() {
   if (!sb) return;
+  if (currentUser) await updateNetWorth();
   let query = sb.from('profiles').select('username, avatar_url, net_worth, time_played, is_premium');
   if (lbMode === 'networth') {
     query = query.order('net_worth', { ascending: false }).limit(100);
