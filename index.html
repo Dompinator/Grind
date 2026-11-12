@@ -15,9 +15,22 @@
       <div class="eyebrow">THE MEME CURRENCY MARKET</div>
       <h1>GRIND<span>.</span></h1>
       <p class="muted">Create, discover and trade community currencies. Live with everyone.</p>
+      <script>
+        window.setAuthMode = function(mode) {
+          document.querySelectorAll('.auth-tab').forEach(b => b.classList.toggle('active', b.dataset.auth === mode));
+          const btn = document.getElementById('authSubmit');
+          if (btn) btn.textContent = mode === 'signup' ? 'Create account' : 'Log in';
+          const emailLabel = document.getElementById('emailLabel');
+          const emailInput = document.getElementById('authEmail');
+          if (emailLabel) emailLabel.classList.toggle('hidden', mode !== 'signup');
+          if (emailInput) emailInput.required = mode === 'signup';
+          const msg = document.getElementById('authMessage');
+          if (msg) msg.textContent = '';
+        };
+      </script>
       <div class="auth-tabs">
-        <button type="button" class="auth-tab active" data-auth="login">Log in</button>
-        <button type="button" class="auth-tab" data-auth="signup">Sign up</button>
+        <button type="button" class="auth-tab active" data-auth="login" onclick="window.setAuthMode('login')">Log in</button>
+        <button type="button" class="auth-tab" data-auth="signup" onclick="window.setAuthMode('signup')">Sign up</button>
       </div>
       <form id="authForm">
         <label>Username<input id="authUsername" autocomplete="username" minlength="3" maxlength="20" required placeholder="Your username"></label>
@@ -25,7 +38,7 @@
         <label>Password<input id="authPassword" type="password" autocomplete="current-password" minlength="4" required placeholder="Password"></label>
         <button class="primary-btn full" id="authSubmit" type="submit">Log in</button>
       </form>
-      <p class="tiny muted">GRIND v0.3 · Multiplayer · Premium feel</p>
+      <p class="tiny muted">GRIND v0.3.1 · Click Sign up to create account</p>
       <p id="authMessage" class="form-message" aria-live="polite"></p>
     </section>
   </main>

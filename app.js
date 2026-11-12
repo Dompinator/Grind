@@ -66,6 +66,7 @@ function setAuthMode(mode) {
   const msg = document.getElementById('authMessage');
   if (msg) msg.textContent = '';
 }
+window.setAuthMode = setAuthMode;
 
 // Attach listeners immediately and also on DOM ready
 function attachAuthListeners() {
