@@ -33,6 +33,13 @@ let activeAdToken = 0;
 let lastAdName = null;
 let adLocked = false;
 let adClaimed = false;
+let feedSearchQuery = '';
+let proUserIds = new Set();
+let dailyStateCache = null;
+
+const DAILY_REWARDS = [5, 5, 10, 12, 13, 15, 'PRO'];
+const GOLD_CROWN_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 18h18v2H3v-2zm0-2L1 6l5.5 4.5L12 4l5.5 6.5L23 6l-2 10H3z"/></svg>`;
+const BLUE_STAR_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2l2.9 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 7.1-1.01L12 2z"/></svg>`;
 
 // ---------- Helpers ----------
 function money(n) { return '$' + Number(n || 0).toFixed(2); }
@@ -58,6 +65,24 @@ function toast(msg) {
 }
 function isDompinator() {
   return currentUser && currentUser.username && currentUser.username.toLowerCase() === 'dompinator';
+}
+function getUserTier(p) {
+  if (!p) return 'member';
+  if (p.is_premium) return 'premium';
+  if (p.is_pro || (p.id && proUserIds.has(p.id)) || (p.user_id && proUserIds.has(p.user_id))) return 'pro';
+  return 'member';
+}
+function tierLabel(p) {
+  const t = getUserTier(p);
+  if (t === 'premium') return 'Premium';
+  if (t === 'pro') return 'PRO';
+  return 'Member';
+}
+function tierBadgeHtml(p) {
+  const t = getUserTier(p);
+  if (t === 'premium') return `<span class="tier-icon tier-premium" title="Premium">${BLUE_STAR_SVG}</span>`;
+  if (t === 'pro') return `<span class="tier-icon tier-pro" title="PRO">${GOLD_CROWN_SVG}</span>`;
+  return '';
 }
 function formatTime(seconds) {
   const h = Math.floor(seconds / 3600);
@@ -199,13 +224,23 @@ async function loadProfile() {
   }
   currentUser = data;
 
-  // Auto-sync approved premium status if an admin approved their request
+  // Auto-sync approved premium & PRO status
+  await loadProUserIds();
+  currentUser.is_pro = Boolean(
+    currentUser.is_pro ||
+    proUserIds.has(user.id) ||
+    localStorage.getItem('grind_pro_' + user.id) === '1'
+  );
+  if (currentUser.is_pro) proUserIds.add(user.id);
+
   if (!currentUser.is_premium) {
     try {
       const { data: approvedReq } = await sb.from('premium_requests')
-        .select('id')
+        .select('id, reason')
         .eq('user_id', user.id)
         .eq('status', 'approved')
+        .neq('reason', '__PRO_TIER__')
+        .limit(1)
         .maybeSingle();
 
       if (approvedReq) {
@@ -223,8 +258,8 @@ async function loadProfile() {
 
 function updateUIProfile() {
   if (!currentUser) return;
-  $('#sideName').textContent = currentUser.username;
-  $('#sidePremium').textContent = currentUser.is_premium ? 'Premium' : 'Member';
+  $('#sideName').innerHTML = `${escapeHtml(currentUser.username)}${tierBadgeHtml(currentUser)}`;
+  $('#sidePremium').textContent = tierLabel(currentUser);
   const av = currentUser.avatar_url ? `<img src="${escapeHtml(currentUser.avatar_url)}">` : escapeHtml(currentUser.username[0].toUpperCase());
   $('#sideAvatar').innerHTML = av;
   $('#topAvatar').innerHTML = av;
@@ -252,6 +287,7 @@ function enterApp() {
   startRealtime();
   loadCoins();
   startTimeTracking();
+  checkDailyLogin();
 }
 
 function startTimeTracking() {
@@ -334,12 +370,39 @@ $$('.feed-tab').forEach(b => {
   }
 });
 
+$('#feedSearch')?.addEventListener('input', e => {
+  feedSearchQuery = (e.target.value || '').trim().toLowerCase();
+  renderFeed();
+});
+
+async function loadProUserIds() {
+  if (!sb) return;
+  try {
+    const { data } = await sb
+      .from('premium_requests')
+      .select('user_id')
+      .eq('status', 'approved')
+      .eq('reason', '__PRO_TIER__');
+    proUserIds = new Set((data || []).map(r => r.user_id).filter(Boolean));
+    if (currentUser && localStorage.getItem('grind_pro_' + currentUser.id) === '1') {
+      proUserIds.add(currentUser.id);
+    }
+  } catch (e) {}
+}
+
 // ---------- Coins & Feed ----------
 async function loadCoins() {
   if (!sb) return;
-  const { data, error } = await sb.from('coins').select('*').order('created_at', { ascending: false });
-  if (!error) {
-    const list = data || [];
+  await loadProUserIds();
+  let res = await sb
+    .from('coins')
+    .select('*, profiles!coins_creator_id_fkey(id, username, avatar_url, is_premium)')
+    .order('created_at', { ascending: false });
+  if (res.error) {
+    res = await sb.from('coins').select('*').order('created_at', { ascending: false });
+  }
+  if (!res.error) {
+    const list = res.data || [];
     const stats = new Map();
     try {
       const { data: buyRows } = await sb
@@ -377,6 +440,12 @@ async function loadCoins() {
 
 function renderFeed() {
   let list = [...coins];
+  if (feedSearchQuery) {
+    list = list.filter(c =>
+      (c.name || '').toLowerCase().includes(feedSearchQuery) ||
+      (c.ticker || '').toLowerCase().includes(feedSearchQuery)
+    );
+  }
   if (feedMode === 'cheap') list.sort((a, b) => Number(a.price) - Number(b.price));
   if (feedMode === 'new') list.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   if (feedMode === 'trending') {
@@ -394,7 +463,11 @@ function renderFeed() {
     });
   }
   if (feedMode === 'expensive') list.sort((a, b) => Number(b.price) - Number(a.price));
-  $('#feedGrid').innerHTML = list.map(c => `
+  $('#feedGrid').innerHTML = list.map(c => {
+    const creator = c.profiles;
+    const creatorName = creator?.username || 'Community';
+    const creatorObj = creator ? { ...creator, id: c.creator_id } : { id: c.creator_id };
+    return `
     <article class="coin-card" data-coin="${c.id}">
       <div class="coin-top">
         <div class="coin-logo">${c.image_url ? `<img src="${escapeHtml(c.image_url)}">` : escapeHtml(c.ticker[0])}</div>
@@ -406,11 +479,21 @@ function renderFeed() {
       <div class="coin-price">${priceFmt(c.price)}</div>
       <div class="coin-change ${(c.change_pct || 0) >= 0 ? 'up' : 'down'}">${(c.change_pct || 0) >= 0 ? '↗ +' : '↘ '}${Number(c.change_pct || 0).toFixed(2)}% today</div>
       <p class="coin-desc">${escapeHtml(c.description || 'Community currency.')}</p>
-    </article>
-  `).join('');
+      ${c.creator_id ? `
+        <button type="button" class="creator-chip" data-profile="${escapeHtml(c.creator_id)}">
+          <span class="creator-mini-av">${creator?.avatar_url ? `<img src="${escapeHtml(creator.avatar_url)}">` : escapeHtml(creatorName[0].toUpperCase())}</span>
+          <span>${escapeHtml(creatorName)}${tierBadgeHtml(creatorObj)}</span>
+        </button>
+      ` : ''}
+    </article>`;
+  }).join('');
   $('#emptyFeed').classList.toggle('hidden', list.length > 0);
   $('#feedGrid').classList.toggle('hidden', list.length === 0);
   $$('.coin-card').forEach(card => card.addEventListener('click', () => openCoin(card.dataset.coin)));
+  $$('#feedGrid [data-profile]').forEach(btn => btn.addEventListener('click', e => {
+    e.stopPropagation();
+    openProfileModal(btn.dataset.profile);
+  }));
 }
 
 // Make preview box clickable to choose picture
@@ -465,10 +548,10 @@ $('#createForm')?.addEventListener('submit', async (e) => {
     if (!isDompinator()) {
       try {
         const { count, error: countErr } = await sb.from('coins').select('*', { count: 'exact', head: true }).eq('creator_id', currentUser.id);
-        const max = currentUser.is_premium ? 3 : 1;
+        const max = currentUser.is_premium ? 3 : (currentUser.is_pro ? 2 : 1);
         if (!countErr && count !== null && count >= max) {
-          if (msgEl) msgEl.textContent = `Max ${max} coin${max > 1 ? 's' : ''} for your account.`;
-          toast(`Max ${max} coin${max > 1 ? 's' : ''} for your account.`);
+          if (msgEl) msgEl.textContent = `Max ${max} coin${max > 1 ? 's' : ''} for your ${tierLabel(currentUser)} account.`;
+          toast(`Max ${max} coin${max > 1 ? 's' : ''} for your ${tierLabel(currentUser)} account.`);
           if (btn) btn.disabled = false;
           return;
         }
@@ -541,13 +624,22 @@ async function renderCoinDetail() {
   const trades = Array.from(tradeMap.values());
   trades.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
+  const creator = c.profiles;
+  const creatorName = creator?.username || 'Community';
+  const creatorObj = creator ? { ...creator, id: c.creator_id } : { id: c.creator_id };
+
   $('#coinDetail').innerHTML = `
     <div class="coin-detail-hero">
       <div class="coin-logo">${c.image_url ? `<img src="${escapeHtml(c.image_url)}">` : escapeHtml(c.ticker[0])}</div>
       <div style="flex:1;">
         <h3>${escapeHtml(c.name)} <span class="muted">$${escapeHtml(c.ticker)}</span></h3>
         <p>${escapeHtml(c.description || '')}</p>
-        <p class="muted tiny">Community created</p>
+        ${c.creator_id ? `
+          <button type="button" class="creator-chip" data-profile="${escapeHtml(c.creator_id)}">
+            <span class="creator-mini-av">${creator?.avatar_url ? `<img src="${escapeHtml(creator.avatar_url)}">` : escapeHtml(creatorName[0].toUpperCase())}</span>
+            <span>Created by ${escapeHtml(creatorName)}${tierBadgeHtml(creatorObj)}</span>
+          </button>
+        ` : `<p class="muted tiny">Community created</p>`}
       </div>
     </div>
     <div class="detail-price">${priceFmt(c.price)}</div>
@@ -575,7 +667,11 @@ async function renderCoinDetail() {
         </div>
         <div class="trade-actions">
           <button class="buy-btn" id="buyBtn">Buy ${money(selectedAmount)}</button>
-          <button class="sell-btn" id="sellBtn">Sell 25%</button>
+          <div class="sell-group">
+            <button class="sell-btn" data-sell="0.25">Sell 25%</button>
+            <button class="sell-btn" data-sell="0.5">Sell 50%</button>
+            <button class="sell-btn" data-sell="1">Sell 100%</button>
+          </div>
         </div>
         <p class="muted tiny" style="margin-top:10px">You own: ${shares.toFixed(4)} shares · Worth ${money(shares * c.price)} · Cash ${money(currentUser.cash)}</p>
         <p class="form-message" id="tradeMessage"></p>
@@ -593,13 +689,14 @@ async function renderCoinDetail() {
     </div>
   `;
 
+  $$('#coinDetail [data-profile]').forEach(btn => btn.addEventListener('click', () => openProfileModal(btn.dataset.profile)));
   $$('[data-buy]').forEach(b => b.addEventListener('click', () => {
     selectedAmount = Number(b.dataset.buy);
     $$('[data-buy]').forEach(x => x.classList.toggle('active', x === b));
     $('#buyBtn').textContent = `Buy ${money(selectedAmount)}`;
   }));
   $('#buyBtn')?.addEventListener('click', () => buy(c, selectedAmount));
-  $('#sellBtn')?.addEventListener('click', () => sell(c, shares * 0.25));
+  $$('[data-sell]').forEach(b => b.addEventListener('click', () => sell(c, shares * Number(b.dataset.sell))));
 
   // Zoom Button Controls
   const updateChart = () => drawChartWithBubbles(c, trades.slice().reverse());
@@ -658,6 +755,7 @@ async function renderCoinDetail() {
     const el = $('#coinLeaderboardList');
     if (el && selectedCoin && selectedCoin.id === c.id) {
       el.innerHTML = renderSpendRows(rows, 'No one has bought this currency yet.');
+      $$('#coinLeaderboardList [data-profile]').forEach(btn => btn.addEventListener('click', () => openProfileModal(btn.dataset.profile)));
     }
   });
 }
@@ -760,9 +858,10 @@ async function sell(coin, sharesToSell) {
   const newPrice = Math.max(0.01, coin.price / (1 + impact));   // never drops below 0 / over 100%
   const newCash = currentUser.cash + proceeds;
 
+  const remainingShares = owned - sellShares < 1e-8 ? 0 : owned - sellShares;
   await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
   await sb.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) - (1 - newPrice / coin.price) * 100 }).eq('id', coin.id);
-  await sb.from('holdings').update({ shares: owned - sellShares }).eq('user_id', currentUser.id).eq('coin_id', coin.id);
+  await sb.from('holdings').update({ shares: remainingShares }).eq('user_id', currentUser.id).eq('coin_id', coin.id);
   await sb.from('trades').insert({
     coin_id: coin.id,
     user_id: currentUser.id,
@@ -907,12 +1006,13 @@ function drawChartWithBubbles(coin, trades) {
   }
 }
 
-// ---------- Money / Portfolio ----------
+// ---------- Money / Portfolio (Personal P&L is strictly private to currentUser) ----------
 async function renderMoney() {
   if (!currentUser || !sb) return;
-  const [{ data: holds }, { data: myCoins }] = await Promise.all([
+  const [{ data: holds }, { data: myCoins }, { data: myTrades }] = await Promise.all([
     sb.from('holdings').select('*, coins(name, ticker, price, image_url)').eq('user_id', currentUser.id).gt('shares', 0),
-    sb.from('coins').select('*').eq('creator_id', currentUser.id).order('created_at', { ascending: false })
+    sb.from('coins').select('*').eq('creator_id', currentUser.id).order('created_at', { ascending: false }),
+    sb.from('trades').select('coin_id, type, amount_usd').eq('user_id', currentUser.id)
   ]);
   const list = holds || [];
   const created = myCoins || [];
@@ -924,6 +1024,38 @@ async function renderMoney() {
   await sb.from('profiles').update({ net_worth: nw }).eq('id', currentUser.id);
   $('#portfolioValue').textContent = money(value);
   $('#totalValue').textContent = money(nw);
+
+  // Personal private spend / return / P&L per coin (never visible to anyone else)
+  const personalStats = new Map();
+  let totalSpent = 0;
+  let totalReturned = 0;
+  (myTrades || []).forEach(t => {
+    const amt = Number(t.amount_usd || 0);
+    const s = personalStats.get(t.coin_id) || { spent: 0, sold: 0 };
+    if (t.type === 'sell') {
+      s.sold += amt;
+      totalReturned += amt;
+    } else {
+      s.spent += amt;
+      totalSpent += amt;
+    }
+    personalStats.set(t.coin_id, s);
+  });
+
+  const pnlSummaryEl = $('#personalPnlSummary');
+  if (pnlSummaryEl) {
+    if (totalSpent > 0 || totalReturned > 0) {
+      const totalPnl = (holdingsValue + totalReturned) - totalSpent;
+      const cls = totalPnl >= 0 ? 'pnl-up' : 'pnl-down';
+      const sign = totalPnl >= 0 ? '+' : '−';
+      pnlSummaryEl.innerHTML = `
+        <span><strong>Personal Stats (Private):</strong> Spent ${money(totalSpent)} · Returned ${money(totalReturned)}</span>
+        <span class="${cls}">Net P&amp;L: ${sign}${money(Math.abs(totalPnl))}</span>`;
+      pnlSummaryEl.classList.remove('hidden');
+    } else {
+      pnlSummaryEl.classList.add('hidden');
+    }
+  }
 
   const createdHtml = created.map(c => `
     <div class="holding" data-coin="${c.id}">
@@ -940,20 +1072,31 @@ async function renderMoney() {
     </div>
   `).join('');
 
-  const holdsHtml = list.map(h => `
+  const holdsHtml = list.map(h => {
+    const curVal = Number(h.shares || 0) * Number(h.coins?.price || 0);
+    const st = personalStats.get(h.coin_id);
+    let pnlLine = '';
+    if (st && (st.spent > 0 || st.sold > 0)) {
+      const pnl = (curVal + st.sold) - st.spent;
+      const cls = pnl >= 0 ? 'pnl-up' : 'pnl-down';
+      const sign = pnl >= 0 ? '+' : '−';
+      pnlLine = `<div class="tiny"><span class="muted">Spent ${money(st.spent)} · Sold ${money(st.sold)} · </span><span class="${cls}">${sign}${money(Math.abs(pnl))}</span></div>`;
+    }
+    return `
     <div class="holding" data-coin="${h.coin_id}">
       <div class="holding-left">
         <div class="coin-logo">${h.coins?.image_url ? `<img src="${escapeHtml(h.coins.image_url)}">` : (h.coins?.ticker || '?')[0]}</div>
         <div>
           <strong>${escapeHtml(h.coins?.name || '')}</strong>
           <div class="muted tiny">${Number(h.shares || 0).toFixed(4)} $${escapeHtml(h.coins?.ticker || '')}</div>
+          ${pnlLine}
         </div>
       </div>
       <div class="holding-right">
-        <strong>${money(Number(h.shares || 0) * Number(h.coins?.price || 0))}</strong>
+        <strong>${money(curVal)}</strong>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 
   $('#holdingsList').innerHTML = createdHtml + holdsHtml;
   $('#emptyHoldings').classList.toggle('hidden', created.length > 0 || list.length > 0);
@@ -974,6 +1117,7 @@ async function getCoinSpendLeaderboard(coinId) {
   for (const t of data) {
     if (!t.user_id) continue;
     const prev = totals.get(t.user_id) || {
+      id: t.user_id,
       user_id: t.user_id,
       username: t.profiles?.username || 'Unknown',
       avatar_url: t.profiles?.avatar_url || null,
@@ -997,7 +1141,7 @@ function renderSpendRows(rows, emptyText = 'No buyers yet.') {
       <div class="lb-rank ${i < 3 ? 'top3' : ''}">#${i + 1}</div>
       <div class="avatar">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
       <div class="lb-info">
-        <strong>${escapeHtml(p.username || 'Unknown')} ${p.is_premium ? '★' : ''}</strong>
+        <strong class="profile-link" data-profile="${escapeHtml(p.user_id)}">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}</strong>
         <div class="muted tiny">${p.buys} buy${p.buys === 1 ? '' : 's'}</div>
       </div>
       <div class="lb-value">${money(p.spent)} spent</div>
@@ -1007,8 +1151,9 @@ function renderSpendRows(rows, emptyText = 'No buyers yet.') {
 
 async function renderLeaderboard() {
   if (!sb) return;
+  await loadProUserIds();
   if (currentUser) await updateNetWorth();
-  let query = sb.from('profiles').select('username, avatar_url, net_worth, time_played, is_premium');
+  let query = sb.from('profiles').select('id, username, avatar_url, net_worth, time_played, is_premium');
   if (lbMode === 'networth') {
     query = query.order('net_worth', { ascending: false }).limit(100);
   } else {
@@ -1021,14 +1166,261 @@ async function renderLeaderboard() {
       <div class="lb-rank ${i < 3 ? 'top3' : ''}">#${i + 1}</div>
       <div class="avatar">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
       <div class="lb-info">
-        <strong>${escapeHtml(p.username || 'Unknown')} ${p.is_premium ? '★' : ''}</strong>
+        <strong class="profile-link" data-profile="${escapeHtml(p.id)}">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}</strong>
         <div class="muted tiny">${lbMode === 'networth' ? 'Net worth' : 'Time played'}</div>
       </div>
       <div class="lb-value">${lbMode === 'networth' ? money(p.net_worth || 0) : formatTime(p.time_played || 0)}</div>
     </div>
   `).join('');
   $('#emptyLeaderboard').classList.toggle('hidden', list.length > 0);
+  $$('#leaderboardList [data-profile]').forEach(el => el.addEventListener('click', () => openProfileModal(el.dataset.profile)));
 }
+
+// ---------- Profile Preview Modal (Public stats only) ----------
+async function openProfileModal(userId) {
+  if (!sb || !userId) return;
+  const modal = $('#profileModal');
+  const body = $('#profileModalBody');
+  if (!modal || !body) return;
+  body.innerHTML = '<p class="muted tiny">Loading profile...</p>';
+  modal.classList.remove('hidden');
+
+  await loadProUserIds();
+  const { data: p } = await sb
+    .from('profiles')
+    .select('id, username, avatar_url, net_worth, time_played, is_premium')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (!p) {
+    body.innerHTML = '<p class="muted">Trader not found.</p>';
+    return;
+  }
+
+  const userCoins = coins.filter(c => c.creator_id === p.id);
+  body.innerHTML = `
+    <div class="profile-modal-hero">
+      <div class="avatar" style="width:58px;height:58px;font-size:22px;">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
+      <div>
+        <h3 style="margin:0;">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}</h3>
+        <div class="muted tiny">${tierLabel(p)}</div>
+      </div>
+    </div>
+    <div class="profile-modal-stats">
+      <div><span class="muted tiny">NET WORTH</span><strong>${money(p.net_worth || 0)}</strong></div>
+      <div><span class="muted tiny">TIME PLAYED</span><strong>${formatTime(p.time_played || 0)}</strong></div>
+    </div>
+    <div>
+      <div class="eyebrow purple-text" style="margin-bottom:8px;">CREATED CURRENCIES (${userCoins.length})</div>
+      ${userCoins.length ? `
+        <div class="profile-coins-list">
+          ${userCoins.map(c => `
+            <div class="holding" data-modal-coin="${escapeHtml(c.id)}">
+              <div class="holding-left">
+                <div class="coin-logo" style="width:38px;height:38px;">${c.image_url ? `<img src="${escapeHtml(c.image_url)}">` : escapeHtml((c.ticker || '?')[0])}</div>
+                <div>
+                  <strong>${escapeHtml(c.name)}</strong>
+                  <div class="muted tiny">$${escapeHtml(c.ticker)}</div>
+                </div>
+              </div>
+              <div class="holding-right"><strong>${priceFmt(c.price)}</strong></div>
+            </div>
+          `).join('')}
+        </div>
+      ` : '<p class="muted tiny">No created currencies yet.</p>'}
+    </div>
+  `;
+
+  $$('[data-modal-coin]').forEach(el => el.addEventListener('click', () => {
+    modal.classList.add('hidden');
+    openCoin(el.dataset.modalCoin);
+  }));
+}
+
+$('#closeProfileBtn')?.addEventListener('click', () => $('#profileModal')?.classList.add('hidden'));
+$('#profileModal')?.addEventListener('click', e => {
+  if (e.target === $('#profileModal')) $('#profileModal').classList.add('hidden');
+});
+
+// ---------- Daily Login Rewards ----------
+function getLocalDateKey(offsetDays = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+async function getDailyState() {
+  if (!currentUser) return { lastDate: null, streak: 0 };
+  let local = { lastDate: null, streak: 0 };
+  try {
+    const raw = localStorage.getItem('grind_daily_' + currentUser.id);
+    if (raw) local = JSON.parse(raw);
+  } catch (e) {}
+
+  let remote = { lastDate: null, streak: 0 };
+  if (sb) {
+    try {
+      const { data } = await sb
+        .from('premium_requests')
+        .select('reason')
+        .eq('user_id', currentUser.id)
+        .like('reason', '__DAILY__:%')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (data?.reason) {
+        const parts = data.reason.split(':');
+        if (parts.length >= 3) {
+          remote = { lastDate: parts[1], streak: Number(parts[2]) || 0 };
+        }
+      }
+    } catch (e) {}
+  }
+
+  if (remote.lastDate && (!local.lastDate || remote.lastDate >= local.lastDate)) {
+    return remote;
+  }
+  return local;
+}
+
+async function checkDailyLogin(forceOpen = false) {
+  if (!currentUser) return;
+  const state = await getDailyState();
+  dailyStateCache = state;
+  const today = getLocalDateKey(0);
+  const yesterday = getLocalDateKey(-1);
+  const claimedToday = state.lastDate === today;
+
+  if (claimedToday && !forceOpen) return;
+
+  let activeDay;
+  if (claimedToday) {
+    activeDay = state.streak || 1;
+  } else if (state.lastDate === yesterday && state.streak >= 1 && state.streak <= 7) {
+    activeDay = state.streak === 7 ? 1 : state.streak + 1;
+  } else {
+    activeDay = 1;
+  }
+
+  renderDailyModal(activeDay, claimedToday, state.streak || 0);
+  $('#dailyModal')?.classList.remove('hidden');
+}
+
+function renderDailyModal(activeDay, claimedToday, currentStreak) {
+  const mult = (currentUser?.is_pro || currentUser?.is_premium) ? 2 : 1;
+  const sub = $('#dailySubtitle');
+  if (sub) {
+    sub.textContent = mult === 2
+      ? `${tierLabel(currentUser)} perk active: 2X daily cash rewards!`
+      : 'Come back every day for bigger rewards and a free PRO upgrade on Day 7!';
+  }
+
+  const grid = $('#dailyGrid');
+  if (grid) {
+    grid.innerHTML = DAILY_REWARDS.map((r, idx) => {
+      const day = idx + 1;
+      const isClaimed = claimedToday ? day <= currentStreak : day < activeDay;
+      const isCurrent = !claimedToday && day === activeDay;
+      const rewardText = r === 'PRO'
+        ? ((currentUser?.is_pro || currentUser?.is_premium) ? '$30' : 'Free PRO')
+        : money(r * mult);
+      return `
+        <div class="daily-day ${day === 7 ? 'day-7' : ''} ${isClaimed ? 'claimed' : ''} ${isCurrent ? 'current' : ''}">
+          <span class="muted tiny">DAY ${day}</span>
+          <strong>${rewardText}</strong>
+          <span class="tiny">${day === 7 ? 'Gold Crown + 2X' : (mult === 2 ? '2X Active' : 'Cash')}</span>
+        </div>`;
+    }).join('');
+  }
+
+  const claimBtn = $('#claimDailyBtn');
+  const statusEl = $('#dailyStatusText');
+  if (claimBtn) {
+    claimBtn.dataset.day = String(activeDay);
+    if (claimedToday) {
+      claimBtn.disabled = true;
+      claimBtn.textContent = 'Claimed today ✓';
+      if (statusEl) statusEl.textContent = 'Come back tomorrow for your next reward!';
+    } else {
+      claimBtn.disabled = false;
+      const r = DAILY_REWARDS[activeDay - 1];
+      const label = r === 'PRO'
+        ? ((currentUser?.is_pro || currentUser?.is_premium) ? 'Claim $30.00' : 'Claim Free PRO')
+        : `Claim ${money(r * mult)}`;
+      claimBtn.textContent = label;
+      if (statusEl) statusEl.textContent = `Day ${activeDay} of 7 ready to claim!`;
+    }
+  }
+}
+
+$('#openDailyBtn')?.addEventListener('click', () => checkDailyLogin(true));
+$('#closeDailyBtn')?.addEventListener('click', () => $('#dailyModal')?.classList.add('hidden'));
+$('#dailyModal')?.addEventListener('click', e => {
+  if (e.target === $('#dailyModal')) $('#dailyModal').classList.add('hidden');
+});
+
+$('#claimDailyBtn')?.addEventListener('click', async () => {
+  const btn = $('#claimDailyBtn');
+  if (!btn || btn.disabled || !currentUser || !sb) return;
+  const day = Number(btn.dataset.day || 1);
+  const today = getLocalDateKey(0);
+  if (dailyStateCache?.lastDate === today) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Claiming...';
+
+  const mult = (currentUser.is_pro || currentUser.is_premium) ? 2 : 1;
+  const r = DAILY_REWARDS[day - 1];
+
+  if (r === 'PRO' && !currentUser.is_pro && !currentUser.is_premium) {
+    const { error } = await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: '__PRO_TIER__',
+      status: 'approved'
+    });
+    if (error) {
+      btn.disabled = false;
+      btn.textContent = 'Claim Free PRO';
+      toast('Error unlocking PRO: ' + error.message);
+      return;
+    }
+    localStorage.setItem('grind_pro_' + currentUser.id, '1');
+    currentUser.is_pro = true;
+    proUserIds.add(currentUser.id);
+    toast('Day 7 claimed! You unlocked PRO tier!');
+  } else {
+    const cashGain = r === 'PRO' ? 30 : r * mult;
+    const newCash = Number(currentUser.cash || 0) + cashGain;
+    const { error } = await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
+    if (error) {
+      btn.disabled = false;
+      btn.textContent = 'Claim reward';
+      toast('Error claiming reward: ' + error.message);
+      return;
+    }
+    currentUser.cash = newCash;
+    await updateNetWorth();
+    toast(`Day ${day} reward claimed: +${money(cashGain)}!`);
+  }
+
+  const newState = { lastDate: today, streak: day };
+  dailyStateCache = newState;
+  try {
+    localStorage.setItem('grind_daily_' + currentUser.id, JSON.stringify(newState));
+  } catch (e) {}
+  await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: `__DAILY__:${today}:${day}`,
+    status: 'denied'
+  });
+
+  updateUIProfile();
+  renderFeed();
+  $('#dailyModal')?.classList.add('hidden');
+});
 
 // ---------- Ads ----------
 const AD_IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg', '.avif'];
@@ -1351,10 +1743,13 @@ function updatePremiumSection() {
   const statusEl = $('#premiumStatus');
   const form = $('#requestForm');
   if (currentUser.is_premium) {
-    statusEl.textContent = 'You have Premium! You can create up to 3 coins.';
+    statusEl.textContent = 'You have Premium! Max 3 coins, Blue Star icon, and 2X daily rewards.';
     form.classList.add('hidden');
+  } else if (currentUser.is_pro) {
+    statusEl.textContent = 'You have PRO! Max 2 coins, Gold Crown icon, and 2X daily rewards. Request Premium for 3 coins and Blue Star.';
+    form.classList.remove('hidden');
   } else {
-    statusEl.textContent = 'Normal account: max 1 coin. Request Premium for up to 3.';
+    statusEl.textContent = 'Member account: max 1 coin. Unlock PRO on Daily Login Day 7 or request Premium for up to 3.';
     form.classList.remove('hidden');
   }
 }

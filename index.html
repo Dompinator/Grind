@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — The Meme Currency Market</title>
-  <link rel="stylesheet" href="styles.css?v=5">
+  <link rel="stylesheet" href="styles.css?v=6">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -75,11 +75,14 @@
             </div>
             <div class="hero-orb"><span>G</span></div>
           </div>
-          <div class="feed-tabs">
-            <button class="feed-tab" data-feed="cheap">Cheapest</button>
-            <button class="feed-tab active" data-feed="new">Newest</button>
-            <button class="feed-tab" data-feed="trending">Trending</button>
-            <button class="feed-tab" data-feed="expensive">Expensive</button>
+          <div class="feed-toolbar">
+            <div class="feed-tabs">
+              <button class="feed-tab" data-feed="cheap">Cheapest</button>
+              <button class="feed-tab active" data-feed="new">Newest</button>
+              <button class="feed-tab" data-feed="trending">Trending</button>
+              <button class="feed-tab" data-feed="expensive">Expensive</button>
+            </div>
+            <input id="feedSearch" class="feed-search" type="search" placeholder="Search coins or $ticker...">
           </div>
           <div id="feedGrid" class="coin-grid"></div>
           <div id="emptyFeed" class="empty-state hidden">
@@ -96,7 +99,7 @@
             <div>
               <div class="eyebrow purple-text">NEW CURRENCY</div>
               <h3>Create your coin</h3>
-              <p class="muted">Normal accounts: max 1 coin. Premium: max 3. Always starts at $1.</p>
+              <p class="muted">Member: max 1 coin. PRO: max 2. Premium: max 3. Always starts at $1.</p>
             </div>
           </div>
           <div class="form-card">
@@ -130,6 +133,7 @@
             <div><span class="muted tiny">PORTFOLIO VALUE</span><strong id="portfolioValue">$0.00</strong></div>
             <div><span class="muted tiny">NET WORTH</span><strong id="totalValue">$15.00</strong></div>
           </div>
+          <div id="personalPnlSummary" class="personal-pnl-bar hidden"></div>
           <div id="holdingsList" class="holdings-list"></div>
           <div id="emptyHoldings" class="empty-state">
             <div class="empty-icon">▣</div>
@@ -206,8 +210,14 @@
             <p id="accountMessage" class="form-message"></p>
             <hr style="border-color:#3a2e4a;margin:20px 0">
             <div id="premiumSection">
-              <h4>Premium</h4>
+              <h4>Account Tier &amp; Perks</h4>
               <p class="muted tiny" id="premiumStatus">Loading...</p>
+              <div class="tier-list muted tiny">
+                <div><strong>Member:</strong> Max 1 coin</div>
+                <div><strong>PRO:</strong> Max 2 coins, Gold Crown icon, 2X daily rewards</div>
+                <div><strong>Premium:</strong> Max 3 coins, Blue Star icon, all PRO perks</div>
+              </div>
+              <button class="zoom-btn" id="openDailyBtn" type="button" style="margin:10px 0 14px;">View Daily Login</button>
               <div id="requestForm" class="hidden">
                 <label>Why do you want Premium?<textarea id="premiumReason" rows="2" maxlength="300" placeholder="Write a short reason..."></textarea></label>
                 <button class="primary-btn" id="sendRequestBtn" type="button">Send request</button>
@@ -240,7 +250,37 @@
     </section>
   </div>
 
+  <!-- DAILY LOGIN MODAL -->
+  <div id="dailyModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card daily-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow purple-text">DAILY LOGIN</div>
+          <h3>Daily Rewards</h3>
+          <p class="muted tiny" id="dailySubtitle">Come back every day for bigger rewards and a free PRO upgrade on Day 7!</p>
+        </div>
+        <button class="zoom-btn" id="closeDailyBtn" type="button">✕</button>
+      </div>
+      <div id="dailyGrid" class="daily-grid"></div>
+      <div class="daily-footer">
+        <span id="dailyStatusText" class="muted tiny"></span>
+        <button class="primary-btn" id="claimDailyBtn" type="button">Claim reward</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PROFILE PREVIEW MODAL -->
+  <div id="profileModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card profile-modal-card">
+      <div class="modal-head">
+        <div class="eyebrow purple-text">TRADER PROFILE</div>
+        <button class="zoom-btn" id="closeProfileBtn" type="button">✕</button>
+      </div>
+      <div id="profileModalBody"></div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>
