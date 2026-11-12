@@ -132,7 +132,7 @@ async function createProfile(user) {
     email: user.email,
     cash: 15,
     is_premium: username.toLowerCase() === 'dompinator',
-    net_worth: 15,
+    net_worth: 0,
     time_played: 0
   });
 }
@@ -189,7 +189,7 @@ async function loadProfile() {
         email: user.email,
         cash: 15,
         is_premium: (user.email || '').toLowerCase().includes('dompinator'),
-        net_worth: 15,
+        net_worth: 0,
         time_played: 0
       };
       updateUIProfile();
@@ -251,6 +251,7 @@ function enterApp() {
   showPage('feed');
   startRealtime();
   loadCoins();
+  updateNetWorth();
   startTimeTracking();
 }
 
@@ -672,7 +673,7 @@ async function updateNetWorth() {
   if (!currentUser || !sb) return;
   const { data: holds } = await sb.from('holdings').select('shares, coins(price)').eq('user_id', currentUser.id);
   const portValue = (holds || []).reduce((s, h) => s + (h.shares || 0) * (h.coins?.price || 0), 0);
-  const nw = currentUser.cash + portValue;
+  const nw = portValue;
   currentUser.net_worth = nw;
   await sb.from('profiles').update({ net_worth: nw }).eq('id', currentUser.id);
   $('#totalValue').textContent = money(nw);
@@ -904,7 +905,11 @@ async function renderMoney() {
   const list = holds || [];
   const value = list.reduce((s, h) => s + h.shares * (h.coins?.price || 0), 0);
   $('#portfolioValue').textContent = money(value);
-  $('#totalValue').textContent = money(value + currentUser.cash);
+  $('#totalValue').textContent = money(value);
+  if (Math.abs((currentUser.net_worth || 0) - value) > 0.001) {
+    currentUser.net_worth = value;
+    sb.from('profiles').update({ net_worth: value }).eq('id', currentUser.id);
+  }
   $('#holdingsList').innerHTML = list.map(h => `
     <div class="holding" data-coin="${h.coin_id}">
       <div class="holding-left">
