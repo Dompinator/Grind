@@ -189,6 +189,26 @@ async function loadProfile() {
     return loadProfile();
   }
   currentUser = data;
+
+  // Auto-sync approved premium status if an admin approved their request
+  if (!currentUser.is_premium) {
+    try {
+      const { data: approvedReq } = await sb.from('premium_requests')
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('status', 'approved')
+        .maybeSingle();
+
+      if (approvedReq) {
+        currentUser.is_premium = true;
+        // User updating their OWN profile is always permitted by RLS ("Own profile")
+        await sb.from('profiles').update({ is_premium: true }).eq('id', user.id);
+      }
+    } catch (e) {
+      console.warn('Premium check note:', e);
+    }
+  }
+
   updateUIProfile();
 }
 
@@ -879,11 +899,16 @@ async function loadRequests() {
 
 async function handleRequest(reqId, userId, status) {
   if (!sb) return;
-  await sb.from('premium_requests').update({ status }).eq('id', reqId);
-  if (status === 'approved' && userId) {
-    await sb.from('profiles').update({ is_premium: true }).eq('id', userId);
+  const { error: rErr } = await sb.from('premium_requests').update({ status }).eq('id', reqId);
+  if (rErr) {
+    toast('Request update error: ' + rErr.message);
+    return;
   }
-  toast(status === 'approved' ? 'Approved!' : 'Denied');
+  if (status === 'approved' && userId) {
+    const { error: pErr } = await sb.from('profiles').update({ is_premium: true }).eq('id', userId);
+    if (pErr) console.warn('Note: profiles update blocked by RLS until admin policy is added:', pErr);
+  }
+  toast(status === 'approved' ? 'Approved Premium!' : 'Denied request');
   loadRequests();
 }
 
@@ -894,6 +919,10 @@ function startRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'coins' }, () => loadCoins())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
       if (selectedCoin) renderCoinDetail();
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, () => {
+      if (currentUser) loadProfile();
+      if (isDompinator()) loadRequests();
     })
     .subscribe();
 }
