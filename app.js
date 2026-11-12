@@ -4,9 +4,9 @@
 const SUPABASE_URL = 'https://zcrkywpyjrofphxnxtlc.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_PKSD898kwnfs6msIDiW9_g_yeoTBduD';
 
-let supabase;
+let sb;
 try {
-  supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 } catch (e) {
   console.error('Supabase init failed:', e);
 }
@@ -79,7 +79,7 @@ document.addEventListener('DOMContentLoaded', attachAuthListeners);
 
 $('#authForm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!supabase) return authMsg('Supabase not ready. Check your API key in app.js.');
+  if (!sb) return authMsg('Supabase not ready. Check your API key in app.js.');
   const username = $('#authUsername').value.trim();
   const password = $('#authPassword').value;
   const mode = document.querySelector('.auth-tab.active')?.dataset.auth || 'login';
@@ -89,12 +89,12 @@ $('#authForm')?.addEventListener('submit', async (e) => {
     const email = $('#authEmail').value.trim();
     if (!email || !email.includes('@')) return authMsg('Please enter a valid email.');
     
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    const { data, error } = await sb.auth.signUp({ email, password });
     if (error) return authMsg(error.message);
     if (!data.user) return authMsg('Signup failed. Try again.');
 
     // Create profile
-    const { error: pErr } = await supabase.from('profiles').insert({
+    const { error: pErr } = await sb.from('profiles').insert({
       id: data.user.id,
       username: username,
       email: email,
@@ -106,7 +106,7 @@ $('#authForm')?.addEventListener('submit', async (e) => {
     if (pErr) return authMsg('Profile error: ' + pErr.message);
 
     // Try to log in immediately
-    const { error: loginErr } = await supabase.auth.signInWithPassword({ email, password });
+    const { error: loginErr } = await sb.auth.signInWithPassword({ email, password });
     if (loginErr) {
       authMsg('Account created! Check your email to confirm, then log in.');
       setAuthMode('login');
@@ -119,11 +119,11 @@ $('#authForm')?.addEventListener('submit', async (e) => {
     // Login
     let email = username;
     if (!username.includes('@')) {
-      const { data: profile } = await supabase.from('profiles').select('email').eq('username', username).maybeSingle();
+      const { data: profile } = await sb.from('profiles').select('email').eq('username', username).maybeSingle();
       if (!profile?.email) return authMsg('Username not found.');
       email = profile.email;
     }
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { error } = await sb.auth.signInWithPassword({ email, password });
     if (error) return authMsg('Wrong username/email or password.');
     await loadProfile();
     enterApp();
@@ -136,12 +136,12 @@ function authMsg(s) {
 }
 
 async function loadProfile() {
-  if (!supabase) return;
-  const { data: { user } } = await supabase.auth.getUser();
+  if (!sb) return;
+  const { data: { user } } = await sb.auth.getUser();
   if (!user) return;
-  const { data, error } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+  const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).single();
   if (error || !data) {
-    await supabase.from('profiles').insert({
+    await sb.from('profiles').insert({
       id: user.id,
       username: user.email.split('@')[0],
       email: user.email,
@@ -187,29 +187,29 @@ function startTimeTracking() {
   sessionStart = Date.now();
   if (timeInterval) clearInterval(timeInterval);
   timeInterval = setInterval(async () => {
-    if (!currentUser || !supabase) return;
+    if (!currentUser || !sb) return;
     const add = 30; // seconds
     const newTime = (currentUser.time_played || 0) + add;
     currentUser.time_played = newTime;
-    await supabase.from('profiles').update({ time_played: newTime }).eq('id', currentUser.id);
+    await sb.from('profiles').update({ time_played: newTime }).eq('id', currentUser.id);
   }, 30000);
   window.addEventListener('beforeunload', saveTimeOnExit);
 }
 
 async function saveTimeOnExit() {
-  if (!currentUser || !sessionStart || !supabase) return;
+  if (!currentUser || !sessionStart || !sb) return;
   const extra = Math.floor((Date.now() - sessionStart) / 1000);
   if (extra > 5) {
-    await supabase.from('profiles').update({ time_played: (currentUser.time_played || 0) + extra }).eq('id', currentUser.id);
+    await sb.from('profiles').update({ time_played: (currentUser.time_played || 0) + extra }).eq('id', currentUser.id);
   }
 }
 
 $('#logoutBtn')?.addEventListener('click', async () => {
   await saveTimeOnExit();
   if (timeInterval) clearInterval(timeInterval);
-  if (supabase) await supabase.auth.signOut();
+  if (sb) await sb.auth.signOut();
   currentUser = null;
-  if (realtimeChannel && supabase) supabase.removeChannel(realtimeChannel);
+  if (realtimeChannel && sb) sb.removeChannel(realtimeChannel);
   $('#appView').classList.add('hidden');
   $('#authView').classList.remove('hidden');
   setAuthMode('login');
@@ -258,8 +258,8 @@ $$('.feed-tab').forEach(b => {
 
 // ---------- Coins & Feed ----------
 async function loadCoins() {
-  if (!supabase) return;
-  const { data, error } = await supabase.from('coins').select('*').order('created_at', { ascending: false });
+  if (!sb) return;
+  const { data, error } = await sb.from('coins').select('*').order('created_at', { ascending: false });
   if (!error) coins = data || [];
   renderFeed();
 }
@@ -302,8 +302,8 @@ $('#coinImage')?.addEventListener('change', e => {
 
 $('#createForm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!currentUser || !supabase) return;
-  const { count } = await supabase.from('coins').select('*', { count: 'exact', head: true }).eq('creator_id', currentUser.id);
+  if (!currentUser || !sb) return;
+  const { count } = await sb.from('coins').select('*', { count: 'exact', head: true }).eq('creator_id', currentUser.id);
   const max = currentUser.is_premium ? 3 : 1;
   if (count >= max) return $('#createMessage').textContent = `Max ${max} coin${max > 1 ? 's' : ''} for your account.`;
 
@@ -312,7 +312,7 @@ $('#createForm')?.addEventListener('submit', async (e) => {
   if (!ticker) return $('#createMessage').textContent = 'Invalid ticker.';
   const description = $('#coinDescription').value.trim();
 
-  const { error } = await supabase.from('coins').insert({
+  const { error } = await sb.from('coins').insert({
     creator_id: currentUser.id,
     name,
     ticker,
@@ -341,12 +341,12 @@ async function openCoin(id) {
 }
 
 async function renderCoinDetail() {
-  if (!selectedCoin || !currentUser || !supabase) return;
+  if (!selectedCoin || !currentUser || !sb) return;
   const c = selectedCoin;
-  const { data: hold } = await supabase.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', c.id).maybeSingle();
+  const { data: hold } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', c.id).maybeSingle();
   const shares = hold?.shares || 0;
 
-  const { data: trades } = await supabase.from('trades')
+  const { data: trades } = await sb.from('trades')
     .select('*, profiles(username, avatar_url)')
     .eq('coin_id', c.id)
     .order('created_at', { ascending: true })
@@ -400,12 +400,12 @@ function calculateImpact(amount, price) {
 }
 
 async function updateNetWorth() {
-  if (!currentUser || !supabase) return;
-  const { data: holds } = await supabase.from('holdings').select('shares, coins(price)').eq('user_id', currentUser.id);
+  if (!currentUser || !sb) return;
+  const { data: holds } = await sb.from('holdings').select('shares, coins(price)').eq('user_id', currentUser.id);
   const portValue = (holds || []).reduce((s, h) => s + (h.shares || 0) * (h.coins?.price || 0), 0);
   const nw = currentUser.cash + portValue;
   currentUser.net_worth = nw;
-  await supabase.from('profiles').update({ net_worth: nw }).eq('id', currentUser.id);
+  await sb.from('profiles').update({ net_worth: nw }).eq('id', currentUser.id);
   $('#totalValue').textContent = money(nw);
 }
 
@@ -416,16 +416,16 @@ async function buy(coin, amount) {
   const shares = amount / coin.price;
   const newCash = currentUser.cash - amount;
 
-  const { error: cashErr } = await supabase.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
+  const { error: cashErr } = await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
   if (cashErr) return $('#tradeMessage').textContent = 'Cash error: ' + cashErr.message;
 
-  await supabase.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) + impact * 100 }).eq('id', coin.id);
+  await sb.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) + impact * 100 }).eq('id', coin.id);
 
-  const { data: existing } = await supabase.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
+  const { data: existing } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
   const newShares = (existing?.shares || 0) + shares;
-  await supabase.from('holdings').upsert({ user_id: currentUser.id, coin_id: coin.id, shares: newShares });
+  await sb.from('holdings').upsert({ user_id: currentUser.id, coin_id: coin.id, shares: newShares });
 
-  await supabase.from('trades').insert({
+  await sb.from('trades').insert({
     coin_id: coin.id,
     user_id: currentUser.id,
     type: 'buy',
@@ -447,7 +447,7 @@ async function buy(coin, amount) {
 
 async function sell(coin, sharesToSell) {
   if (!currentUser || sharesToSell <= 0) return $('#tradeMessage').textContent = 'No shares to sell.';
-  const { data: hold } = await supabase.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
+  const { data: hold } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
   const owned = hold?.shares || 0;
   const sellShares = Math.min(sharesToSell, owned);
   if (sellShares <= 0) return;
@@ -456,10 +456,10 @@ async function sell(coin, sharesToSell) {
   const newPrice = Math.max(0.01, coin.price * (1 - impact));
   const newCash = currentUser.cash + proceeds;
 
-  await supabase.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
-  await supabase.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) - impact * 100 }).eq('id', coin.id);
-  await supabase.from('holdings').update({ shares: owned - sellShares }).eq('user_id', currentUser.id).eq('coin_id', coin.id);
-  await supabase.from('trades').insert({
+  await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
+  await sb.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) - impact * 100 }).eq('id', coin.id);
+  await sb.from('holdings').update({ shares: owned - sellShares }).eq('user_id', currentUser.id).eq('coin_id', coin.id);
+  await sb.from('trades').insert({
     coin_id: coin.id,
     user_id: currentUser.id,
     type: 'sell',
@@ -532,8 +532,8 @@ function drawChartWithBubbles(coin, trades) {
 
 // ---------- Money / Portfolio ----------
 async function renderMoney() {
-  if (!currentUser || !supabase) return;
-  const { data: holds } = await supabase.from('holdings').select('*, coins(name, ticker, price, image_url)').eq('user_id', currentUser.id).gt('shares', 0);
+  if (!currentUser || !sb) return;
+  const { data: holds } = await sb.from('holdings').select('*, coins(name, ticker, price, image_url)').eq('user_id', currentUser.id).gt('shares', 0);
   const list = holds || [];
   const value = list.reduce((s, h) => s + h.shares * (h.coins?.price || 0), 0);
   $('#portfolioValue').textContent = money(value);
@@ -558,8 +558,8 @@ async function renderMoney() {
 
 // ---------- Global Leaderboards ----------
 async function renderLeaderboard() {
-  if (!supabase) return;
-  let query = supabase.from('profiles').select('username, avatar_url, net_worth, time_played, is_premium');
+  if (!sb) return;
+  let query = sb.from('profiles').select('username, avatar_url, net_worth, time_played, is_premium');
   if (lbMode === 'networth') {
     query = query.order('net_worth', { ascending: false }).limit(100);
   } else {
@@ -588,7 +588,7 @@ $('#profileImage')?.addEventListener('change', async (e) => {
   const r = new FileReader();
   r.onload = async () => {
     const dataUrl = r.result;
-    const { error } = await supabase.from('profiles').update({ avatar_url: dataUrl }).eq('id', currentUser.id);
+    const { error } = await sb.from('profiles').update({ avatar_url: dataUrl }).eq('id', currentUser.id);
     if (!error) {
       currentUser.avatar_url = dataUrl;
       updateUIProfile();
@@ -615,7 +615,7 @@ function updatePremiumSection() {
 $('#sendRequestBtn')?.addEventListener('click', async () => {
   const reason = $('#premiumReason').value.trim();
   if (!reason) return toast('Write a reason.');
-  const { error } = await supabase.from('premium_requests').insert({
+  const { error } = await sb.from('premium_requests').insert({
     user_id: currentUser.id,
     reason,
     status: 'pending'
@@ -626,8 +626,8 @@ $('#sendRequestBtn')?.addEventListener('click', async () => {
 });
 
 async function loadRequests() {
-  if (!supabase) return;
-  const { data } = await supabase.from('premium_requests')
+  if (!sb) return;
+  const { data } = await sb.from('premium_requests')
     .select('*, profiles(username)')
     .eq('status', 'pending')
     .order('created_at', { ascending: false });
@@ -648,10 +648,10 @@ async function loadRequests() {
 }
 
 async function handleRequest(reqId, userId, status) {
-  if (!supabase) return;
-  await supabase.from('premium_requests').update({ status }).eq('id', reqId);
+  if (!sb) return;
+  await sb.from('premium_requests').update({ status }).eq('id', reqId);
   if (status === 'approved' && userId) {
-    await supabase.from('profiles').update({ is_premium: true }).eq('id', userId);
+    await sb.from('profiles').update({ is_premium: true }).eq('id', userId);
   }
   toast(status === 'approved' ? 'Approved!' : 'Denied');
   loadRequests();
@@ -659,8 +659,8 @@ async function handleRequest(reqId, userId, status) {
 
 // ---------- Realtime ----------
 function startRealtime() {
-  if (!supabase) return;
-  realtimeChannel = supabase.channel('grind-live')
+  if (!sb) return;
+  realtimeChannel = sb.channel('grind-live')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'coins' }, () => loadCoins())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
       if (selectedCoin) renderCoinDetail();
@@ -672,11 +672,11 @@ $('#backToFeed')?.addEventListener('click', () => showPage('feed'));
 
 // ---------- Init ----------
 (async () => {
-  if (!supabase) {
+  if (!sb) {
     authMsg('Failed to connect to Supabase. Replace the API key in app.js with your real anon key.');
     return;
   }
-  const { data: { session } } = await supabase.auth.getSession();
+  const { data: { session } } = await sb.auth.getSession();
   if (session) {
     await loadProfile();
     enterApp();
