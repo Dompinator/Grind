@@ -25,7 +25,6 @@ let realtimeChannel = null;
 let sessionStart = null;
 let timeInterval = null;
 let chartZoom = 1.0;
-let selectedLbCoinId = null;
 let currentPage = 'feed';
 let adsCache = null;
 let adsCacheTime = 0;
@@ -292,10 +291,11 @@ function showPage(page) {
   const wasAds = currentPage === 'ads';
   if (wasAds && page !== 'ads') cleanupAds();
   currentPage = page;
-  $('.page').forEach(p => p.classList.add('hidden'));
+  $('#appView')?.classList.toggle('ads-fullscreen', page === 'ads');
+  $$('.page').forEach(p => p.classList.add('hidden'));
   const target = $('#page-' + page);
   if (target) target.classList.remove('hidden');
-  $('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === page));
+  $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   const titles = {
     feed: 'Discover currencies',
     create: 'Create currency',
@@ -559,26 +559,28 @@ async function renderCoinDetail() {
       </div>
       <div class="chart-scroll" id="chartScroll"><div class="chart-inner" id="chartInner"><canvas id="priceChart"></canvas></div></div>
     </div>
-    <div class="trade-panel">
-      <h3>Trade $${escapeHtml(c.ticker)}</h3>
-      <div class="trade-buttons">
-        ${[1, 5, 10, 25, 50].map(n => `<button class="amount-btn ${n === selectedAmount ? 'active' : ''}" data-buy="${n}">$${n}</button>`).join('')}
+    <div class="coin-bottom-grid">
+      <div class="trade-panel">
+        <h3>Trade $${escapeHtml(c.ticker)}</h3>
+        <div class="trade-buttons">
+          ${[1, 5, 10, 25, 50].map(n => `<button class="amount-btn ${n === selectedAmount ? 'active' : ''}" data-buy="${n}">$${n}</button>`).join('')}
+        </div>
+        <div class="trade-actions">
+          <button class="buy-btn" id="buyBtn">Buy ${money(selectedAmount)}</button>
+          <button class="sell-btn" id="sellBtn">Sell 25%</button>
+        </div>
+        <p class="muted tiny" style="margin-top:10px">You own: ${shares.toFixed(4)} shares · Worth ${money(shares * c.price)} · Cash ${money(currentUser.cash)}</p>
+        <p class="form-message" id="tradeMessage"></p>
+        ${isDompinator() ? `
+          <button class="delete-coin-btn" id="deleteCoinBtn">🗑 Delete currency (Dompinator admin)</button>
+        ` : ''}
       </div>
-      <div class="trade-actions">
-        <button class="buy-btn" id="buyBtn">Buy ${money(selectedAmount)}</button>
-        <button class="sell-btn" id="sellBtn">Sell 25%</button>
-      </div>
-      <p class="muted tiny" style="margin-top:10px">You own: ${shares.toFixed(4)} shares · Worth ${money(shares * c.price)} · Cash ${money(currentUser.cash)}</p>
-      <p class="form-message" id="tradeMessage"></p>
-      ${isDompinator() ? `
-        <button class="delete-coin-btn" id="deleteCoinBtn">🗑 Delete currency (Dompinator admin)</button>
-      ` : ''}
-    </div>
-    <div class="coin-leaderboard">
-      <div class="eyebrow purple-text" style="margin-bottom:4px;">CURRENCY LEADERBOARD</div>
-      <h4>Most spent on ${escapeHtml(c.ticker)}</h4>
-      <div id="coinLeaderboardList" class="leaderboard-list">
-        <p class="muted tiny">Loading leaderboard...</p>
+      <div class="coin-leaderboard">
+        <div class="eyebrow purple-text" style="margin-bottom:4px;">CURRENCY LEADERBOARD</div>
+        <h4>Most spent on $${escapeHtml(c.ticker)}</h4>
+        <div id="coinLeaderboardList" class="leaderboard-list">
+          <p class="muted tiny">Loading leaderboard...</p>
+        </div>
       </div>
     </div>
   `;
@@ -960,39 +962,8 @@ function renderSpendRows(rows, emptyText = 'No buyers yet.') {
   `).join('');
 }
 
-$('#lbCurrencySelect')?.addEventListener('change', e => {
-  selectedLbCoinId = e.target.value;
-  renderLeaderboard();
-});
-
 async function renderLeaderboard() {
   if (!sb) return;
-  const bar = $('#lbCurrencyBar');
-  if (lbMode === 'currency') {
-    if (bar) bar.classList.remove('hidden');
-    if (!coins.length) await loadCoins();
-    const sel = $('#lbCurrencySelect');
-    if (sel) {
-      if (!coins.length) {
-        sel.innerHTML = '<option value="">No currencies yet</option>';
-        $('#leaderboardList').innerHTML = '';
-        $('#emptyLeaderboard').classList.remove('hidden');
-        return;
-      }
-      if (!selectedLbCoinId || !coins.some(c => c.id === selectedLbCoinId)) {
-        selectedLbCoinId = coins[0].id;
-      }
-      sel.innerHTML = coins.map(c =>
-        `<option value="${escapeHtml(c.id)}" ${c.id === selectedLbCoinId ? 'selected' : ''}>${escapeHtml(c.name)} (${escapeHtml(c.ticker)})</option>`
-      ).join('');
-    }
-    const rows = await getCoinSpendLeaderboard(selectedLbCoinId);
-    $('#leaderboardList').innerHTML = rows.length ? renderSpendRows(rows) : '';
-    $('#emptyLeaderboard').classList.toggle('hidden', rows.length > 0);
-    return;
-  }
-
-  if (bar) bar.classList.add('hidden');
   let query = sb.from('profiles').select('username, avatar_url, net_worth, time_played, is_premium');
   if (lbMode === 'networth') {
     query = query.order('net_worth', { ascending: false }).limit(100);
@@ -1101,12 +1072,12 @@ async function startAdsPage() {
   const statusEl = $('#adStatusText');
   const skipBtn = $('#adSkipBtn');
   const claimBtn = $('#adClaimBtn');
-  const nextBtn = $('#adNextBtn');
+  const backBtn = $('#adBackBtn');
   if (!stage) return;
 
   skipBtn?.classList.add('hidden');
   claimBtn?.classList.add('hidden');
-  nextBtn?.classList.add('hidden');
+  backBtn?.classList.add('hidden');
   if (statusEl) statusEl.textContent = 'Finding an ad...';
   stage.innerHTML = '<p class="muted">Loading random ad...</p>';
 
@@ -1122,12 +1093,12 @@ function loadRandomAd(preloadedList) {
   const statusEl = $('#adStatusText');
   const skipBtn = $('#adSkipBtn');
   const claimBtn = $('#adClaimBtn');
-  const nextBtn = $('#adNextBtn');
+  const backBtn = $('#adBackBtn');
   if (!stage) return;
 
   skipBtn?.classList.add('hidden');
   claimBtn?.classList.add('hidden');
-  nextBtn?.classList.add('hidden');
+  backBtn?.classList.add('hidden');
 
   if (!list.length) {
     stage.innerHTML = `
@@ -1137,6 +1108,7 @@ function loadRandomAd(preloadedList) {
         <p class="muted">Add .mp4 or image files into the <code>ads/</code> folder on GitHub to display ads here.</p>
       </div>`;
     if (statusEl) statusEl.textContent = '';
+    backBtn?.classList.remove('hidden');
     return;
   }
 
@@ -1165,7 +1137,7 @@ function loadRandomAd(preloadedList) {
       skipBtn.disabled = true;
       skipBtn.textContent = `Skip in ${remaining}s`;
     }
-    if (statusEl) statusEl.textContent = `Watch this image ad for ${remaining} seconds before skipping.`;
+    if (statusEl) statusEl.textContent = `Watch this image ad for ${remaining} seconds before leaving.`;
 
     adTimerInterval = setInterval(() => {
       if (token !== activeAdToken || currentPage !== 'ads') {
@@ -1181,18 +1153,17 @@ function loadRandomAd(preloadedList) {
         adLocked = false;
         if (skipBtn) {
           skipBtn.disabled = false;
-          skipBtn.textContent = 'Skip Ad';
+          skipBtn.textContent = 'Skip Ad → Feed';
         }
-        if (statusEl) statusEl.textContent = 'You can skip this ad now.';
+        if (statusEl) statusEl.textContent = 'Time is up! You can return to Feed now.';
       } else {
         if (skipBtn) skipBtn.textContent = `Skip in ${remaining}s`;
-        if (statusEl) statusEl.textContent = `Watch this image ad for ${remaining} seconds before skipping.`;
+        if (statusEl) statusEl.textContent = `Watch this image ad for ${remaining} seconds before leaving.`;
       }
     }, 1000);
   } else {
     adLocked = true;
     adClaimed = false;
-    let videoEnded = false;
     let maxWatchedTime = 0;
 
     stage.innerHTML = `<video id="adVideo" src="${escapeHtml(ad.url)}" playsinline controls autoplay></video>`;
@@ -1207,13 +1178,15 @@ function loadRandomAd(preloadedList) {
         }
         adLocked = false;
         if (statusEl) statusEl.textContent = 'Could not load video ad.';
-        nextBtn?.classList.remove('hidden');
+        claimBtn?.classList.add('hidden');
+        backBtn?.classList.remove('hidden');
       };
     }
 
     if (claimBtn) {
       claimBtn.classList.remove('hidden');
       claimBtn.disabled = true;
+      claimBtn.dataset.ready = '0';
       claimBtn.textContent = 'Wait until video ends ($1.00)';
     }
     if (statusEl) statusEl.textContent = 'Watch the full video to claim your $1.00 reward.';
@@ -1229,7 +1202,7 @@ function loadRandomAd(preloadedList) {
         if (!video.seeking && video.currentTime > maxWatchedTime) {
           maxWatchedTime = video.currentTime;
         }
-        if (video.duration && !videoEnded) {
+        if (video.duration && adLocked) {
           const left = Math.max(0, Math.ceil(video.duration - video.currentTime));
           if (statusEl) statusEl.textContent = `Watch until the end to claim $1.00 (${left}s left)`;
         }
@@ -1243,14 +1216,13 @@ function loadRandomAd(preloadedList) {
 
       video.addEventListener('ended', () => {
         if (token !== activeAdToken) return;
-        videoEnded = true;
         adLocked = false;
         if (claimBtn) {
           claimBtn.disabled = false;
           claimBtn.textContent = 'Claim $1.00 Reward';
           claimBtn.dataset.ready = '1';
         }
-        if (statusEl) statusEl.textContent = 'Video finished! Claim your $1.00 reward.';
+        if (statusEl) statusEl.textContent = 'Video finished! Claim your $1.00 reward to return to Feed.';
       });
     }
   }
@@ -1258,11 +1230,11 @@ function loadRandomAd(preloadedList) {
 
 $('#adSkipBtn')?.addEventListener('click', () => {
   if ($('#adSkipBtn').disabled) return;
-  loadRandomAd();
+  showPage('feed');
 });
 
-$('#adNextBtn')?.addEventListener('click', () => {
-  loadRandomAd();
+$('#adBackBtn')?.addEventListener('click', () => {
+  showPage('feed');
 });
 
 $('#adClaimBtn')?.addEventListener('click', async () => {
@@ -1285,11 +1257,8 @@ $('#adClaimBtn')?.addEventListener('click', async () => {
   currentUser.cash = newCash;
   updateUIProfile();
   await updateNetWorth();
-  btn.textContent = 'Claimed $1.00 ✓';
-  $('#adNextBtn')?.classList.remove('hidden');
-  const statusEl = $('#adStatusText');
-  if (statusEl) statusEl.textContent = '$1.00 added to your cash!';
   toast('Claimed $1.00 reward!');
+  showPage('feed');
 });
 
 // ---------- Username (Account menu) ----------
@@ -1404,7 +1373,6 @@ function startRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
       loadCoins();
       if (selectedCoin && currentPage === 'coin') renderCoinDetail();
-      if (currentPage === 'global' && lbMode === 'currency') renderLeaderboard();
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, () => {
       if (currentUser) loadProfile();

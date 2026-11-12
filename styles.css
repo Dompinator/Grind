@@ -35,8 +35,8 @@ button, input, textarea { font-family: inherit; }
 .auth-tab { flex: 1; background: transparent; border: 1px solid var(--line); color: var(--muted); border-radius: 12px; padding: 11px; cursor: pointer; transition: .15s; font-weight: 600; }
 .auth-tab.active { background: #2a203b; color: white; border-color: var(--purple); }
 label { display: block; text-align: left; margin-bottom: 14px; font-size: 13px; font-weight: 600; }
-label input, label textarea, label select { width: 100%; margin-top: 7px; background: #120e1c; border: 1px solid var(--line); border-radius: 12px; padding: 13px; color: white; font-size: 15px; font-family: inherit; transition: border .15s; }
-label input:focus, label textarea:focus, label select:focus { outline: none; border-color: var(--purple); }
+label input, label textarea { width: 100%; margin-top: 7px; background: #120e1c; border: 1px solid var(--line); border-radius: 12px; padding: 13px; color: white; font-size: 15px; transition: border .15s; }
+label input:focus, label textarea:focus { outline: none; border-color: var(--purple); }
 .form-message { color: #fca5a5; font-size: 14px; font-weight: 600; min-height: 20px; margin-top: 12px; text-align: center; }
 
 /* App layout */
@@ -172,16 +172,23 @@ label input:focus, label textarea:focus, label select:focus { outline: none; bor
   .main-area { margin-left: 72px; width: calc(100% - 72px); }
   .coin-grid { grid-template-columns: 1fr; }
   .portfolio-summary, .form-grid, .trade-buttons { grid-template-columns: 1fr 1fr; }
+  .coin-bottom-grid { grid-template-columns: 1fr; }
   .hero-panel { flex-direction: column; text-align: center; gap: 16px; }
 }
 
-/* Currency leaderboard & Ads */
-.lb-currency-bar { margin-bottom: 18px; max-width: 340px; }
-.coin-leaderboard { margin-top: 22px; }
-.coin-leaderboard h4 { margin: 0 0 12px; font-size: 16px; }
-.ad-card { display: flex; flex-direction: column; gap: 18px; }
-.ad-stage { background: #120e1c; border: 1px solid var(--line); border-radius: 14px; min-height: 320px; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 12px; text-align: center; }
-.ad-stage img, .ad-stage video { max-width: 100%; max-height: 480px; border-radius: 10px; display: block; }
-.ad-controls { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+/* Currency leaderboard (bottom-right) & Fullscreen Ads */
+.coin-bottom-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 18px; align-items: start; }
+.coin-leaderboard { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 20px; }
+.coin-leaderboard h4 { margin: 0 0 14px; font-size: 16px; }
+
+.app.ads-fullscreen .sidebar { display: none; }
+.app.ads-fullscreen .topbar { display: none; }
+.app.ads-fullscreen .main-area { margin-left: 0; width: 100%; min-height: 100vh; }
+.app.ads-fullscreen .content { padding: 0; max-width: none; width: 100%; height: 100vh; }
+#page-ads { width: 100%; height: 100vh; display: flex; flex-direction: column; padding: 18px 24px; background: var(--bg); }
+.ad-card { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 14px; }
+.ad-stage { flex: 1; min-height: 0; background: #120e1c; border: 1px solid var(--line); border-radius: 16px; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 12px; text-align: center; }
+.ad-stage img, .ad-stage video { width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 10px; display: block; }
+.ad-controls { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 16px; }
 .ad-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .ad-actions button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; filter: none; }

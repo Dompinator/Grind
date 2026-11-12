@@ -152,12 +152,6 @@
           <div class="feed-tabs" id="leaderboardTabs">
             <button class="feed-tab active" data-lb="networth">Net Worth</button>
             <button class="feed-tab" data-lb="time">Time Played</button>
-            <button class="feed-tab" data-lb="currency">Currency</button>
-          </div>
-          <div id="lbCurrencyBar" class="lb-currency-bar hidden">
-            <label>Currency
-              <select id="lbCurrencySelect"></select>
-            </label>
           </div>
           <div id="leaderboardList" class="leaderboard-list"></div>
           <div id="emptyLeaderboard" class="empty-state hidden">
@@ -167,14 +161,7 @@
 
         <!-- ADS -->
         <section id="page-ads" class="page hidden">
-          <div class="section-head">
-            <div>
-              <div class="eyebrow purple-text">SPONSORED</div>
-              <h3>Ads</h3>
-              <p class="muted">Watch a random ad. Images can be skipped after 60s. Watch .mp4 ads to the end to claim a $1.00 reward.</p>
-            </div>
-          </div>
-          <div class="form-card ad-card">
+          <div class="ad-card">
             <div id="adStage" class="ad-stage">
               <p class="muted">Loading ad...</p>
             </div>
@@ -183,7 +170,7 @@
               <div class="ad-actions">
                 <button class="primary-btn hidden" id="adSkipBtn" type="button" disabled>Skip in 60s</button>
                 <button class="buy-btn hidden" id="adClaimBtn" type="button" disabled>Wait until video ends ($1.00)</button>
-                <button class="zoom-btn hidden" id="adNextBtn" type="button">Next random ad</button>
+                <button class="primary-btn hidden" id="adBackBtn" type="button">Back to Feed</button>
               </div>
             </div>
           </div>
