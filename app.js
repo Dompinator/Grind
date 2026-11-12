@@ -79,18 +79,21 @@ document.addEventListener('DOMContentLoaded', attachAuthListeners);
 
 $('#authForm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!supabase) return authMsg('Supabase not ready. Check your API key.');
+  if (!supabase) return authMsg('Supabase not ready. Check your API key in app.js.');
   const username = $('#authUsername').value.trim();
   const password = $('#authPassword').value;
-  const mode = $$('.auth-tab.active')[0]?.dataset.auth || 'login';
+  const mode = document.querySelector('.auth-tab.active')?.dataset.auth || 'login';
   if (username.length < 3) return authMsg('Username must be at least 3 characters.');
 
   if (mode === 'signup') {
     const email = $('#authEmail').value.trim();
     if (!email || !email.includes('@')) return authMsg('Please enter a valid email.');
+    
     const { data, error } = await supabase.auth.signUp({ email, password });
     if (error) return authMsg(error.message);
-    if (!data.user) return authMsg('Check your email to confirm the account.');
+    if (!data.user) return authMsg('Signup failed. Try again.');
+
+    // Create profile
     const { error: pErr } = await supabase.from('profiles').insert({
       id: data.user.id,
       username: username,
@@ -101,18 +104,27 @@ $('#authForm')?.addEventListener('submit', async (e) => {
       time_played: 0
     });
     if (pErr) return authMsg('Profile error: ' + pErr.message);
-    toast('Account created! Check your email to confirm, then log in.');
-    setAuthMode('login');
+
+    // Try to log in immediately
+    const { error: loginErr } = await supabase.auth.signInWithPassword({ email, password });
+    if (loginErr) {
+      authMsg('Account created! Check your email to confirm, then log in.');
+      setAuthMode('login');
+      return;
+    }
+    await loadProfile();
+    enterApp();
+    toast('Welcome to GRIND!');
   } else {
-    // Login: try username first, fall back to email
+    // Login
     let email = username;
     if (!username.includes('@')) {
       const { data: profile } = await supabase.from('profiles').select('email').eq('username', username).maybeSingle();
       if (!profile?.email) return authMsg('Username not found.');
       email = profile.email;
     }
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) return authMsg(error.message);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) return authMsg('Wrong username/email or password.');
     await loadProfile();
     enterApp();
   }

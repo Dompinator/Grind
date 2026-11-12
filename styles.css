@@ -37,7 +37,7 @@ button, input, textarea { font-family: inherit; }
 label { display: block; text-align: left; margin-bottom: 14px; font-size: 13px; font-weight: 600; }
 label input, label textarea { width: 100%; margin-top: 7px; background: #120e1c; border: 1px solid var(--line); border-radius: 12px; padding: 13px; color: white; font-size: 15px; transition: border .15s; }
 label input:focus, label textarea:focus { outline: none; border-color: var(--purple); }
-.form-message { color: #fca5a5; font-size: 13px; min-height: 18px; margin-top: 10px; }
+.form-message { color: #fca5a5; font-size: 14px; font-weight: 600; min-height: 20px; margin-top: 12px; text-align: center; }
 
 /* App layout */
 .app { display: flex; min-height: 100vh; }
