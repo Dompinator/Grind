@@ -24,6 +24,7 @@ let pendingCoinImage = null;
 let realtimeChannel = null;
 let sessionStart = null;
 let timeInterval = null;
+let chartZoom = 1.0;
 
 // ---------- Helpers ----------
 function money(n) { return '$' + Number(n || 0).toFixed(2); }
@@ -489,7 +490,18 @@ async function renderCoinDetail() {
     <div class="detail-price">${priceFmt(c.price)}</div>
     <div class="coin-change ${(c.change_pct || 0) >= 0 ? 'up' : 'down'}">${(c.change_pct || 0) >= 0 ? '↗ +' : '↘ '}${Number(c.change_pct || 0).toFixed(2)}%</div>
     <div class="chart-wrap">
-      <div class="chart-head"><strong>Price history + trades</strong><span class="muted tiny">Bubbles = who bought / sold &amp; for how much</span></div>
+      <div class="chart-head">
+        <div>
+          <strong>Price history + trades</strong>
+          <span class="muted tiny">Scroll wheel or zoom buttons to view whole timeline</span>
+        </div>
+        <div class="chart-controls">
+          <button class="zoom-btn" id="zoomOutBtn" title="Zoom out / See whole timeline">− Zoom Out</button>
+          <span class="zoom-level-text" id="zoomLevelText">${chartZoom <= 1.0 ? 'Fit' : Math.round(chartZoom * 100) + '%'}</span>
+          <button class="zoom-btn" id="zoomInBtn" title="Zoom in / Closer detail">+ Zoom In</button>
+          <button class="zoom-btn" id="zoomFitBtn" title="Fit whole timeline on screen">Fit all</button>
+        </div>
+      </div>
       <div class="chart-scroll" id="chartScroll"><div class="chart-inner" id="chartInner"><canvas id="priceChart"></canvas></div></div>
     </div>
     <div class="trade-panel">
@@ -516,6 +528,36 @@ async function renderCoinDetail() {
   }));
   $('#buyBtn')?.addEventListener('click', () => buy(c, selectedAmount));
   $('#sellBtn')?.addEventListener('click', () => sell(c, shares * 0.25));
+
+  // Zoom Button Controls
+  const updateChart = () => drawChartWithBubbles(c, trades.slice().reverse());
+
+  $('#zoomOutBtn')?.addEventListener('click', () => {
+    chartZoom = Math.max(1.0, +(chartZoom - 0.35).toFixed(2));
+    updateChart();
+  });
+  $('#zoomInBtn')?.addEventListener('click', () => {
+    chartZoom = Math.min(4.0, +(chartZoom + 0.35).toFixed(2));
+    updateChart();
+  });
+  $('#zoomFitBtn')?.addEventListener('click', () => {
+    chartZoom = 1.0;
+    updateChart();
+  });
+
+  // Mouse wheel zoom on chart: scroll out to see whole timeline, scroll in to see closer & scrollbar
+  const chartScrollEl = $('#chartScroll');
+  chartScrollEl?.addEventListener('wheel', (e) => {
+    if (e.ctrlKey || Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      if (e.deltaY < 0) {
+        chartZoom = Math.min(4.0, +(chartZoom + 0.2).toFixed(2));
+      } else {
+        chartZoom = Math.max(1.0, +(chartZoom - 0.2).toFixed(2));
+      }
+      updateChart();
+    }
+  }, { passive: false });
 
   // Dompinator Delete Handler
   if (isDompinator()) {
@@ -676,10 +718,35 @@ function drawChartWithBubbles(coin, trades) {
   const scroll = $('#chartScroll');
   if (!canvas || !inner || !scroll) return;
 
-  const STEP = 78;                     // px per trade -> bubbles never overlap
+  const zoomText = $('#zoomLevelText');
+  if (zoomText) {
+    zoomText.textContent = chartZoom <= 1.0 ? 'Fit' : Math.round(chartZoom * 100) + '%';
+  }
+
+  const baseW = Math.max(scroll.clientWidth || 600, 320);
   const PAD_X = 46, PAD_TOP = 64, PAD_BOT = 24;
   const H = 300;
-  const W = Math.max(scroll.clientWidth, PAD_X * 2 + Math.max(trades.length, 1) * STEP);
+
+  // Points: start at $1 (creation), then one point per trade (works for every coin)
+  const points = [{ price: 1, trade: null }];
+  trades.forEach(t => points.push({ price: Number(t.price_after) || coin.price, trade: t }));
+  if (!trades.length) points.push({ price: Number(coin.price), trade: null });
+
+  // Width calculation:
+  // When chartZoom <= 1.0: W = baseW (no scrollbar! Whole timeline fits on screen)
+  // When chartZoom > 1.0: W expands proportionally so you can scroll close up!
+  let W;
+  if (chartZoom <= 1.0) {
+    W = baseW;
+    scroll.style.overflowX = 'hidden';
+  } else {
+    const numPoints = Math.max(points.length - 1, 1);
+    const fitStep = (baseW - PAD_X * 2) / numPoints;
+    const step = Math.max(fitStep * chartZoom, 40 * chartZoom);
+    W = Math.max(baseW, PAD_X * 2 + numPoints * step);
+    scroll.style.overflowX = 'auto';
+  }
+
   inner.style.width = W + 'px';
   inner.style.height = H + 'px';
 
@@ -691,11 +758,6 @@ function drawChartWithBubbles(coin, trades) {
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
-
-  // Points: start at $1 (creation), then one point per trade (works for every coin)
-  const points = [{ price: 1, trade: null }];
-  trades.forEach(t => points.push({ price: Number(t.price_after) || coin.price, trade: t }));
-  if (!trades.length) points.push({ price: Number(coin.price), trade: null });
 
   const prices = points.map(p => p.price);
   let min = Math.min(...prices), max = Math.max(...prices);
@@ -754,7 +816,9 @@ function drawChartWithBubbles(coin, trades) {
     inner.appendChild(b);
   });
 
-  scroll.scrollLeft = scroll.scrollWidth;   // show the latest trades
+  if (chartZoom > 1.0) {
+    scroll.scrollLeft = scroll.scrollWidth;
+  }
 }
 
 // ---------- Money / Portfolio ----------
