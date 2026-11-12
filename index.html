@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="sv">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#100d1c">
+  <meta name="theme-color" content="#0c0916">
   <title>GRIND — The Meme Currency Market</title>
   <link rel="stylesheet" href="styles.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -14,17 +14,17 @@
       <div class="brand-mark">G</div>
       <div class="eyebrow">THE MEME CURRENCY MARKET</div>
       <h1>GRIND<span>.</span></h1>
-      <p class="muted">Skapa, upptäck och handla community-currencies. Live med alla andra!</p>
+      <p class="muted">Create, discover and trade community currencies. Live with everyone.</p>
       <div class="auth-tabs">
-        <button class="auth-tab active" data-auth="login">Logga in</button>
-        <button class="auth-tab" data-auth="signup">Skapa konto</button>
+        <button class="auth-tab active" data-auth="login">Log in</button>
+        <button class="auth-tab" data-auth="signup">Sign up</button>
       </div>
       <form id="authForm">
-        <label>Användarnamn<input id="authUsername" autocomplete="username" minlength="3" maxlength="20" required placeholder="Ditt namn"></label>
-        <label>Lösenord<input id="authPassword" type="password" autocomplete="current-password" minlength="4" required placeholder="Lösenord"></label>
-        <button class="primary-btn full" id="authSubmit" type="submit">Logga in</button>
+        <label>Username<input id="authUsername" autocomplete="username" minlength="3" maxlength="20" required placeholder="Your username"></label>
+        <label>Password<input id="authPassword" type="password" autocomplete="current-password" minlength="4" required placeholder="Password"></label>
+        <button class="primary-btn full" id="authSubmit" type="submit">Log in</button>
       </form>
-      <p class="tiny muted">GRIND v0.2 · Multiplayer via Supabase</p>
+      <p class="tiny muted">GRIND v0.3 · Multiplayer · Premium feel</p>
       <p id="authMessage" class="form-message" aria-live="polite"></p>
     </section>
   </main>
@@ -37,8 +37,9 @@
         <button class="nav-btn active" data-page="feed"><span>◈</span> Feed</button>
         <button class="nav-btn" data-page="create"><span>＋</span> Create</button>
         <button class="nav-btn" data-page="money"><span>▣</span> Money</button>
+        <button class="nav-btn" data-page="global"><span>🌍</span> Global</button>
         <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
-        <button class="nav-btn hidden" id="navNotifications" data-page="notifications"><span>🔔</span> Notiser</button>
+        <button class="nav-btn hidden" id="navNotifications" data-page="notifications"><span>🔔</span> Notifications</button>
       </nav>
       <div class="sidebar-bottom">
         <div class="mini-profile">
@@ -48,8 +49,8 @@
             <small id="sidePremium">Member</small>
           </div>
         </div>
-        <button id="logoutBtn" class="logout-btn">↗ Logga ut</button>
-        <div class="version">GRIND v0.2</div>
+        <button id="logoutBtn" class="logout-btn">↗ Log out</button>
+        <div class="version">GRIND v0.3</div>
       </div>
     </aside>
 
@@ -68,22 +69,22 @@
           <div class="hero-panel">
             <div>
               <div class="eyebrow">LIVE MARKET</div>
-              <h3>Handla community coins</h3>
-              <p class="muted">Alla ser samma priser i realtid. Börjar alltid på $1. Infinite supply.</p>
+              <h3>Trade community coins</h3>
+              <p class="muted">Everyone sees the same prices in real time. Always starts at $1. Infinite supply.</p>
             </div>
             <div class="hero-orb"><span>G</span></div>
           </div>
           <div class="feed-tabs">
-            <button class="feed-tab active" data-feed="new">Nya</button>
-            <button class="feed-tab" data-feed="popular">Populära</button>
-            <button class="feed-tab" data-feed="cheap">Billigast</button>
+            <button class="feed-tab active" data-feed="new">Newest</button>
+            <button class="feed-tab" data-feed="popular">Popular</button>
+            <button class="feed-tab" data-feed="cheap">Cheapest</button>
           </div>
           <div id="feedGrid" class="coin-grid"></div>
           <div id="emptyFeed" class="empty-state hidden">
             <div class="empty-icon">◈</div>
-            <h3>Inga currencies än</h3>
-            <p>Var den första att skapa en!</p>
-            <button class="primary-btn" data-goto="create">Skapa currency</button>
+            <h3>No currencies yet</h3>
+            <p>Be the first to create one!</p>
+            <button class="primary-btn" data-goto="create">Create currency</button>
           </div>
         </section>
 
@@ -91,24 +92,24 @@
         <section id="page-create" class="page hidden">
           <div class="section-head">
             <div>
-              <div class="eyebrow purple-text">NY CURRENCY</div>
-              <h3>Skapa din coin</h3>
-              <p class="muted">Normala konton: max 1 coin. Premium: max 3. Börjar alltid på $1.</p>
+              <div class="eyebrow purple-text">NEW CURRENCY</div>
+              <h3>Create your coin</h3>
+              <p class="muted">Normal accounts: max 1 coin. Premium: max 3. Always starts at $1.</p>
             </div>
           </div>
           <div class="form-card">
             <form id="createForm">
               <div class="form-grid">
-                <label>Namn<input id="coinName" required maxlength="30" placeholder="t.ex. MoonDoge"></label>
-                <label>Ticker<input id="coinTicker" required maxlength="6" placeholder="t.ex. MDOG" style="text-transform:uppercase"></label>
+                <label>Name<input id="coinName" required maxlength="30" placeholder="e.g. MoonDoge"></label>
+                <label>Ticker<input id="coinTicker" required maxlength="6" placeholder="e.g. MDOG" style="text-transform:uppercase"></label>
               </div>
-              <label>Beskrivning<textarea id="coinDescription" rows="3" maxlength="200" placeholder="Varför är den här cool?"></textarea></label>
+              <label>Description<textarea id="coinDescription" rows="3" maxlength="200" placeholder="Why is this cool?"></textarea></label>
               <div class="image-upload">
                 <div class="coin-logo big" id="coinPreview">＋</div>
-                <label class="upload-link" for="coinImage">Ladda upp logo (valfritt)</label>
+                <label class="upload-link" for="coinImage">Upload logo (optional)</label>
                 <input id="coinImage" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
               </div>
-              <button class="primary-btn full" type="submit">Skapa currency ($1 start)</button>
+              <button class="primary-btn full" type="submit">Create currency ($1 start)</button>
               <p id="createMessage" class="form-message"></p>
             </form>
           </div>
@@ -118,21 +119,40 @@
         <section id="page-money" class="page hidden">
           <div class="section-head">
             <div>
-              <div class="eyebrow purple-text">PORTFÖLJ</div>
-              <h3>Dina pengar</h3>
+              <div class="eyebrow purple-text">PORTFOLIO</div>
+              <h3>Your money</h3>
             </div>
           </div>
           <div class="portfolio-summary">
-            <div><span class="muted tiny">TILLGÄNGLIGT CASH</span><strong id="moneyCash">$15.00</strong></div>
-            <div><span class="muted tiny">PORTFÖLJVÄRDE</span><strong id="portfolioValue">$0.00</strong></div>
-            <div><span class="muted tiny">TOTALT</span><strong id="totalValue">$15.00</strong></div>
+            <div><span class="muted tiny">AVAILABLE CASH</span><strong id="moneyCash">$15.00</strong></div>
+            <div><span class="muted tiny">PORTFOLIO VALUE</span><strong id="portfolioValue">$0.00</strong></div>
+            <div><span class="muted tiny">NET WORTH</span><strong id="totalValue">$15.00</strong></div>
           </div>
           <div id="holdingsList" class="holdings-list"></div>
           <div id="emptyHoldings" class="empty-state">
             <div class="empty-icon">▣</div>
-            <h3>Inga coins än</h3>
-            <p>Kolla feed och köp något!</p>
-            <button class="primary-btn" data-goto="feed">Till feed</button>
+            <h3>No coins yet</h3>
+            <p>Check the feed and buy something!</p>
+            <button class="primary-btn" data-goto="feed">Go to feed</button>
+          </div>
+        </section>
+
+        <!-- GLOBAL LEADERBOARDS -->
+        <section id="page-global" class="page hidden">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow purple-text">GLOBAL</div>
+              <h3>Leaderboards</h3>
+              <p class="muted">Top 100 players. Updated live.</p>
+            </div>
+          </div>
+          <div class="feed-tabs" id="leaderboardTabs">
+            <button class="feed-tab active" data-lb="networth">Net Worth</button>
+            <button class="feed-tab" data-lb="time">Time Played</button>
+          </div>
+          <div id="leaderboardList" class="leaderboard-list"></div>
+          <div id="emptyLeaderboard" class="empty-state hidden">
+            <p>No players yet.</p>
           </div>
         </section>
 
@@ -140,8 +160,8 @@
         <section id="page-account" class="page hidden">
           <div class="section-head">
             <div>
-              <div class="eyebrow purple-text">PROFIL</div>
-              <h3>Kontoinställningar</h3>
+              <div class="eyebrow purple-text">PROFILE</div>
+              <h3>Account settings</h3>
             </div>
           </div>
           <div class="form-card">
@@ -152,9 +172,9 @@
                 <i>＋</i>
               </label>
               <div>
-                <strong>Profilbild</strong>
-                <p class="muted tiny">PNG, JPG, WEBP. Syns i chart-bubblor!</p>
-                <label class="upload-link" for="profileImage">Byt bild</label>
+                <strong>Profile picture</strong>
+                <p class="muted tiny">PNG, JPG, WEBP. Shows in chart bubbles!</p>
+                <label class="upload-link" for="profileImage">Change picture</label>
                 <input id="profileImage" type="file" accept="image/png,image/jpeg,image/webp" hidden>
               </div>
             </div>
@@ -162,10 +182,10 @@
             <hr style="border-color:#3a2e4a;margin:20px 0">
             <div id="premiumSection">
               <h4>Premium</h4>
-              <p class="muted tiny" id="premiumStatus">Laddar...</p>
+              <p class="muted tiny" id="premiumStatus">Loading...</p>
               <div id="requestForm" class="hidden">
-                <label>Varför vill du ha premium?<textarea id="premiumReason" rows="2" maxlength="300" placeholder="Skriv en kort anledning..."></textarea></label>
-                <button class="primary-btn" id="sendRequestBtn" type="button">Skicka request</button>
+                <label>Why do you want Premium?<textarea id="premiumReason" rows="2" maxlength="300" placeholder="Write a short reason..."></textarea></label>
+                <button class="primary-btn" id="sendRequestBtn" type="button">Send request</button>
               </div>
             </div>
           </div>
@@ -176,19 +196,19 @@
           <div class="section-head">
             <div>
               <div class="eyebrow purple-text">ADMIN</div>
-              <h3>Premium-requests</h3>
-              <p class="muted">Bara Dompinator ser den här sidan.</p>
+              <h3>Premium requests</h3>
+              <p class="muted">Only the Dompinator account sees this page.</p>
             </div>
           </div>
           <div id="requestsList" class="requests-list"></div>
           <div id="emptyRequests" class="empty-state">
-            <p>Inga väntande requests.</p>
+            <p>No pending requests.</p>
           </div>
         </section>
 
         <!-- COIN DETAIL -->
         <section id="page-coin" class="page hidden">
-          <button class="back-link" id="backToFeed">← Tillbaka till feed</button>
+          <button class="back-link" id="backToFeed">← Back to feed</button>
           <div id="coinDetail"></div>
         </section>
       </div>

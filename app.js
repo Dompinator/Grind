@@ -1,30 +1,40 @@
 // ============================================================
-// GRIND v0.2 — Multiplayer via Supabase
+// GRIND v0.3 — Multiplayer · Premium · English
 // ============================================================
 const SUPABASE_URL = 'https://zcrkywpyjrofphxnxtlc.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_PKSD898kwnfs6msIDiW9_g_yeoTBduD';
 
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+let supabase;
+try {
+  supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+} catch (e) {
+  console.error('Supabase init failed:', e);
+}
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 
-let currentUser = null; // { id, username, avatar_url, cash, is_premium }
+let currentUser = null;
 let coins = [];
 let selectedCoin = null;
 let selectedAmount = 5;
 let feedMode = 'new';
+let lbMode = 'networth';
 let pendingCoinImage = null;
-let pendingProfileImage = null;
 let realtimeChannel = null;
+let sessionStart = null;
+let timeInterval = null;
 
 // ---------- Helpers ----------
 function money(n) { return '$' + Number(n || 0).toFixed(2); }
 function escapeHtml(s = '') {
-  return String(s).replace(/[&<>"']/g, c => ({ '&': '&', '<': '<', '>': '>', '"': '"', "'": '&#39;' }[c]));
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&', '<': '<', '>': '>', '"': '"', "'": '&#39;'
+  }[c]));
 }
 function toast(msg) {
   const el = $('#toast');
+  if (!el) return;
   el.textContent = msg;
   el.classList.add('show');
   setTimeout(() => el.classList.remove('show'), 2400);
@@ -32,35 +42,46 @@ function toast(msg) {
 function isDompinator() {
   return currentUser && currentUser.username.toLowerCase() === 'dompinator';
 }
+function formatTime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
 
 // ---------- Auth ----------
 function setAuthMode(mode) {
   $$('.auth-tab').forEach(b => b.classList.toggle('active', b.dataset.auth === mode));
-  $('#authSubmit').textContent = mode === 'signup' ? 'Skapa konto' : 'Logga in';
-  $('#authMessage').textContent = '';
+  const btn = $('#authSubmit');
+  if (btn) btn.textContent = mode === 'signup' ? 'Create account' : 'Log in';
+  const msg = $('#authMessage');
+  if (msg) msg.textContent = '';
 }
 $$('.auth-tab').forEach(b => b.addEventListener('click', () => setAuthMode(b.dataset.auth)));
 
-$('#authForm').addEventListener('submit', async (e) => {
+$('#authForm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (!supabase) return authMsg('Supabase not ready. Check your API key.');
   const username = $('#authUsername').value.trim();
   const password = $('#authPassword').value;
-  const mode = $$('.auth-tab.active')[0].dataset.auth;
-  if (username.length < 3) return authMsg('Användarnamn minst 3 tecken.');
+  const mode = $$('.auth-tab.active')[0]?.dataset.auth || 'login';
+  if (username.length < 3) return authMsg('Username must be at least 3 characters.');
   const email = username.toLowerCase() + '@grind.app';
 
   if (mode === 'signup') {
     const { data, error } = await supabase.auth.signUp({ email, password });
     if (error) return authMsg(error.message);
-    // Create profile
+    if (!data.user) return authMsg('Signup failed. Check email confirmation settings in Supabase.');
     const { error: pErr } = await supabase.from('profiles').insert({
       id: data.user.id,
       username: username,
       cash: 15,
-      is_premium: false
+      is_premium: false,
+      net_worth: 15,
+      time_played: 0
     });
-    if (pErr) return authMsg('Profil kunde inte skapas: ' + pErr.message);
-    toast('Konto skapat! Logga in.');
+    if (pErr) return authMsg('Profile error: ' + pErr.message);
+    toast('Account created! You can now log in.');
     setAuthMode('login');
   } else {
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
@@ -70,15 +91,24 @@ $('#authForm').addEventListener('submit', async (e) => {
   }
 });
 
-function authMsg(s) { $('#authMessage').textContent = s; }
+function authMsg(s) {
+  const el = $('#authMessage');
+  if (el) el.textContent = s;
+}
 
 async function loadProfile() {
+  if (!supabase) return;
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return;
   const { data, error } = await supabase.from('profiles').select('*').eq('id', user.id).single();
   if (error || !data) {
-    // fallback create
-    await supabase.from('profiles').insert({ id: user.id, username: user.email.split('@')[0], cash: 15 });
+    await supabase.from('profiles').insert({
+      id: user.id,
+      username: user.email.split('@')[0],
+      cash: 15,
+      net_worth: 15,
+      time_played: 0
+    });
     return loadProfile();
   }
   currentUser = data;
@@ -100,7 +130,6 @@ function updateUIProfile() {
     $('#profilePreview').classList.remove('hidden');
     $('#profileInitial').classList.add('hidden');
   }
-  // Notifications nav
   $('#navNotifications').classList.toggle('hidden', !isDompinator());
   updatePremiumSection();
 }
@@ -111,12 +140,36 @@ function enterApp() {
   showPage('feed');
   startRealtime();
   loadCoins();
+  startTimeTracking();
 }
 
-$('#logoutBtn').addEventListener('click', async () => {
-  await supabase.auth.signOut();
+function startTimeTracking() {
+  sessionStart = Date.now();
+  if (timeInterval) clearInterval(timeInterval);
+  timeInterval = setInterval(async () => {
+    if (!currentUser || !supabase) return;
+    const add = 30; // seconds
+    const newTime = (currentUser.time_played || 0) + add;
+    currentUser.time_played = newTime;
+    await supabase.from('profiles').update({ time_played: newTime }).eq('id', currentUser.id);
+  }, 30000);
+  window.addEventListener('beforeunload', saveTimeOnExit);
+}
+
+async function saveTimeOnExit() {
+  if (!currentUser || !sessionStart || !supabase) return;
+  const extra = Math.floor((Date.now() - sessionStart) / 1000);
+  if (extra > 5) {
+    await supabase.from('profiles').update({ time_played: (currentUser.time_played || 0) + extra }).eq('id', currentUser.id);
+  }
+}
+
+$('#logoutBtn')?.addEventListener('click', async () => {
+  await saveTimeOnExit();
+  if (timeInterval) clearInterval(timeInterval);
+  if (supabase) await supabase.auth.signOut();
   currentUser = null;
-  if (realtimeChannel) supabase.removeChannel(realtimeChannel);
+  if (realtimeChannel && supabase) supabase.removeChannel(realtimeChannel);
   $('#appView').classList.add('hidden');
   $('#authView').classList.remove('hidden');
   setAuthMode('login');
@@ -125,25 +178,47 @@ $('#logoutBtn').addEventListener('click', async () => {
 // ---------- Navigation ----------
 function showPage(page) {
   $$('.page').forEach(p => p.classList.add('hidden'));
-  $('#page-' + page).classList.remove('hidden');
+  const target = $('#page-' + page);
+  if (target) target.classList.remove('hidden');
   $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === page));
-  const titles = { feed: 'Discover currencies', create: 'Skapa currency', money: 'Dina pengar', account: 'Konto', notifications: 'Notiser', coin: 'Currency' };
+  const titles = {
+    feed: 'Discover currencies',
+    create: 'Create currency',
+    money: 'Your money',
+    global: 'Global leaderboards',
+    account: 'Account settings',
+    notifications: 'Notifications',
+    coin: 'Currency'
+  };
   $('#pageTitle').textContent = titles[page] || 'GRIND';
   if (page === 'feed') renderFeed();
   if (page === 'money') renderMoney();
+  if (page === 'global') renderLeaderboard();
   if (page === 'account') updatePremiumSection();
   if (page === 'notifications' && isDompinator()) loadRequests();
 }
 $$('.nav-btn').forEach(b => b.addEventListener('click', () => showPage(b.dataset.page)));
 $$('[data-goto]').forEach(b => b.addEventListener('click', () => showPage(b.dataset.goto)));
-$$('.feed-tab').forEach(b => b.addEventListener('click', () => {
-  feedMode = b.dataset.feed;
-  $$('.feed-tab').forEach(x => x.classList.toggle('active', x === b));
-  renderFeed();
-}));
+$$('.feed-tab').forEach(b => {
+  if (b.dataset.feed) {
+    b.addEventListener('click', () => {
+      feedMode = b.dataset.feed;
+      $$('.feed-tab[data-feed]').forEach(x => x.classList.toggle('active', x === b));
+      renderFeed();
+    });
+  }
+  if (b.dataset.lb) {
+    b.addEventListener('click', () => {
+      lbMode = b.dataset.lb;
+      $$('.feed-tab[data-lb]').forEach(x => x.classList.toggle('active', x === b));
+      renderLeaderboard();
+    });
+  }
+});
 
 // ---------- Coins & Feed ----------
 async function loadCoins() {
+  if (!supabase) return;
   const { data, error } = await supabase.from('coins').select('*').order('created_at', { ascending: false });
   if (!error) coins = data || [];
   renderFeed();
@@ -164,7 +239,7 @@ function renderFeed() {
         </div>
       </div>
       <div class="coin-price">${money(c.price)}</div>
-      <div class="coin-change ${c.change_pct >= 0 ? 'up' : 'down'}">${c.change_pct >= 0 ? '↗ +' : '↘ '}${Number(c.change_pct || 0).toFixed(2)}% idag</div>
+      <div class="coin-change ${(c.change_pct || 0) >= 0 ? 'up' : 'down'}">${(c.change_pct || 0) >= 0 ? '↗ +' : '↘ '}${Number(c.change_pct || 0).toFixed(2)}% today</div>
       <p class="coin-desc">${escapeHtml(c.description || 'Community currency.')}</p>
     </article>
   `).join('');
@@ -173,32 +248,31 @@ function renderFeed() {
   $$('.coin-card').forEach(card => card.addEventListener('click', () => openCoin(card.dataset.coin)));
 }
 
-$('#coinImage').addEventListener('change', e => {
+$('#coinImage')?.addEventListener('change', e => {
   const file = e.target.files[0];
   if (!file) return;
-  if (file.size > 400 * 1024) return toast('Bild max 400 KB');
+  if (file.size > 400 * 1024) return toast('Image must be under 400 KB');
   const r = new FileReader();
   r.onload = () => {
     pendingCoinImage = r.result;
-    $('#coinPreview').innerHTML = `<img src="${r.result}" style="width:100%;height:100%;object-fit:cover;border-radius:12px">`;
+    $('#coinPreview').innerHTML = `<img src="${r.result}" style="width:100%;height:100%;object-fit:cover;border-radius:14px">`;
   };
   r.readAsDataURL(file);
 });
 
-$('#createForm').addEventListener('submit', async (e) => {
+$('#createForm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!currentUser) return;
-  // Check coin limit
+  if (!currentUser || !supabase) return;
   const { count } = await supabase.from('coins').select('*', { count: 'exact', head: true }).eq('creator_id', currentUser.id);
   const max = currentUser.is_premium ? 3 : 1;
-  if (count >= max) return $('#createMessage').textContent = `Max ${max} coin${max > 1 ? 's' : ''} för ditt konto.`;
+  if (count >= max) return $('#createMessage').textContent = `Max ${max} coin${max > 1 ? 's' : ''} for your account.`;
 
   const name = $('#coinName').value.trim();
   const ticker = $('#coinTicker').value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-  if (!ticker) return $('#createMessage').textContent = 'Ogiltig ticker.';
+  if (!ticker) return $('#createMessage').textContent = 'Invalid ticker.';
   const description = $('#coinDescription').value.trim();
 
-  const { data, error } = await supabase.from('coins').insert({
+  const { error } = await supabase.from('coins').insert({
     creator_id: currentUser.id,
     name,
     ticker,
@@ -206,14 +280,14 @@ $('#createForm').addEventListener('submit', async (e) => {
     image_url: pendingCoinImage,
     price: 1,
     change_pct: 0
-  }).select().single();
+  });
 
   if (error) return $('#createMessage').textContent = error.message;
   pendingCoinImage = null;
   $('#createForm').reset();
   $('#coinPreview').textContent = '＋';
-  $('#createMessage').textContent = 'Currency skapad!';
-  toast('Din coin är live!');
+  $('#createMessage').textContent = 'Currency created!';
+  toast('Your coin is live!');
   await loadCoins();
   showPage('feed');
 });
@@ -227,13 +301,11 @@ async function openCoin(id) {
 }
 
 async function renderCoinDetail() {
-  if (!selectedCoin) return;
+  if (!selectedCoin || !currentUser || !supabase) return;
   const c = selectedCoin;
-  // Get my shares
   const { data: hold } = await supabase.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', c.id).maybeSingle();
   const shares = hold?.shares || 0;
 
-  // Get recent trades for chart + bubbles
   const { data: trades } = await supabase.from('trades')
     .select('*, profiles(username, avatar_url)')
     .eq('coin_id', c.id)
@@ -246,25 +318,25 @@ async function renderCoinDetail() {
       <div>
         <h3>${escapeHtml(c.name)} <span class="muted">$${escapeHtml(c.ticker)}</span></h3>
         <p>${escapeHtml(c.description || '')}</p>
-        <p class="muted tiny">Skapad av community</p>
+        <p class="muted tiny">Community created</p>
       </div>
     </div>
     <div class="detail-price">${money(c.price)}</div>
-    <div class="coin-change ${c.change_pct >= 0 ? 'up' : 'down'}">${c.change_pct >= 0 ? '↗ +' : '↘ '}${Number(c.change_pct || 0).toFixed(2)}%</div>
+    <div class="coin-change ${(c.change_pct || 0) >= 0 ? 'up' : 'down'}">${(c.change_pct || 0) >= 0 ? '↗ +' : '↘ '}${Number(c.change_pct || 0).toFixed(2)}%</div>
     <div class="chart-wrap">
-      <div class="chart-head"><strong>Prishistorik + trades</strong><span class="muted tiny">Bubblor = köp/sälj</span></div>
+      <div class="chart-head"><strong>Price history + trades</strong><span class="muted tiny">Bubbles = buys/sells</span></div>
       <canvas id="priceChart" width="900" height="250"></canvas>
     </div>
     <div class="trade-panel">
-      <h3>Handla $${escapeHtml(c.ticker)}</h3>
+      <h3>Trade $${escapeHtml(c.ticker)}</h3>
       <div class="trade-buttons">
         ${[1, 5, 10, 25, 50].map(n => `<button class="amount-btn ${n === selectedAmount ? 'active' : ''}" data-buy="${n}">$${n}</button>`).join('')}
       </div>
       <div class="trade-actions">
-        <button class="buy-btn" id="buyBtn">Köp ${money(selectedAmount)}</button>
-        <button class="sell-btn" id="sellBtn">Sälj 25%</button>
+        <button class="buy-btn" id="buyBtn">Buy ${money(selectedAmount)}</button>
+        <button class="sell-btn" id="sellBtn">Sell 25%</button>
       </div>
-      <p class="muted tiny" style="margin-top:10px">Du äger: ${shares.toFixed(4)} shares · Värde ${money(shares * c.price)} · Cash ${money(currentUser.cash)}</p>
+      <p class="muted tiny" style="margin-top:10px">You own: ${shares.toFixed(4)} shares · Worth ${money(shares * c.price)} · Cash ${money(currentUser.cash)}</p>
       <p class="form-message" id="tradeMessage"></p>
     </div>
   `;
@@ -272,43 +344,47 @@ async function renderCoinDetail() {
   $$('[data-buy]').forEach(b => b.addEventListener('click', () => {
     selectedAmount = Number(b.dataset.buy);
     $$('[data-buy]').forEach(x => x.classList.toggle('active', x === b));
-    $('#buyBtn').textContent = `Köp ${money(selectedAmount)}`;
+    $('#buyBtn').textContent = `Buy ${money(selectedAmount)}`;
   }));
-  $('#buyBtn').addEventListener('click', () => buy(c, selectedAmount));
-  $('#sellBtn').addEventListener('click', () => sell(c, shares * 0.25));
+  $('#buyBtn')?.addEventListener('click', () => buy(c, selectedAmount));
+  $('#sellBtn')?.addEventListener('click', () => sell(c, shares * 0.25));
 
   drawChartWithBubbles(c, trades || []);
 }
 
 function calculateImpact(amount, price) {
-  // Mer impact när priset är lågt
   const priceFactor = Math.max(0.35, 1 / Math.sqrt(Math.max(0.2, price)));
   const dollarFactor = amount / 25;
   let impact = dollarFactor * priceFactor * 0.07;
   return Math.min(0.12, Math.max(0.004, impact));
 }
 
+async function updateNetWorth() {
+  if (!currentUser || !supabase) return;
+  const { data: holds } = await supabase.from('holdings').select('shares, coins(price)').eq('user_id', currentUser.id);
+  const portValue = (holds || []).reduce((s, h) => s + (h.shares || 0) * (h.coins?.price || 0), 0);
+  const nw = currentUser.cash + portValue;
+  currentUser.net_worth = nw;
+  await supabase.from('profiles').update({ net_worth: nw }).eq('id', currentUser.id);
+  $('#totalValue').textContent = money(nw);
+}
+
 async function buy(coin, amount) {
-  if (currentUser.cash < amount) return $('#tradeMessage').textContent = 'Inte tillräckligt med cash.';
+  if (!currentUser || currentUser.cash < amount) return $('#tradeMessage').textContent = 'Not enough cash.';
   const impact = calculateImpact(amount, coin.price);
   const newPrice = coin.price * (1 + impact);
   const shares = amount / coin.price;
-
-  // Update cash
   const newCash = currentUser.cash - amount;
+
   const { error: cashErr } = await supabase.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
-  if (cashErr) return $('#tradeMessage').textContent = 'Cash-fel: ' + cashErr.message;
+  if (cashErr) return $('#tradeMessage').textContent = 'Cash error: ' + cashErr.message;
 
-  // Update coin price + change
-  const change = ((newPrice - 1) / 1) * 100; // simple from start, or accumulate
-  await supabase.from('coins').update({ price: newPrice, change_pct: coin.change_pct + impact * 100 }).eq('id', coin.id);
+  await supabase.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) + impact * 100 }).eq('id', coin.id);
 
-  // Upsert holdings
   const { data: existing } = await supabase.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
   const newShares = (existing?.shares || 0) + shares;
   await supabase.from('holdings').upsert({ user_id: currentUser.id, coin_id: coin.id, shares: newShares });
 
-  // Insert trade
   await supabase.from('trades').insert({
     coin_id: coin.id,
     user_id: currentUser.id,
@@ -322,23 +398,24 @@ async function buy(coin, amount) {
   coin.price = newPrice;
   coin.change_pct = (coin.change_pct || 0) + impact * 100;
   updateUIProfile();
-  toast(`Köpte för ${money(amount)}!`);
+  await updateNetWorth();
+  toast(`Bought for ${money(amount)}!`);
   await loadCoins();
   selectedCoin = coins.find(x => x.id === coin.id) || coin;
   renderCoinDetail();
 }
 
 async function sell(coin, sharesToSell) {
-  if (sharesToSell <= 0) return $('#tradeMessage').textContent = 'Inga shares att sälja.';
+  if (!currentUser || sharesToSell <= 0) return $('#tradeMessage').textContent = 'No shares to sell.';
   const { data: hold } = await supabase.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
   const owned = hold?.shares || 0;
   const sellShares = Math.min(sharesToSell, owned);
   if (sellShares <= 0) return;
   const proceeds = sellShares * coin.price;
   const impact = calculateImpact(proceeds, coin.price) * 0.6;
-  const newPrice = coin.price * (1 - impact);
-
+  const newPrice = Math.max(0.01, coin.price * (1 - impact));
   const newCash = currentUser.cash + proceeds;
+
   await supabase.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
   await supabase.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) - impact * 100 }).eq('id', coin.id);
   await supabase.from('holdings').update({ shares: owned - sellShares }).eq('user_id', currentUser.id).eq('coin_id', coin.id);
@@ -354,7 +431,8 @@ async function sell(coin, sharesToSell) {
   currentUser.cash = newCash;
   coin.price = newPrice;
   updateUIProfile();
-  toast(`Sålde för ${money(proceeds)}`);
+  await updateNetWorth();
+  toast(`Sold for ${money(proceeds)}`);
   await loadCoins();
   selectedCoin = coins.find(x => x.id === coin.id) || coin;
   renderCoinDetail();
@@ -367,7 +445,6 @@ function drawChartWithBubbles(coin, trades) {
   const w = canvas.width, h = canvas.height;
   ctx.clearRect(0, 0, w, h);
 
-  // Build price history from trades (start at 1)
   const points = [{ price: 1, time: 0 }];
   trades.forEach(t => points.push({ price: t.price_after, time: new Date(t.created_at).getTime() }));
   if (points.length === 1) points.push({ price: coin.price, time: Date.now() });
@@ -379,26 +456,23 @@ function drawChartWithBubbles(coin, trades) {
   const maxTime = points[points.length - 1].time || Date.now();
   const timeRange = maxTime - minTime || 1;
 
-  // Grid
   ctx.strokeStyle = 'rgba(190,165,225,.12)';
   ctx.lineWidth = 1;
   for (let i = 1; i < 5; i++) {
     ctx.beginPath(); ctx.moveTo(0, h * i / 5); ctx.lineTo(w, h * i / 5); ctx.stroke();
   }
 
-  // Line
   ctx.beginPath();
   points.forEach((p, i) => {
     const x = ((p.time - minTime) / timeRange) * w;
     const y = h - ((p.price - min) / range) * (h - 30) - 15;
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   });
-  ctx.strokeStyle = '#b38aff';
+  ctx.strokeStyle = '#c084fc';
   ctx.lineWidth = 3;
   ctx.lineJoin = 'round';
   ctx.stroke();
 
-  // Bubbles for trades
   const wrap = canvas.parentElement;
   wrap.querySelectorAll('.bubble').forEach(b => b.remove());
   trades.forEach(t => {
@@ -407,17 +481,18 @@ function drawChartWithBubbles(coin, trades) {
     if (x < 0 || x > w) return;
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    bubble.style.left = (x - 14) + 'px';
-    bubble.style.top = (y - 40) + 'px';
+    bubble.style.left = (x - 15) + 'px';
+    bubble.style.top = (y - 42) + 'px';
     const avatar = t.profiles?.avatar_url;
-    bubble.innerHTML = avatar ? `<img src="${avatar}">` : `<span style="font-size:11px;color:white">${(t.profiles?.username || '?')[0].toUpperCase()}</span>`;
-    bubble.title = `${t.profiles?.username || 'Någon'} ${t.type === 'buy' ? 'köpte' : 'sålde'} för $${t.amount_usd}`;
+    bubble.innerHTML = avatar ? `<img src="${avatar}">` : `<span>${(t.profiles?.username || '?')[0].toUpperCase()}</span>`;
+    bubble.title = `${t.profiles?.username || 'Someone'} ${t.type === 'buy' ? 'bought' : 'sold'} for $${t.amount_usd}`;
     wrap.appendChild(bubble);
   });
 }
 
 // ---------- Money / Portfolio ----------
 async function renderMoney() {
+  if (!currentUser || !supabase) return;
   const { data: holds } = await supabase.from('holdings').select('*, coins(name, ticker, price, image_url)').eq('user_id', currentUser.id).gt('shares', 0);
   const list = holds || [];
   const value = list.reduce((s, h) => s + h.shares * (h.coins?.price || 0), 0);
@@ -441,10 +516,35 @@ async function renderMoney() {
   $$('.holding').forEach(el => el.addEventListener('click', () => openCoin(el.dataset.coin)));
 }
 
+// ---------- Global Leaderboards ----------
+async function renderLeaderboard() {
+  if (!supabase) return;
+  let query = supabase.from('profiles').select('username, avatar_url, net_worth, time_played, is_premium');
+  if (lbMode === 'networth') {
+    query = query.order('net_worth', { ascending: false }).limit(100);
+  } else {
+    query = query.order('time_played', { ascending: false }).limit(100);
+  }
+  const { data, error } = await query;
+  const list = data || [];
+  $('#leaderboardList').innerHTML = list.map((p, i) => `
+    <div class="lb-row">
+      <div class="lb-rank ${i < 3 ? 'top3' : ''}">#${i + 1}</div>
+      <div class="avatar">${p.avatar_url ? `<img src="${p.avatar_url}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
+      <div class="lb-info">
+        <strong>${escapeHtml(p.username || 'Unknown')} ${p.is_premium ? '★' : ''}</strong>
+        <div class="muted tiny">${lbMode === 'networth' ? 'Net worth' : 'Time played'}</div>
+      </div>
+      <div class="lb-value">${lbMode === 'networth' ? money(p.net_worth || 0) : formatTime(p.time_played || 0)}</div>
+    </div>
+  `).join('');
+  $('#emptyLeaderboard').classList.toggle('hidden', list.length > 0);
+}
+
 // ---------- Profile image ----------
-$('#profileImage').addEventListener('change', async (e) => {
+$('#profileImage')?.addEventListener('change', async (e) => {
   const file = e.target.files[0];
-  if (!file || file.size > 400 * 1024) return toast('Bild max 400 KB');
+  if (!file || file.size > 400 * 1024) return toast('Image must be under 400 KB');
   const r = new FileReader();
   r.onload = async () => {
     const dataUrl = r.result;
@@ -452,7 +552,7 @@ $('#profileImage').addEventListener('change', async (e) => {
     if (!error) {
       currentUser.avatar_url = dataUrl;
       updateUIProfile();
-      toast('Profilbild uppdaterad!');
+      toast('Profile picture updated!');
     }
   };
   r.readAsDataURL(file);
@@ -464,28 +564,29 @@ function updatePremiumSection() {
   const statusEl = $('#premiumStatus');
   const form = $('#requestForm');
   if (currentUser.is_premium) {
-    statusEl.textContent = 'Du har Premium! Du kan skapa upp till 3 coins.';
+    statusEl.textContent = 'You have Premium! You can create up to 3 coins.';
     form.classList.add('hidden');
   } else {
-    statusEl.textContent = 'Normal account: max 1 coin. Skicka request för Premium (max 3).';
+    statusEl.textContent = 'Normal account: max 1 coin. Request Premium for up to 3.';
     form.classList.remove('hidden');
   }
 }
 
 $('#sendRequestBtn')?.addEventListener('click', async () => {
   const reason = $('#premiumReason').value.trim();
-  if (!reason) return toast('Skriv en anledning.');
+  if (!reason) return toast('Write a reason.');
   const { error } = await supabase.from('premium_requests').insert({
     user_id: currentUser.id,
     reason,
     status: 'pending'
   });
   if (error) return toast(error.message);
-  toast('Request skickad till Dompinator!');
+  toast('Request sent to Dompinator!');
   $('#premiumReason').value = '';
 });
 
 async function loadRequests() {
+  if (!supabase) return;
   const { data } = await supabase.from('premium_requests')
     .select('*, profiles(username)')
     .eq('status', 'pending')
@@ -493,11 +594,11 @@ async function loadRequests() {
   const list = data || [];
   $('#requestsList').innerHTML = list.map(r => `
     <div class="request-card">
-      <h4>${escapeHtml(r.profiles?.username || 'Okänd')}</h4>
+      <h4>${escapeHtml(r.profiles?.username || 'Unknown')}</h4>
       <p>${escapeHtml(r.reason)}</p>
       <div class="request-actions">
-        <button class="approve-btn" data-id="${r.id}" data-user="${r.user_id}">Godkänn</button>
-        <button class="deny-btn" data-id="${r.id}">Neka</button>
+        <button class="approve-btn" data-id="${r.id}" data-user="${r.user_id}">Approve</button>
+        <button class="deny-btn" data-id="${r.id}">Deny</button>
       </div>
     </div>
   `).join('');
@@ -507,16 +608,18 @@ async function loadRequests() {
 }
 
 async function handleRequest(reqId, userId, status) {
+  if (!supabase) return;
   await supabase.from('premium_requests').update({ status }).eq('id', reqId);
   if (status === 'approved' && userId) {
     await supabase.from('profiles').update({ is_premium: true }).eq('id', userId);
   }
-  toast(status === 'approved' ? 'Godkänd!' : 'Nekad');
+  toast(status === 'approved' ? 'Approved!' : 'Denied');
   loadRequests();
 }
 
 // ---------- Realtime ----------
 function startRealtime() {
+  if (!supabase) return;
   realtimeChannel = supabase.channel('grind-live')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'coins' }, () => loadCoins())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
@@ -525,10 +628,14 @@ function startRealtime() {
     .subscribe();
 }
 
-$('#backToFeed').addEventListener('click', () => showPage('feed'));
+$('#backToFeed')?.addEventListener('click', () => showPage('feed'));
 
 // ---------- Init ----------
 (async () => {
+  if (!supabase) {
+    authMsg('Failed to connect to Supabase. Replace the API key in app.js with your real anon key.');
+    return;
+  }
   const { data: { session } } = await supabase.auth.getSession();
   if (session) {
     await loadProfile();
