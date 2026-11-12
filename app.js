@@ -29,7 +29,11 @@ let timeInterval = null;
 function money(n) { return '$' + Number(n || 0).toFixed(2); }
 function escapeHtml(s = '') {
   return String(s).replace(/[&<>"']/g, c => ({
-    '&': '&', '<': '<', '>': '>', '"': '"', "'": '&#39;'
+    '&': '&',
+    '<': '<',
+    '>': '>',
+    '"': '"',
+    "'": '&#39;'
   }[c]));
 }
 function toast(msg) {
