@@ -322,6 +322,7 @@ $$('.feed-tab').forEach(b => {
       feedMode = b.dataset.feed;
       $$('.feed-tab[data-feed]').forEach(x => x.classList.toggle('active', x === b));
       renderFeed();
+      if (feedMode === 'trending') loadCoins();
     });
   }
   if (b.dataset.lb) {
@@ -336,33 +337,37 @@ $$('.feed-tab').forEach(b => {
 // ---------- Coins & Feed ----------
 async function loadCoins() {
   if (!sb) return;
-  let res = await sb.from('coins').select('*, profiles(username, is_premium)').order('created_at', { ascending: false });
-  if (res.error) {
-    res = await sb.from('coins').select('*').order('created_at', { ascending: false });
-  }
-  if (!res.error) {
-    const list = res.data || [];
+  const { data, error } = await sb.from('coins').select('*').order('created_at', { ascending: false });
+  if (!error) {
+    const list = data || [];
     const stats = new Map();
     try {
-      const { data: tradeRows } = await sb.from('trades').select('coin_id, amount_usd, created_at');
+      const { data: buyRows } = await sb
+        .from('trades')
+        .select('coin_id, amount_usd, created_at')
+        .eq('type', 'buy')
+        .order('created_at', { ascending: false })
+        .limit(1000);
       const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-      (tradeRows || []).forEach(t => {
+      (buyRows || []).forEach(t => {
         if (!t.coin_id) return;
-        const s = stats.get(t.coin_id) || { total: 0, recent: 0, volume: 0 };
+        const ts = t.created_at ? new Date(t.created_at).getTime() : 0;
+        const s = stats.get(t.coin_id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
         s.total += 1;
         s.volume += Number(t.amount_usd || 0);
-        if (t.created_at && new Date(t.created_at).getTime() >= dayAgo) s.recent += 1;
+        if (ts >= dayAgo) s.recent += 1;
+        if (ts > s.lastBuy) s.lastBuy = ts;
         stats.set(t.coin_id, s);
       });
     } catch (e) {}
     coins = list.map(c => {
-      const st = stats.get(c.id) || { total: 0, recent: 0, volume: 0 };
+      const st = stats.get(c.id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
       return {
         ...c,
-        trade_count: st.total,
-        recent_trade_count: st.recent,
-        volume_usd: st.volume,
-        creator_is_premium: Boolean(c.profiles?.is_premium)
+        recent_buys_24h: st.recent,
+        total_buys: st.total,
+        buy_volume: st.volume,
+        last_buy_at: st.lastBuy
       };
     });
   }
@@ -375,18 +380,19 @@ function renderFeed() {
   if (feedMode === 'new') list.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   if (feedMode === 'trending') {
     list.sort((a, b) => {
-      const scoreA = (a.recent_trade_count || 0) * 1000 + (a.trade_count || 0) * 100 + (a.volume_usd || 0) + Math.abs(Number(a.change_pct || 0));
-      const scoreB = (b.recent_trade_count || 0) * 1000 + (b.trade_count || 0) * 100 + (b.volume_usd || 0) + Math.abs(Number(b.change_pct || 0));
-      if (scoreB !== scoreA) return scoreB - scoreA;
-      return new Date(b.created_at) - new Date(a.created_at);
+      if ((b.recent_buys_24h || 0) !== (a.recent_buys_24h || 0)) {
+        return (b.recent_buys_24h || 0) - (a.recent_buys_24h || 0);
+      }
+      if ((b.total_buys || 0) !== (a.total_buys || 0)) {
+        return (b.total_buys || 0) - (a.total_buys || 0);
+      }
+      if ((b.last_buy_at || 0) !== (a.last_buy_at || 0)) {
+        return (b.last_buy_at || 0) - (a.last_buy_at || 0);
+      }
+      return (b.buy_volume || 0) - (a.buy_volume || 0);
     });
   }
   if (feedMode === 'expensive') list.sort((a, b) => Number(b.price) - Number(a.price));
-  if (feedMode === 'premium') {
-    list = list
-      .filter(c => Boolean(c.creator_is_premium || c.profiles?.is_premium))
-      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  }
   $('#feedGrid').innerHTML = list.map(c => `
     <article class="coin-card" data-coin="${c.id}">
       <div class="coin-top">
@@ -1177,7 +1183,7 @@ function loadRandomAd(preloadedList) {
           return;
         }
         adLocked = false;
-        if (statusEl) statusEl.textContent = 'Could not load video ad.';
+        if (statusEl) statusEl.textContent = `Could not play "${ad.name}". Make sure it is a valid video file.`;
         claimBtn?.classList.add('hidden');
         backBtn?.classList.remove('hidden');
       };

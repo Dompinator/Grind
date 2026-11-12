@@ -184,11 +184,11 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .app.ads-fullscreen .sidebar { display: none; }
 .app.ads-fullscreen .topbar { display: none; }
 .app.ads-fullscreen .main-area { margin-left: 0; width: 100%; min-height: 100vh; }
-.app.ads-fullscreen .content { padding: 0; max-width: none; width: 100%; height: 100vh; }
-#page-ads { width: 100%; height: 100vh; display: flex; flex-direction: column; padding: 18px 24px; background: var(--bg); }
-.ad-card { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 14px; }
-.ad-stage { flex: 1; min-height: 0; background: #120e1c; border: 1px solid var(--line); border-radius: 16px; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 12px; text-align: center; }
+.app.ads-fullscreen .content { padding: 0; max-width: none; width: 100%; }
+#page-ads { position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; height: 100dvh; display: flex; flex-direction: column; padding: 16px 20px; background: var(--bg); overflow: hidden; }
+.ad-card { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.ad-stage { flex: 1; min-height: 0; min-width: 0; width: 100%; background: #120e1c; border: 1px solid var(--line); border-radius: 16px; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 8px; text-align: center; }
 .ad-stage img, .ad-stage video { width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 10px; display: block; }
-.ad-controls { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 16px; }
+.ad-controls { flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 16px; }
 .ad-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .ad-actions button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; filter: none; }
