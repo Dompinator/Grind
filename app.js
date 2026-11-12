@@ -171,7 +171,21 @@ async function loadProfile() {
   const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).single();
   if (error || !data) {
     const { error: cErr } = await createProfile(user);
-    if (cErr) { authMsg('Profile error: ' + cErr.message); return; }
+    if (cErr) {
+      console.warn('Profile create error in Supabase:', cErr);
+      // Fallback so currentUser is always defined and app/coin creation is never silently blocked
+      currentUser = {
+        id: user.id,
+        username: (user.email || 'trader').split('@')[0],
+        email: user.email,
+        cash: 15,
+        is_premium: (user.email || '').toLowerCase().includes('dompinator'),
+        net_worth: 15,
+        time_played: 0
+      };
+      updateUIProfile();
+      return;
+    }
     return loadProfile();
   }
   currentUser = data;
@@ -332,42 +346,87 @@ $('#coinImage')?.addEventListener('change', e => {
 
 $('#createForm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!currentUser || !sb) return;
-  const { count } = await sb.from('coins').select('*', { count: 'exact', head: true }).eq('creator_id', currentUser.id);
-  const max = currentUser.is_premium ? 3 : 1;
-  if (!isDompinator() && count !== null && count >= max) return $('#createMessage').textContent = `Max ${max} coin${max > 1 ? 's' : ''} for your account.`;
+  const btn = $('#createForm button[type="submit"]');
+  const msgEl = $('#createMessage');
+  if (msgEl) msgEl.textContent = 'Creating currency...';
+  if (btn) btn.disabled = true;
 
-  const name = $('#coinName').value.trim();
-  const ticker = $('#coinTicker').value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-  if (!ticker) return $('#createMessage').textContent = 'Invalid ticker.';
-  const description = $('#coinDescription').value.trim();
+  try {
+    if (!currentUser) {
+      if (msgEl) msgEl.textContent = 'You must be logged in to create a currency.';
+      toast('Please log in first.');
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (!sb) {
+      if (msgEl) msgEl.textContent = 'Supabase connection is not ready.';
+      toast('Supabase error');
+      if (btn) btn.disabled = false;
+      return;
+    }
 
-  const { data, error } = await sb.from('coins').insert({
-    creator_id: currentUser.id,
-    name,
-    ticker,
-    description,
-    image_url: pendingCoinImage,
-    price: 1,
-    change_pct: 0
-  }).select().maybeSingle();
+    const name = $('#coinName').value.trim();
+    const ticker = $('#coinTicker').value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!name) {
+      if (msgEl) msgEl.textContent = 'Please enter a name.';
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (!ticker) {
+      if (msgEl) msgEl.textContent = 'Invalid ticker (letters and numbers only).';
+      if (btn) btn.disabled = false;
+      return;
+    }
+    const description = $('#coinDescription').value.trim();
 
-  if (error) {
-    $('#createMessage').textContent = error.message;
-    toast('Error: ' + error.message);
-    return;
-  }
+    if (!isDompinator()) {
+      try {
+        const { count, error: countErr } = await sb.from('coins').select('*', { count: 'exact', head: true }).eq('creator_id', currentUser.id);
+        const max = currentUser.is_premium ? 3 : 1;
+        if (!countErr && count !== null && count >= max) {
+          if (msgEl) msgEl.textContent = `Max ${max} coin${max > 1 ? 's' : ''} for your account.`;
+          toast(`Max ${max} coin${max > 1 ? 's' : ''} for your account.`);
+          if (btn) btn.disabled = false;
+          return;
+        }
+      } catch (err) {}
+    }
 
-  pendingCoinImage = null;
-  $('#createForm').reset();
-  $('#coinPreview').textContent = '＋';
-  $('#createMessage').textContent = 'Currency created!';
-  toast('Your coin is live!');
-  await loadCoins();
-  if (data) {
-    openCoin(data.id);
-  } else {
-    showPage('feed');
+    const { data, error } = await sb.from('coins').insert({
+      creator_id: currentUser.id,
+      name,
+      ticker,
+      description,
+      image_url: pendingCoinImage,
+      price: 1,
+      change_pct: 0
+    }).select().maybeSingle();
+
+    if (error) {
+      console.error('Coin creation error:', error);
+      if (msgEl) msgEl.textContent = error.message;
+      toast('Error: ' + error.message);
+      if (btn) btn.disabled = false;
+      return;
+    }
+
+    pendingCoinImage = null;
+    $('#createForm').reset();
+    $('#coinPreview').textContent = '＋';
+    if (msgEl) msgEl.textContent = 'Currency created!';
+    toast('Your coin is live!');
+    await loadCoins();
+    if (data && data.id) {
+      openCoin(data.id);
+    } else {
+      showPage('feed');
+    }
+  } catch (err) {
+    console.error('Submit catch:', err);
+    if (msgEl) msgEl.textContent = 'Error: ' + err.message;
+    toast('Error: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 });
 
