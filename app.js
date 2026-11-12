@@ -59,6 +59,10 @@ function setAuthMode(mode) {
   tabs.forEach(b => b.classList.toggle('active', b.dataset.auth === mode));
   const btn = document.getElementById('authSubmit');
   if (btn) btn.textContent = mode === 'signup' ? 'Create account' : 'Log in';
+  const emailLabel = document.getElementById('emailLabel');
+  const emailInput = document.getElementById('authEmail');
+  if (emailLabel) emailLabel.classList.toggle('hidden', mode !== 'signup');
+  if (emailInput) emailInput.required = mode === 'signup';
   const msg = document.getElementById('authMessage');
   if (msg) msg.textContent = '';
 }
@@ -79,24 +83,33 @@ $('#authForm')?.addEventListener('submit', async (e) => {
   const password = $('#authPassword').value;
   const mode = $$('.auth-tab.active')[0]?.dataset.auth || 'login';
   if (username.length < 3) return authMsg('Username must be at least 3 characters.');
-  const email = username.toLowerCase() + '@grind.app';
 
   if (mode === 'signup') {
+    const email = $('#authEmail').value.trim();
+    if (!email || !email.includes('@')) return authMsg('Please enter a valid email.');
     const { data, error } = await supabase.auth.signUp({ email, password });
     if (error) return authMsg(error.message);
-    if (!data.user) return authMsg('Signup failed. Check email confirmation settings in Supabase.');
+    if (!data.user) return authMsg('Check your email to confirm the account.');
     const { error: pErr } = await supabase.from('profiles').insert({
       id: data.user.id,
       username: username,
+      email: email,
       cash: 15,
       is_premium: false,
       net_worth: 15,
       time_played: 0
     });
     if (pErr) return authMsg('Profile error: ' + pErr.message);
-    toast('Account created! You can now log in.');
+    toast('Account created! Check your email to confirm, then log in.');
     setAuthMode('login');
   } else {
+    // Login: try username first, fall back to email
+    let email = username;
+    if (!username.includes('@')) {
+      const { data: profile } = await supabase.from('profiles').select('email').eq('username', username).maybeSingle();
+      if (!profile?.email) return authMsg('Username not found.');
+      email = profile.email;
+    }
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) return authMsg(error.message);
     await loadProfile();
@@ -118,6 +131,7 @@ async function loadProfile() {
     await supabase.from('profiles').insert({
       id: user.id,
       username: user.email.split('@')[0],
+      email: user.email,
       cash: 15,
       net_worth: 15,
       time_played: 0

@@ -18,11 +18,13 @@ SETUP
 -- Add columns if missing
 alter table profiles add column if not exists net_worth numeric default 15;
 alter table profiles add column if not exists time_played integer default 0;
+alter table profiles add column if not exists email text;
 
 -- Full schema (safe to run if tables already exist with IF NOT EXISTS)
 create table if not exists profiles (
   id uuid primary key references auth.users on delete cascade,
   username text unique not null,
+  email text,
   avatar_url text,
   cash numeric default 15,
   is_premium boolean default false,
