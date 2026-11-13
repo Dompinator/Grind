@@ -442,7 +442,159 @@ async function applyAdminActionsForCurrentUser() {
       $('#warnModal')?.classList.remove('hidden');
     }
   }
+
+  // 4. Check Active Update Notifications
+  await checkPendingUpdateNotifications();
 }
+
+let activeUpdateQueue = [];
+let currentUpdateModalItem = null;
+
+async function fetchActiveUpdates() {
+  if (!sb) return [];
+  const deletedIds = new Set();
+  const posts = [];
+  try {
+    const [{ data: postRows }, { data: delRows }] = await Promise.all([
+      sb.from('premium_requests')
+        .select('reason, created_at, profiles(username)')
+        .like('reason', '__UPDATE_POST__:%')
+        .order('created_at', { ascending: true })
+        .limit(200),
+      sb.from('premium_requests')
+        .select('reason, profiles(username)')
+        .like('reason', '__UPDATE_DEL__:%')
+        .limit(200)
+    ]);
+    (delRows || []).forEach(r => {
+      if ((r.profiles?.username || '').toLowerCase() !== 'dompinator') return;
+      deletedIds.add(String(r.reason).slice('__UPDATE_DEL__:'.length));
+    });
+    (postRows || []).forEach(r => {
+      if ((r.profiles?.username || '').toLowerCase() !== 'dompinator') return;
+      try {
+        const upd = JSON.parse(String(r.reason).slice('__UPDATE_POST__:'.length));
+        if (upd && upd.id && !deletedIds.has(upd.id)) {
+          posts.push(upd);
+        }
+      } catch (e) {}
+    });
+  } catch (e) {}
+  return posts;
+}
+
+async function checkPendingUpdateNotifications() {
+  if (!currentUser || currentUser.is_banned || !sb) return;
+  const uid = currentUser.id;
+  const posts = await fetchActiveUpdates();
+  if (!posts.length) {
+    $('#updateModal')?.classList.add('hidden');
+    return;
+  }
+
+  let ackIds = [];
+  try {
+    ackIds = JSON.parse(localStorage.getItem('grind_upd_ack_' + uid) || '[]');
+    if (!Array.isArray(ackIds)) ackIds = [];
+  } catch (e) { ackIds = []; }
+  const ackSet = new Set(ackIds.map(String));
+
+  try {
+    const { data: ackRows } = await sb
+      .from('premium_requests')
+      .select('reason')
+      .eq('user_id', uid)
+      .like('reason', '__UPD_ACK__:%')
+      .limit(200);
+    (ackRows || []).forEach(r => {
+      const id = String(r.reason || '').slice('__UPD_ACK__:'.length);
+      if (id) ackSet.add(id);
+    });
+  } catch (e) {}
+
+  activeUpdateQueue = posts.filter(u => !ackSet.has(String(u.id)));
+  if (activeUpdateQueue.length > 0) {
+    showNextUpdateModal();
+  } else {
+    $('#updateModal')?.classList.add('hidden');
+  }
+}
+
+function showNextUpdateModal() {
+  if (!activeUpdateQueue.length) {
+    currentUpdateModalItem = null;
+    $('#updateModal')?.classList.add('hidden');
+    return;
+  }
+  const upd = activeUpdateQueue[0];
+  currentUpdateModalItem = upd;
+  const titleEl = $('#updateModalTitle');
+  const bodyEl = $('#updateModalBody');
+  const boxesEl = $('#updateModalBoxes');
+  const hintEl = $('#updateModalHint');
+  const btn = $('#updateContinueBtn');
+
+  if (titleEl) titleEl.textContent = upd.title || 'Important Update';
+  if (bodyEl) {
+    const safeBody = escapeHtml(upd.body || '').replace(/\n/g, '<br>');
+    bodyEl.innerHTML = safeBody || '<span class="muted">Please review the items below.</span>';
+  }
+
+  const boxes = Array.isArray(upd.boxes) ? upd.boxes : [];
+  if (boxesEl) {
+    boxesEl.innerHTML = boxes.map((b, i) => `
+      <label class="update-check-item">
+        <input type="checkbox" class="update-box-input" data-idx="${i}" data-req="${b.required ? '1' : '0'}">
+        <span class="update-check-text">${escapeHtml(b.text || '')}</span>
+        <span class="check-tag ${b.required ? 'req' : 'opt'}">${b.required ? 'Required' : 'Optional'}</span>
+      </label>
+    `).join('');
+  }
+
+  const hasReq = boxes.some(b => b.required);
+  const syncBtn = () => {
+    const reqInputs = $$('#updateModalBoxes .update-box-input[data-req="1"]');
+    const allReqChecked = reqInputs.every(inp => inp.checked);
+    if (btn) btn.disabled = !allReqChecked;
+    if (hintEl) {
+      hintEl.textContent = hasReq && !allReqChecked
+        ? 'Check all required boxes above to continue using GRIND.'
+        : '';
+    }
+  };
+  $$('#updateModalBoxes .update-box-input').forEach(inp => inp.addEventListener('change', syncBtn));
+  syncBtn();
+
+  $('#updateModal')?.classList.remove('hidden');
+}
+
+$('#updateContinueBtn')?.addEventListener('click', async () => {
+  const btn = $('#updateContinueBtn');
+  if (!btn || btn.disabled || !currentUpdateModalItem || !currentUser) return;
+  const updId = String(currentUpdateModalItem.id);
+  const uid = currentUser.id;
+
+  let ackIds = [];
+  try {
+    ackIds = JSON.parse(localStorage.getItem('grind_upd_ack_' + uid) || '[]');
+    if (!Array.isArray(ackIds)) ackIds = [];
+  } catch (e) { ackIds = []; }
+  if (!ackIds.includes(updId)) ackIds.push(updId);
+  localStorage.setItem('grind_upd_ack_' + uid, JSON.stringify(ackIds));
+
+  activeUpdateQueue.shift();
+  showNextUpdateModal();
+
+  if (sb) {
+    try {
+      await sb.from('premium_requests').insert({
+        user_id: uid,
+        reason: '__UPD_ACK__:' + updId,
+        status: 'denied'
+      });
+    } catch (e) {}
+  }
+});
 
 $('#ackWarnBtn')?.addEventListener('click', async () => {
   $('#warnModal')?.classList.add('hidden');
@@ -554,6 +706,7 @@ function updateUIProfile() {
     $('#profileInitial').classList.remove('hidden');
   }
   $('#navNotifications').classList.toggle('hidden', !isDompinator());
+  $('#navAdmin')?.classList.toggle('hidden', !isDompinator());
   updatePremiumSection();
 }
 
@@ -595,6 +748,10 @@ $('#logoutBtn')?.addEventListener('click', async () => {
   currentUser = null;
   if (realtimeChannel && sb) sb.removeChannel(realtimeChannel);
   $('#appView').classList.add('hidden');
+  $('#updateModal')?.classList.add('hidden');
+  $('#warnModal')?.classList.add('hidden');
+  $('#dailyModal')?.classList.add('hidden');
+  $('#profileModal')?.classList.add('hidden');
   $('#authView').classList.remove('hidden');
   setAuthMode('login');
 });
@@ -617,6 +774,7 @@ function showPage(page) {
     ads: 'Ads',
     account: 'Account settings',
     notifications: 'Notifications',
+    admin: 'Admin',
     coin: 'Currency'
   };
   $('#pageTitle').textContent = titles[page] || 'GRIND';
@@ -626,6 +784,7 @@ function showPage(page) {
   if (page === 'ads' && !(wasAds && adLocked)) startAdsPage();
   if (page === 'account') updatePremiumSection();
   if (page === 'notifications' && isDompinator()) loadRequests();
+  if (page === 'admin' && isDompinator()) loadAdminPage();
 }
 $$('.nav-btn').forEach(b => b.addEventListener('click', () => showPage(b.dataset.page)));
 $$('[data-goto]').forEach(b => b.addEventListener('click', () => showPage(b.dataset.goto)));
@@ -1764,7 +1923,7 @@ async function openProfileModal(userId) {
       if (ok) {
         toast(`Account reset for ${p.username}`);
         openProfileModal(p.id);
-        if (currentPage === 'notifications') loadAdminAccounts();
+        if (currentPage === 'admin') loadAdminAccounts();
         if (currentPage === 'global') renderLeaderboard();
       }
     });
@@ -1776,7 +1935,7 @@ async function openProfileModal(userId) {
       if (ok) {
         toast(action === 'ban' ? `Banned ${p.username}` : `Unbanned ${p.username}`);
         openProfileModal(p.id);
-        if (currentPage === 'notifications') loadAdminAccounts();
+        if (currentPage === 'admin') loadAdminAccounts();
       }
     });
   }
@@ -2380,6 +2539,160 @@ async function loadRequests() {
   $('#emptyRequests').classList.toggle('hidden', list.length > 0);
   $$('.approve-btn').forEach(b => b.addEventListener('click', () => handleRequest(b.dataset.id, b.dataset.user, 'approved')));
   $$('.deny-btn').forEach(b => b.addEventListener('click', () => handleRequest(b.dataset.id, null, 'denied')));
+}
+
+let draftUpdateBoxes = [];
+
+function renderUpdateCheckboxesBuilder() {
+  const wrap = $('#updateCheckboxesBuilder');
+  if (!wrap) return;
+  if (!draftUpdateBoxes.length) {
+    wrap.innerHTML = '<p class="muted tiny" style="margin:0;">No checkboxes added yet. Click "+ Add checkbox" to add optional or required checkboxes.</p>';
+    return;
+  }
+  wrap.innerHTML = draftUpdateBoxes.map((b, i) => `
+    <div class="update-builder-row" data-box-idx="${i}">
+      <input type="text" class="box-text-input" data-idx="${i}" maxlength="160" placeholder="Checkbox text..." value="${escapeHtml(b.text)}">
+      <label class="req-toggle">
+        <input type="checkbox" class="box-req-input" data-idx="${i}" ${b.required ? 'checked' : ''}>
+        <span>${b.required ? 'Required' : 'Optional'}</span>
+      </label>
+      <button type="button" class="zoom-btn box-remove-btn" data-idx="${i}" title="Remove checkbox">✕</button>
+    </div>
+  `).join('');
+
+  $$('#updateCheckboxesBuilder .box-text-input').forEach(inp => {
+    inp.addEventListener('input', e => {
+      const idx = Number(inp.dataset.idx);
+      if (draftUpdateBoxes[idx]) draftUpdateBoxes[idx].text = e.target.value;
+    });
+  });
+  $$('#updateCheckboxesBuilder .box-req-input').forEach(chk => {
+    chk.addEventListener('change', () => {
+      const idx = Number(chk.dataset.idx);
+      if (draftUpdateBoxes[idx]) {
+        draftUpdateBoxes[idx].required = chk.checked;
+        const lbl = chk.parentElement?.querySelector('span');
+        if (lbl) lbl.textContent = chk.checked ? 'Required' : 'Optional';
+      }
+    });
+  });
+  $$('#updateCheckboxesBuilder .box-remove-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.idx);
+      draftUpdateBoxes.splice(idx, 1);
+      renderUpdateCheckboxesBuilder();
+    });
+  });
+}
+
+$('#addUpdateCheckboxBtn')?.addEventListener('click', () => {
+  draftUpdateBoxes.push({ text: '', required: false });
+  renderUpdateCheckboxesBuilder();
+  const inputs = $$('#updateCheckboxesBuilder .box-text-input');
+  inputs[inputs.length - 1]?.focus();
+});
+
+$('#publishUpdateBtn')?.addEventListener('click', async () => {
+  if (!isDompinator() || !currentUser || !sb) return;
+  const title = $('#updateTitleInput')?.value.trim() || '';
+  const body = $('#updateBodyInput')?.value.trim() || '';
+  const boxes = draftUpdateBoxes
+    .map(b => ({ text: (b.text || '').trim(), required: Boolean(b.required) }))
+    .filter(b => b.text.length > 0);
+  const msgEl = $('#updatePostMessage');
+
+  if (!title && !body && !boxes.length) {
+    if (msgEl) msgEl.textContent = 'Add a title, message, or at least one checkbox.';
+    return;
+  }
+  if (msgEl) msgEl.textContent = '';
+
+  const btn = $('#publishUpdateBtn');
+  if (btn) btn.disabled = true;
+
+  const upd = {
+    id: 'upd_' + Date.now(),
+    ts: Date.now(),
+    title: title || 'Update Notification',
+    body,
+    boxes
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__UPDATE_POST__:' + JSON.stringify(upd),
+    status: 'denied'
+  });
+
+  if (btn) btn.disabled = false;
+  if (error) {
+    if (msgEl) msgEl.textContent = 'Error posting update: ' + error.message;
+    return;
+  }
+
+  if ($('#updateTitleInput')) $('#updateTitleInput').value = '';
+  if ($('#updateBodyInput')) $('#updateBodyInput').value = '';
+  draftUpdateBoxes = [];
+  renderUpdateCheckboxesBuilder();
+  toast('Update notification published!');
+  loadAdminUpdatesList();
+  checkPendingUpdateNotifications();
+});
+
+async function loadAdminUpdatesList() {
+  const listEl = $('#adminUpdatesList');
+  if (!listEl || !isDompinator()) return;
+  const posts = (await fetchActiveUpdates()).slice().reverse();
+  if (!posts.length) {
+    listEl.innerHTML = '<div class="empty-state" style="padding:20px;"><p>No active update notifications.</p></div>';
+    return;
+  }
+  listEl.innerHTML = posts.map(u => {
+    const boxes = Array.isArray(u.boxes) ? u.boxes : [];
+    return `
+    <div class="request-card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+        <div>
+          <h4 style="margin:0 0 4px;">${escapeHtml(u.title || 'Update')}</h4>
+          <div class="muted tiny">${u.ts ? new Date(u.ts).toLocaleString() : ''}</div>
+        </div>
+        <button type="button" class="ban-btn" data-del-upd="${escapeHtml(u.id)}">Remove</button>
+      </div>
+      ${u.body ? `<p style="margin:10px 0 8px;">${escapeHtml(u.body)}</p>` : ''}
+      ${boxes.length ? `
+        <div class="update-check-list" style="margin-top:8px;">
+          ${boxes.map(b => `
+            <div class="update-check-item" style="cursor:default;">
+              <span class="update-check-text">☐ ${escapeHtml(b.text)}</span>
+              <span class="check-tag ${b.required ? 'req' : 'opt'}">${b.required ? 'Required' : 'Optional'}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+    </div>`;
+  }).join('');
+
+  $$('#adminUpdatesList [data-del-upd]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!isDompinator() || !currentUser || !sb) return;
+      const updId = btn.dataset.delUpd;
+      btn.disabled = true;
+      await sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__UPDATE_DEL__:' + updId,
+        status: 'denied'
+      });
+      toast('Update notification removed');
+      loadAdminUpdatesList();
+      checkPendingUpdateNotifications();
+    });
+  });
+}
+
+function loadAdminPage() {
+  renderUpdateCheckboxesBuilder();
+  loadAdminUpdatesList();
   loadAdminAccounts();
 }
 
@@ -2499,7 +2812,10 @@ function startRealtime() {
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, () => {
       if (currentUser) loadProfile();
-      if (isDompinator()) loadRequests();
+      if (isDompinator()) {
+        loadRequests();
+        if (currentPage === 'admin') loadAdminPage();
+      }
     })
     .subscribe();
 }

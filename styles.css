@@ -279,4 +279,22 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .admin-acc-row { flex-wrap: wrap; }
 .admin-acc-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
+/* Update notifications & dynamic checkboxes */
+.update-builder-list { display: flex; flex-direction: column; gap: 8px; }
+.update-builder-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #120e1c; border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; }
+.update-builder-row input[type="text"] { flex: 1; min-width: 160px; background: transparent; border: 0; color: white; font-size: 13px; padding: 4px 6px; outline: none; }
+.req-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; margin: 0; white-space: nowrap; }
+.req-toggle input { width: auto; margin: 0; accent-color: #fbbf24; cursor: pointer; }
+.update-modal-card { border-color: rgba(251, 191, 36, .45); }
+.update-check-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.update-check-item { display: flex; align-items: center; gap: 10px; background: #120e1c; border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px; cursor: pointer; font-size: 13px; transition: .15s; margin: 0; }
+.update-check-item:hover { border-color: var(--purple); }
+.update-check-item input[type="checkbox"] { width: 17px; height: 17px; margin: 0; accent-color: var(--purple); flex-shrink: 0; cursor: pointer; }
+.update-check-text { flex: 1; color: #f5f0ff; line-height: 1.4; }
+.check-tag { font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 999px; flex-shrink: 0; }
+.check-tag.req { background: rgba(251, 191, 36, .16); color: #fbbf24; border: 1px solid rgba(251, 191, 36, .45); }
+.check-tag.opt { background: #201a2d; color: var(--muted); border: 1px solid var(--line); }
+#updateContinueBtn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+
+
 

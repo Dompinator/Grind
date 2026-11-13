@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — The Meme Currency Market</title>
-  <link rel="stylesheet" href="styles.css?v=13">
+  <link rel="stylesheet" href="styles.css?v=14">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -41,6 +41,7 @@
         <button class="nav-btn" data-page="ads"><span>▷</span> Ads</button>
         <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
         <button class="nav-btn hidden" id="navNotifications" data-page="notifications"><span>✦</span> Notifications</button>
+        <button class="nav-btn hidden" id="navAdmin" data-page="admin"><span>❖</span> Admin</button>
       </nav>
       <div class="sidebar-bottom">
         <div class="mini-profile">
@@ -242,6 +243,39 @@
           <div id="emptyRequests" class="empty-state">
             <p>No pending requests.</p>
           </div>
+        </section>
+
+        <!-- ADMIN (only Dompinator) -->
+        <section id="page-admin" class="page hidden">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow purple-text">ADMIN</div>
+              <h3>Post Update Notification</h3>
+              <p class="muted">Broadcast an update popup with optional or required checkboxes to all players.</p>
+            </div>
+          </div>
+          <div class="form-card" style="margin-bottom:22px;">
+            <label>Title<input id="updateTitleInput" maxlength="80" placeholder="e.g. GRIND v0.4.6 Update"></label>
+            <label>Message<textarea id="updateBodyInput" rows="3" maxlength="800" placeholder="Describe what changed or important info..."></textarea></label>
+            <div style="margin:14px 0;">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
+                <strong style="font-size:13px;">Checkboxes</strong>
+                <button type="button" class="zoom-btn" id="addUpdateCheckboxBtn">+ Add checkbox</button>
+              </div>
+              <div id="updateCheckboxesBuilder" class="update-builder-list"></div>
+            </div>
+            <button type="button" class="primary-btn full" id="publishUpdateBtn">Publish update notification</button>
+            <p id="updatePostMessage" class="form-message"></p>
+          </div>
+
+          <div class="section-head">
+            <div>
+              <div class="eyebrow purple-text">POSTED UPDATES</div>
+              <h3>Active update notifications</h3>
+            </div>
+          </div>
+          <div id="adminUpdatesList" class="requests-list" style="margin-bottom:28px;"></div>
+
           <hr style="border-color:#3a2e4a;margin:28px 0">
           <div class="section-head">
             <div>
@@ -322,7 +356,25 @@
     </section>
   </main>
 
+  <!-- UPDATE NOTIFICATION MODAL -->
+  <div id="updateModal" class="modal-backdrop hidden" style="z-index:95;" role="dialog" aria-modal="true">
+    <div class="modal-card profile-modal-card update-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow" style="color:#fbbf24;">UPDATE NOTIFICATION</div>
+          <h3 id="updateModalTitle">Update</h3>
+        </div>
+      </div>
+      <div id="updateModalBody" class="warn-message-box"></div>
+      <div id="updateModalBoxes" class="update-check-list"></div>
+      <p id="updateModalHint" class="muted tiny" style="margin:10px 0 0;"></p>
+      <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+        <button class="primary-btn" id="updateContinueBtn" type="button">Continue</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=13"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>
