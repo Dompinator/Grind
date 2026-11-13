@@ -1,5 +1,5 @@
 // ============================================================
-// GRIND v0.3.5 — Multiplayer · Premium · English
+// GRIND v0.4.5 — Multiplayer · Premium · English
 // ============================================================
 const SUPABASE_URL = 'https://zcrkywpyjrofphxnxtlc.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_PKSD898kwnfs6msIDiW9_g_yeoTBduD';
