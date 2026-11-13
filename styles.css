@@ -85,6 +85,7 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .coin-change { font-size: 13px; font-weight: 600; }
 .coin-change.up { color: var(--green); }
 .coin-change.down { color: var(--red); }
+.coin-change.flat { color: var(--muted); }
 .coin-desc { font-size: 13px; color: var(--muted); margin: 10px 0; line-height: 1.45; }
 .coin-meta { display: flex; justify-content: space-between; font-size: 11px; color: #7a6a90; }
 

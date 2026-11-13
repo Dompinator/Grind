@@ -58,7 +58,13 @@ function getStartOfTodayDate() {
 function formatChangePct(rawPct) {
   const val = Number(rawPct || 0);
   const pct = Math.abs(val) < 0.005 ? 0 : val;
-  const isUp = pct >= 0;
+  if (pct === 0) {
+    return {
+      cls: 'flat',
+      text: '0.00% today'
+    };
+  }
+  const isUp = pct > 0;
   return {
     cls: isUp ? 'up' : 'down',
     text: `${isUp ? '↗ +' : '↘ '}${pct.toFixed(2)}% today`
