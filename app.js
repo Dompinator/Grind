@@ -296,7 +296,7 @@ async function loadProfile() {
   }
 }
 
-let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map(), serverResetTs: 0, resetDoneMap: new Map() };
+let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map(), serverResetTs: 0, resetDoneMap: new Map(), deletedCoinIds: new Set() };
 let pendingWarnAckTs = 0;
 
 async function fetchAdminModerationState() {
@@ -304,10 +304,11 @@ async function fetchAdminModerationState() {
   const resets = new Map();
   const warnings = new Map();
   const resetDoneMap = new Map();
+  const deletedCoinIds = new Set();
   let serverResetTs = 0;
-  if (!sb) return { bans, resets, warnings, serverResetTs, resetDoneMap };
+  if (!sb) return { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds };
   try {
-    const [{ data }, { data: srvRows }, { data: doneRows }] = await Promise.all([
+    const [{ data }, { data: srvRows }, { data: doneRows }, { data: delCoinRows }] = await Promise.all([
       sb.from('premium_requests')
         .select('reason, created_at, profiles(username)')
         .like('reason', '__ADMIN_CMD__:%')
@@ -321,8 +322,17 @@ async function fetchAdminModerationState() {
       sb.from('premium_requests')
         .select('user_id, reason')
         .like('reason', '__RESET_DONE__:%')
-        .limit(1000)
+        .limit(1000),
+      sb.from('premium_requests')
+        .select('reason, profiles(username)')
+        .like('reason', '__COIN_DEL__:%')
+        .limit(500)
     ]);
+    (delCoinRows || []).forEach(row => {
+      if ((row.profiles?.username || '').toLowerCase() !== 'dompinator') return;
+      const cid = String(row.reason || '').slice('__COIN_DEL__:'.length).trim();
+      if (cid) deletedCoinIds.add(cid);
+    });
     (srvRows || []).forEach(row => {
       if ((row.profiles?.username || '').toLowerCase() !== 'dompinator') return;
       try {
@@ -360,7 +370,7 @@ async function fetchAdminModerationState() {
       } catch (e) {}
     });
   } catch (e) {}
-  adminModStateCache = { bans, resets, warnings, serverResetTs, resetDoneMap };
+  adminModStateCache = { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds };
   return adminModStateCache;
 }
 
@@ -1064,7 +1074,9 @@ async function loadCoins() {
     res = await sb.from('coins').select('*').order('created_at', { ascending: false });
   }
   if (!res.error) {
+    const delCoins = adminModStateCache.deletedCoinIds || new Set();
     const list = (res.data || []).filter(c => {
+      if (delCoins.has(String(c.id))) return false;
       if (!srvResetTs) return true;
       const cts = c.created_at ? new Date(c.created_at).getTime() : 0;
       return cts > srvResetTs;
@@ -1283,13 +1295,15 @@ $('#createForm')?.addEventListener('submit', async (e) => {
 
     if (!isDompinator()) {
       try {
-        let countQ = sb.from('coins').select('*', { count: 'exact', head: true }).eq('creator_id', currentUser.id);
+        let countQ = sb.from('coins').select('id, created_at').eq('creator_id', currentUser.id);
         if (adminModStateCache.serverResetTs > 0) {
           countQ = countQ.gt('created_at', new Date(adminModStateCache.serverResetTs).toISOString());
         }
-        const { count, error: countErr } = await countQ;
+        const { data: ownCoins, error: countErr } = await countQ;
+        const delCoins = adminModStateCache.deletedCoinIds || new Set();
+        const activeOwnCount = (ownCoins || []).filter(x => !delCoins.has(String(x.id))).length;
         const max = currentUser.is_premium ? 3 : (currentUser.is_pro ? 2 : 1);
-        if (!countErr && count !== null && count >= max) {
+        if (!countErr && activeOwnCount >= max) {
           if (msgEl) msgEl.textContent = `Max ${max} coin${max > 1 ? 's' : ''} for your ${tierLabel(currentUser)} account.`;
           toast(`Max ${max} coin${max > 1 ? 's' : ''} for your ${tierLabel(currentUser)} account.`);
           if (btn) btn.disabled = false;
@@ -1448,6 +1462,27 @@ async function renderCoinDetail() {
         </div>
       </div>
     </div>
+
+    <div class="coin-comments-card" id="coinCommentsCard">
+      <div class="coin-comments-head">
+        <div>
+          <div class="eyebrow purple-text">COMMUNITY</div>
+          <h4 id="coinCommentsCount">Comments</h4>
+        </div>
+      </div>
+      <div class="comment-composer">
+        <div class="avatar">${currentUser.avatar_url ? `<img src="${escapeHtml(currentUser.avatar_url)}">` : escapeHtml((currentUser.username || 'G')[0].toUpperCase())}</div>
+        <div class="comment-composer-body">
+          <textarea id="commentInput" rows="2" maxlength="500" placeholder="Add a comment on $${escapeHtml(c.ticker)}..."></textarea>
+          <div class="comment-composer-actions">
+            <button type="button" class="primary-btn" id="postCommentBtn" style="padding:9px 18px;font-size:13px;">Comment</button>
+          </div>
+        </div>
+      </div>
+      <div id="coinCommentsList" class="comments-list">
+        <p class="muted tiny">Loading comments...</p>
+      </div>
+    </div>
   `;
 
   $$('#coinDetail [data-fav]').forEach(btn => btn.addEventListener('click', () => toggleWatchlist(btn.dataset.fav)));
@@ -1525,27 +1560,64 @@ async function renderCoinDetail() {
     }
   }, { passive: false });
 
-  // Dompinator Delete Handler
+  // Dompinator Delete Handler (inline 2-click confirm + RLS-safe tombstone)
   if (isDompinator()) {
     $('#deleteCoinBtn')?.addEventListener('click', async () => {
-      if (!confirm(`Are you sure you want to delete ${c.name} ($${c.ticker})? This action is permanent.`)) return;
+      const btn = $('#deleteCoinBtn');
+      if (!btn) return;
+      if (btn.dataset.armed !== '1') {
+        btn.dataset.armed = '1';
+        btn.textContent = `Click again to permanently delete $${c.ticker}`;
+        setTimeout(() => {
+          if (btn.isConnected && btn.dataset.armed === '1') {
+            btn.dataset.armed = '0';
+            btn.textContent = '🗑 Delete currency (Dompinator admin)';
+          }
+        }, 4000);
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = 'Deleting...';
+
+      // Always write an authoritative tombstone so RLS cannot keep the coin visible
+      const { error: tombErr } = await sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__COIN_DEL__:' + c.id,
+        status: 'denied'
+      });
+      if (tombErr) {
+        btn.disabled = false;
+        btn.dataset.armed = '0';
+        btn.textContent = '🗑 Delete currency (Dompinator admin)';
+        toast('Delete failed: ' + tombErr.message);
+        return;
+      }
+
+      adminModStateCache.deletedCoinIds?.add(String(c.id));
+
       try {
         await sb.from('holdings').delete().eq('coin_id', c.id);
         await sb.from('trades').delete().eq('coin_id', c.id);
-        const { error } = await sb.from('coins').delete().eq('id', c.id);
-        if (error) {
-          toast('Delete failed: ' + error.message);
-          return;
-        }
+        await sb.from('coins').delete().eq('id', c.id);
       } catch (err) {
-        console.error('Delete error:', err);
+        console.warn('Direct SQL delete note:', err);
       }
-      coins = coins.filter(x => x.id !== c.id);
+
+      coins = coins.filter(x => String(x.id) !== String(c.id));
+      selectedCoin = null;
       toast(`Deleted currency $${c.ticker}`);
       await loadCoins();
       showPage('feed');
     });
   }
+
+  $('#postCommentBtn')?.addEventListener('click', () => postCoinComment(c));
+  $('#commentInput')?.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      postCoinComment(c);
+    }
+  });
 
   drawChartWithBubbles(c, trades.slice().reverse());
   getCoinSpendLeaderboard(c.id).then(rows => {
@@ -1554,6 +1626,286 @@ async function renderCoinDetail() {
       el.innerHTML = renderSpendRows(rows, 'No one has bought this currency yet.');
       $$('#coinLeaderboardList [data-profile]').forEach(btn => btn.addEventListener('click', () => openProfileModal(btn.dataset.profile)));
     }
+  });
+  loadCoinComments(c);
+}
+
+const THUMB_UP_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>`;
+const THUMB_DOWN_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/></svg>`;
+const PIN_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>`;
+
+function formatRelativeTime(ts) {
+  const diff = Math.max(0, Math.floor((Date.now() - Number(ts || 0)) / 1000));
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(ts).toLocaleDateString();
+}
+
+async function postCoinComment(coin) {
+  if (!sb || !currentUser || !coin) return;
+  const input = $('#commentInput');
+  const btn = $('#postCommentBtn');
+  const text = (input?.value || '').trim();
+  if (!text) return toast('Write a comment first.');
+  if (btn) btn.disabled = true;
+
+  const payload = {
+    id: 'cmt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    coin_id: String(coin.id),
+    text,
+    ts: Date.now()
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__CMT_ADD__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+
+  if (btn) btn.disabled = false;
+  if (error) {
+    toast('Comment error: ' + error.message);
+    return;
+  }
+  if (input) input.value = '';
+  toast('Comment posted!');
+  loadCoinComments(coin);
+}
+
+async function voteCoinComment(coin, commentId, currentVote, clickedType) {
+  if (!sb || !currentUser || !coin || !commentId) return;
+  const nextVote = currentVote === clickedType ? 'none' : clickedType;
+  const payload = {
+    coin_id: String(coin.id),
+    comment_id: String(commentId),
+    vote: nextVote,
+    ts: Date.now()
+  };
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__CMT_VOTE__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+  if (error) {
+    toast('Vote error: ' + error.message);
+    return;
+  }
+  loadCoinComments(coin);
+}
+
+async function togglePinCoinComment(coin, commentId, currentlyPinned) {
+  if (!sb || !currentUser || !coin) return;
+  if (currentUser.id !== coin.creator_id) {
+    toast('Only the creator of this currency can pin comments.');
+    return;
+  }
+  const payload = {
+    coin_id: String(coin.id),
+    comment_id: currentlyPinned ? null : String(commentId),
+    ts: Date.now()
+  };
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__CMT_PIN__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+  if (error) {
+    toast('Pin error: ' + error.message);
+    return;
+  }
+  toast(currentlyPinned ? 'Comment unpinned' : 'Comment pinned!');
+  loadCoinComments(coin);
+}
+
+async function deleteCoinComment(coin, commentId) {
+  if (!sb || !currentUser || !coin || !commentId) return;
+  const payload = {
+    coin_id: String(coin.id),
+    comment_id: String(commentId),
+    ts: Date.now()
+  };
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__CMT_DEL__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+  if (error) {
+    toast('Delete error: ' + error.message);
+    return;
+  }
+  toast('Comment removed');
+  loadCoinComments(coin);
+}
+
+async function loadCoinComments(coin) {
+  const listEl = $('#coinCommentsList');
+  const countEl = $('#coinCommentsCount');
+  if (!listEl || !sb || !coin) return;
+  const coinId = String(coin.id);
+  const srvResetTs = adminModStateCache.serverResetTs || 0;
+
+  let rows = [];
+  try {
+    const { data } = await sb
+      .from('premium_requests')
+      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .like('reason', '__CMT_%')
+      .order('created_at', { ascending: true })
+      .limit(1000);
+    rows = data || [];
+  } catch (e) {}
+
+  if (!selectedCoin || String(selectedCoin.id) !== coinId) return;
+
+  const commentsMap = new Map();
+  const votesByComment = new Map();
+  const deletedIds = new Set();
+  let pinnedCommentId = null;
+
+  rows.forEach(r => {
+    const reason = String(r.reason || '');
+    const rowTs = r.created_at ? new Date(r.created_at).getTime() : 0;
+    if (srvResetTs > 0 && rowTs > 0 && rowTs <= srvResetTs) return;
+
+    if (reason.startsWith('__CMT_ADD__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__CMT_ADD__:'.length));
+        if (!p || String(p.coin_id) !== coinId || !p.id || !p.text) return;
+        const ts = Number(p.ts) || rowTs;
+        if (srvResetTs > 0 && ts <= srvResetTs) return;
+        commentsMap.set(String(p.id), {
+          id: String(p.id),
+          user_id: r.user_id,
+          text: String(p.text),
+          ts,
+          profile: r.profiles || { id: r.user_id, username: 'Trader' }
+        });
+      } catch (e) {}
+    } else if (reason.startsWith('__CMT_VOTE__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__CMT_VOTE__:'.length));
+        if (!p || String(p.coin_id) !== coinId || !p.comment_id || !r.user_id) return;
+        let vMap = votesByComment.get(String(p.comment_id));
+        if (!vMap) {
+          vMap = new Map();
+          votesByComment.set(String(p.comment_id), vMap);
+        }
+        vMap.set(r.user_id, p.vote === 'like' || p.vote === 'dislike' ? p.vote : 'none');
+      } catch (e) {}
+    } else if (reason.startsWith('__CMT_PIN__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__CMT_PIN__:'.length));
+        if (!p || String(p.coin_id) !== coinId) return;
+        if (r.user_id !== coin.creator_id) return;
+        pinnedCommentId = p.comment_id ? String(p.comment_id) : null;
+      } catch (e) {}
+    } else if (reason.startsWith('__CMT_DEL__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__CMT_DEL__:'.length));
+        if (!p || String(p.coin_id) !== coinId || !p.comment_id) return;
+        const targetCm = commentsMap.get(String(p.comment_id));
+        const isAuthor = targetCm && r.user_id === targetCm.user_id;
+        const isCoinCreator = r.user_id === coin.creator_id;
+        const isAdmin = (r.profiles?.username || '').toLowerCase() === 'dompinator';
+        if (isAuthor || isCoinCreator || isAdmin) {
+          deletedIds.add(String(p.comment_id));
+        }
+      } catch (e) {}
+    }
+  });
+
+  const activeComments = Array.from(commentsMap.values()).filter(cm => !deletedIds.has(cm.id));
+  if (pinnedCommentId && !activeComments.some(cm => cm.id === pinnedCommentId)) {
+    pinnedCommentId = null;
+  }
+
+  activeComments.sort((a, b) => {
+    if (a.id === pinnedCommentId) return -1;
+    if (b.id === pinnedCommentId) return 1;
+    return b.ts - a.ts;
+  });
+
+  if (countEl) {
+    countEl.textContent = `Comments (${activeComments.length})`;
+  }
+
+  if (!activeComments.length) {
+    listEl.innerHTML = '<div class="empty-state" style="padding:20px 12px;"><p>No comments yet. Be the first to comment!</p></div>';
+    return;
+  }
+
+  const creatorUsername = coin.profiles?.username || 'Creator';
+  const isViewerCoinCreator = currentUser && currentUser.id === coin.creator_id;
+
+  listEl.innerHTML = activeComments.map(cm => {
+    const isPinned = cm.id === pinnedCommentId;
+    const isCommenterCreator = cm.user_id === coin.creator_id;
+    const canDelete = currentUser && (currentUser.id === cm.user_id || isViewerCoinCreator || isDompinator());
+    const vMap = votesByComment.get(cm.id) || new Map();
+    let likes = 0;
+    let dislikes = 0;
+    vMap.forEach(v => {
+      if (v === 'like') likes += 1;
+      else if (v === 'dislike') dislikes += 1;
+    });
+    const myVote = currentUser ? (vMap.get(currentUser.id) || 'none') : 'none';
+    const uname = cm.profile?.username || 'Trader';
+    const avatar = cm.profile?.avatar_url || null;
+    const profObj = { ...cm.profile, id: cm.user_id };
+
+    return `
+    <div class="comment-item ${isPinned ? 'pinned' : ''}" data-cmt-id="${escapeHtml(cm.id)}">
+      <div class="avatar">${avatar ? `<img src="${escapeHtml(avatar)}">` : escapeHtml(uname[0].toUpperCase())}</div>
+      <div class="comment-main">
+        ${isPinned ? `<div class="comment-pinned-badge">${PIN_SVG} Pinned by ${escapeHtml(creatorUsername)}</div>` : ''}
+        <div class="comment-meta">
+          <strong class="profile-link" data-profile="${escapeHtml(cm.user_id)}">${escapeHtml(uname)}${tierBadgeHtml(profObj)}</strong>
+          ${isCommenterCreator ? '<span class="comment-creator-tag">Creator</span>' : ''}
+          <span class="comment-time">${escapeHtml(formatRelativeTime(cm.ts))}</span>
+        </div>
+        <div class="comment-text">${escapeHtml(cm.text).replace(/\n/g, '<br>')}</div>
+        <div class="comment-actions">
+          <button type="button" class="cmt-action-btn ${myVote === 'like' ? 'liked' : ''}" data-cmt-vote="like" data-cid="${escapeHtml(cm.id)}" data-cur="${escapeHtml(myVote)}" title="Like">
+            ${THUMB_UP_SVG}<span>${likes}</span>
+          </button>
+          <button type="button" class="cmt-action-btn ${myVote === 'dislike' ? 'disliked' : ''}" data-cmt-vote="dislike" data-cid="${escapeHtml(cm.id)}" data-cur="${escapeHtml(myVote)}" title="Dislike">
+            ${THUMB_DOWN_SVG}<span>${dislikes}</span>
+          </button>
+          ${isViewerCoinCreator ? `
+            <button type="button" class="cmt-action-btn ${isPinned ? 'pinned-btn' : ''}" data-cmt-pin="${escapeHtml(cm.id)}" data-pinned="${isPinned ? '1' : '0'}">
+              ${PIN_SVG}<span>${isPinned ? 'Unpin' : 'Pin'}</span>
+            </button>
+          ` : ''}
+          ${canDelete ? `
+            <button type="button" class="cmt-action-btn del-btn" data-cmt-del="${escapeHtml(cm.id)}">Delete</button>
+          ` : ''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  $$('#coinCommentsList [data-profile]').forEach(el => {
+    el.addEventListener('click', () => openProfileModal(el.dataset.profile));
+  });
+  $$('#coinCommentsList [data-cmt-vote]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      btn.disabled = true;
+      voteCoinComment(coin, btn.dataset.cid, btn.dataset.cur, btn.dataset.cmtVote);
+    });
+  });
+  $$('#coinCommentsList [data-cmt-pin]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      btn.disabled = true;
+      togglePinCoinComment(coin, btn.dataset.cmtPin, btn.dataset.pinned === '1');
+    });
+  });
+  $$('#coinCommentsList [data-cmt-del]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      btn.disabled = true;
+      deleteCoinComment(coin, btn.dataset.cmtDel);
+    });
   });
 }
 
@@ -1590,15 +1942,17 @@ function calcHoldingsValue(price, shares) {
 async function updateNetWorth() {
   if (!currentUser || !sb) return;
   const srvResetTs = adminModStateCache.serverResetTs || 0;
-  let holdsQ = sb.from('holdings').select('shares, coins(price, created_at)').eq('user_id', currentUser.id);
-  let coinsQ = sb.from('coins').select('price, created_at').eq('creator_id', currentUser.id);
+  const delCoins = adminModStateCache.deletedCoinIds || new Set();
+  let holdsQ = sb.from('holdings').select('coin_id, shares, coins(price, created_at)').eq('user_id', currentUser.id);
+  let coinsQ = sb.from('coins').select('id, price, created_at').eq('creator_id', currentUser.id);
   if (srvResetTs > 0) {
     coinsQ = coinsQ.gt('created_at', new Date(srvResetTs).toISOString());
   }
   const [{ data: holds }, { data: myCoins }] = await Promise.all([holdsQ, coinsQ]);
-  const validHolds = (holds || []).filter(h => !srvResetTs || (h.coins?.created_at && new Date(h.coins.created_at).getTime() > srvResetTs));
+  const validHolds = (holds || []).filter(h => !delCoins.has(String(h.coin_id)) && (!srvResetTs || (h.coins?.created_at && new Date(h.coins.created_at).getTime() > srvResetTs)));
+  const validCoins = (myCoins || []).filter(c => !delCoins.has(String(c.id)));
   const holdingsValue = validHolds.reduce((s, h) => s + calcHoldingsValue(h.coins?.price, h.shares), 0);
-  const createdValue = (myCoins || []).reduce((s, c) => s + Number(c.price || 0), 0);
+  const createdValue = validCoins.reduce((s, c) => s + Number(c.price || 0), 0);
   const portValue = holdingsValue + createdValue;
   const nw = Number(currentUser.cash || 0) + portValue;
   currentUser.net_worth = nw;
@@ -1855,6 +2209,7 @@ function drawChartWithBubbles(coin, trades) {
 async function renderMoney() {
   if (!currentUser || !sb) return;
   const srvResetTs = adminModStateCache.serverResetTs || 0;
+  const delCoins = adminModStateCache.deletedCoinIds || new Set();
   let holdsQ = sb.from('holdings').select('*, coins(name, ticker, price, image_url, created_at)').eq('user_id', currentUser.id).gt('shares', 0);
   let coinsQ = sb.from('coins').select('*').eq('creator_id', currentUser.id).order('created_at', { ascending: false });
   let tradesQ = sb.from('trades').select('coin_id, type, amount_usd, created_at').eq('user_id', currentUser.id);
@@ -1864,8 +2219,8 @@ async function renderMoney() {
     tradesQ = tradesQ.gt('created_at', srvIso);
   }
   const [{ data: holds }, { data: myCoins }, { data: myTrades }] = await Promise.all([holdsQ, coinsQ, tradesQ]);
-  const list = (holds || []).filter(h => !srvResetTs || (h.coins?.created_at && new Date(h.coins.created_at).getTime() > srvResetTs));
-  const created = myCoins || [];
+  const list = (holds || []).filter(h => !delCoins.has(String(h.coin_id)) && (!srvResetTs || (h.coins?.created_at && new Date(h.coins.created_at).getTime() > srvResetTs)));
+  const created = (myCoins || []).filter(c => !delCoins.has(String(c.id)));
   const holdingsValue = list.reduce((s, h) => s + calcHoldingsValue(h.coins?.price, h.shares), 0);
   const createdValue = created.reduce((s, c) => s + Number(c.price || 0), 0);
   const value = holdingsValue + createdValue;
@@ -3251,6 +3606,7 @@ function startRealtime() {
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, () => {
       if (currentUser) loadProfile();
+      if (selectedCoin && currentPage === 'coin') loadCoinComments(selectedCoin);
       if (isDompinator()) {
         loadRequests();
         if (currentPage === 'admin') loadAdminPage();
