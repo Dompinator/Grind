@@ -380,6 +380,39 @@ label input:focus, label textarea:focus, label select:focus { outline: none; bor
 .resolve-btn { background: rgba(52, 211, 153, .16); color: var(--green); border: 1px solid rgba(52, 211, 153, .45); border-radius: 10px; padding: 9px 15px; font-weight: 700; cursor: pointer; transition: .15s; }
 .resolve-btn:hover { background: rgba(52, 211, 153, .28); }
 
+/* YouTube-style comment replies */
+.cmt-reply-box { display: flex; gap: 10px; align-items: flex-start; margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(58, 46, 74, .6); }
+.cmt-reply-box .avatar { width: 28px; height: 28px; font-size: 11px; flex-shrink: 0; }
+.cmt-reply-body { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.cmt-reply-body textarea { width: 100%; background: #0e0a17; border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; color: white; font-size: 13px; resize: vertical; min-height: 40px; }
+.cmt-reply-body textarea:focus { outline: none; border-color: var(--purple); }
+.cmt-reply-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.cmt-replies-toggle { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; background: transparent; border: 0; color: #38bdf8; font-size: 12px; font-weight: 700; cursor: pointer; padding: 4px 8px; border-radius: 999px; transition: background .15s; }
+.cmt-replies-toggle:hover { background: rgba(56, 189, 248, .12); }
+.cmt-replies-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; padding-left: 14px; border-left: 2px solid rgba(192, 132, 252, .25); }
+.comment-item.reply-item { padding: 11px 12px; background: #161124; }
+.comment-item.reply-item .avatar { width: 28px; height: 28px; font-size: 11px; flex-shrink: 0; }
+.cmt-reply-mention { color: #38bdf8; font-weight: 700; margin-right: 5px; }
+
+/* Edit Coin button & Personal live tag */
+.edit-coin-btn { background: #1e1830; border: 1px solid var(--line); color: #e9d5ff; border-radius: 10px; padding: 5px 11px; font-size: 12px; font-weight: 700; cursor: pointer; transition: .15s; display: inline-flex; align-items: center; gap: 5px; }
+.edit-coin-btn:hover { border-color: var(--purple); background: #2a203b; color: white; }
+.live-personal-tag { font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 999px; background: rgba(56, 189, 248, .14); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, .35); }
+
+/* Regular user notifications */
+.user-notif-card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; transition: border-color .15s; }
+.user-notif-card.unread { border-color: rgba(192, 132, 252, .65); background: linear-gradient(135deg, rgba(192, 132, 252, .08) 0%, var(--panel) 65%); }
+.notif-tag { font-size: 10px; font-weight: 800; letter-spacing: .5px; padding: 3px 9px; border-radius: 999px; text-transform: uppercase; }
+.notif-tag.update { background: rgba(56, 189, 248, .16); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, .4); }
+.notif-tag.warning { background: rgba(251, 191, 36, .16); color: #fbbf24; border: 1px solid rgba(251, 191, 36, .45); }
+.notif-tag.comment { background: rgba(192, 132, 252, .18); color: #e9d5ff; border: 1px solid rgba(192, 132, 252, .45); }
+.notif-tag.reply { background: rgba(52, 211, 153, .16); color: var(--green); border: 1px solid rgba(52, 211, 153, .45); }
+.unread-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--purple); display: inline-block; flex-shrink: 0; }
+
+/* Remove Premium button */
+.remove-prem-btn { background: rgba(56, 189, 248, .14); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, .45); border-radius: 10px; padding: 8px 13px; font-size: 12px; font-weight: 700; cursor: pointer; transition: .15s; }
+.remove-prem-btn:hover { background: rgba(56, 189, 248, .26); color: white; }
+
 
 
 

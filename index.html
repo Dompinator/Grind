@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=24">
+  <link rel="stylesheet" href="styles.css?v=25">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -42,7 +42,7 @@
         <button class="nav-btn" data-page="ads"><span>▷</span> Ads</button>
         <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
         <button class="nav-btn" data-page="report"><span>△</span> Report</button>
-        <button class="nav-btn hidden" id="navNotifications" data-page="notifications"><span>✦</span> Notifications <span id="navNotificationsBadge" class="nav-count-badge hidden">0</span></button>
+        <button class="nav-btn" id="navNotifications" data-page="notifications"><span>✦</span> Notifications <span id="navNotificationsBadge" class="nav-count-badge hidden">0</span></button>
         <button class="nav-btn hidden" id="navAdmin" data-page="admin"><span>❖</span> Admin</button>
       </nav>
       <div class="sidebar-bottom">
@@ -108,6 +108,7 @@
           </div>
           <div class="feed-tabs" id="liveFilterTabs">
             <button type="button" class="feed-tab active" data-live="all">All</button>
+            <button type="button" class="feed-tab" data-live="personal">Personal</button>
             <button type="button" class="feed-tab" data-live="trades">Trades</button>
             <button type="button" class="feed-tab" data-live="coins">New Coins</button>
           </div>
@@ -301,39 +302,57 @@
           </div>
         </section>
 
-        <!-- NOTIFICATIONS (only Dompinator) -->
+        <!-- NOTIFICATIONS (All users: updates/warnings/coin comments/replies; Dompinator also sees reports & requests) -->
         <section id="page-notifications" class="page hidden">
-          <div class="section-head">
+          <div class="section-head" style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap;">
             <div>
-              <div class="eyebrow purple-text">ADMIN INBOX</div>
-              <h3>Notifications &amp; Reports</h3>
-              <p class="muted">Player reports, bug reports, and premium requests. Only Dompinator sees this page.</p>
+              <div class="eyebrow purple-text" id="notificationsEyebrow">INBOX</div>
+              <h3>Notifications</h3>
+              <p class="muted" id="notificationsSubtitle">Updates, warnings, comments on your coins, and replies to your comments.</p>
+            </div>
+            <button type="button" class="zoom-btn" id="markNotifsReadBtn" style="padding:8px 14px;">Mark all read</button>
+          </div>
+
+          <div id="userNotifsBlock">
+            <div class="feed-tabs" id="userNotifsFilterTabs" style="margin:6px 0 16px;">
+              <button type="button" class="feed-tab active" data-unotif="all">All</button>
+              <button type="button" class="feed-tab" data-unotif="update">Updates</button>
+              <button type="button" class="feed-tab" data-unotif="warning">Warnings</button>
+              <button type="button" class="feed-tab" data-unotif="social">Comments &amp; Replies</button>
+            </div>
+            <div id="userNotifsList" class="requests-list" style="margin-bottom:28px;"></div>
+            <div id="emptyUserNotifs" class="empty-state hidden" style="padding:28px 20px;">
+              <div class="empty-icon">✦</div>
+              <p>No notifications yet.</p>
             </div>
           </div>
 
-          <div class="notif-block-head">
-            <div class="eyebrow purple-text">PLAYER &amp; BUG REPORTS</div>
-            <div class="feed-tabs" id="reportsFilterTabs" style="margin:10px 0 14px;">
-              <button type="button" class="feed-tab active" data-repfilter="all">All</button>
-              <button type="button" class="feed-tab" data-repfilter="player">Players</button>
-              <button type="button" class="feed-tab" data-repfilter="bug">Bugs</button>
+          <div id="dompinatorNotifsSection" class="hidden">
+            <hr style="border-color:#3a2e4a;margin:24px 0">
+            <div class="notif-block-head">
+              <div class="eyebrow purple-text">ADMIN · PLAYER &amp; BUG REPORTS</div>
+              <div class="feed-tabs" id="reportsFilterTabs" style="margin:10px 0 14px;">
+                <button type="button" class="feed-tab active" data-repfilter="all">All</button>
+                <button type="button" class="feed-tab" data-repfilter="player">Players</button>
+                <button type="button" class="feed-tab" data-repfilter="bug">Bugs</button>
+              </div>
             </div>
-          </div>
-          <div id="reportsList" class="requests-list" style="margin-bottom:28px;"></div>
-          <div id="emptyReports" class="empty-state hidden" style="padding:28px 20px;">
-            <p>No open reports.</p>
-          </div>
+            <div id="reportsList" class="requests-list" style="margin-bottom:28px;"></div>
+            <div id="emptyReports" class="empty-state hidden" style="padding:28px 20px;">
+              <p>No open reports.</p>
+            </div>
 
-          <hr style="border-color:#3a2e4a;margin:24px 0">
-          <div class="section-head" style="margin-bottom:14px;">
-            <div>
-              <div class="eyebrow purple-text">TIERS</div>
-              <h3 style="margin:4px 0 0;">Premium requests</h3>
+            <hr style="border-color:#3a2e4a;margin:24px 0">
+            <div class="section-head" style="margin-bottom:14px;">
+              <div>
+                <div class="eyebrow purple-text">ADMIN · TIERS</div>
+                <h3 style="margin:4px 0 0;">Premium requests</h3>
+              </div>
             </div>
-          </div>
-          <div id="requestsList" class="requests-list"></div>
-          <div id="emptyRequests" class="empty-state">
-            <p>No pending requests.</p>
+            <div id="requestsList" class="requests-list"></div>
+            <div id="emptyRequests" class="empty-state">
+              <p>No pending requests.</p>
+            </div>
           </div>
         </section>
 
@@ -548,7 +567,37 @@
     </div>
   </div>
 
+  <!-- EDIT COIN MODAL (Description & Logo only) -->
+  <div id="editCoinModal" class="modal-backdrop hidden" style="z-index:104;" role="dialog" aria-modal="true">
+    <div class="modal-card profile-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow purple-text" id="editCoinEyebrow">EDIT CURRENCY</div>
+          <h3 id="editCoinTitle">Edit Currency</h3>
+          <p class="muted tiny" style="margin:2px 0 0;">Only description and logo can be edited.</p>
+        </div>
+        <button class="zoom-btn" id="closeEditCoinBtn" type="button">✕</button>
+      </div>
+      <div class="image-upload" style="margin-top:4px;">
+        <div class="coin-logo big" id="editCoinPreview" title="Click to upload logo">＋</div>
+        <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-start;">
+          <label class="upload-link" for="editCoinImage" style="margin:0;">Upload new logo</label>
+          <button type="button" class="zoom-btn" id="removeEditCoinLogoBtn">Remove logo</button>
+        </div>
+        <input id="editCoinImage" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+      </div>
+      <label style="margin-top:8px;">Description
+        <textarea id="editCoinDescription" rows="3" maxlength="200" placeholder="Describe your currency..."></textarea>
+      </label>
+      <p id="editCoinMessage" class="form-message"></p>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px;">
+        <button class="zoom-btn" id="cancelEditCoinBtn" type="button" style="padding:10px 16px;">Cancel</button>
+        <button class="primary-btn" id="saveEditCoinBtn" type="button">Save changes</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=24"></script>
+  <script src="app.js?v=25"></script>
 </body>
 </html>
