@@ -3330,6 +3330,17 @@ async function loadLiveFeed() {
   if (currentPage === 'live') renderLiveFeed();
 }
 
+function formatLiveTime(ts) {
+  const numTs = Number(ts || 0);
+  const diff = Math.max(0, Math.floor((Date.now() - numTs) / 1000));
+  if (diff > 48 * 3600) {
+    return new Date(numTs).toLocaleDateString();
+  }
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  return `${Math.floor(diff / 3600)}h ago`;
+}
+
 function renderLiveFeed() {
   const listEl = $('#liveFeedList');
   const emptyEl = $('#emptyLiveFeed');
@@ -3392,7 +3403,7 @@ function renderLiveFeed() {
         </div>
         <div class="live-row-right">
           <span class="live-row-price">${escapeHtml(rightLabel)}</span>
-          <span class="muted tiny">${escapeHtml(formatRelativeTime(ev.ts))}</span>
+          <span class="muted tiny" title="${escapeHtml(new Date(ev.ts).toLocaleString())}">${escapeHtml(formatLiveTime(ev.ts))}</span>
         </div>
       </div>
     `;
