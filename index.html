@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=20">
+  <link rel="stylesheet" href="styles.css?v=21">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -227,6 +227,16 @@
                 <button class="primary-btn" id="sendRequestBtn" type="button">Send request</button>
               </div>
             </div>
+            <div id="deleteOwnAccountSection">
+              <hr style="border-color:#3a2e4a;margin:20px 0">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+                <div>
+                  <strong style="color:#fca5a5;">Delete account</strong>
+                  <p class="muted tiny" style="margin:2px 0 0;">Permanently delete your account and all your market data.</p>
+                </div>
+                <button type="button" class="ban-btn" id="deleteOwnAccountBtn">Delete account</button>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -438,7 +448,25 @@
     </div>
   </div>
 
+  <!-- DELETE ACCOUNT CONFIRMATION MODAL -->
+  <div id="deleteAccountModal" class="modal-backdrop hidden" style="z-index:107;" role="dialog" aria-modal="true">
+    <div class="modal-card profile-modal-card danger-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow" style="color:#f87171;">PERMANENT ACTION</div>
+          <h3>Delete Account?</h3>
+        </div>
+        <button class="zoom-btn" id="closeDeleteAccountBtn" type="button">✕</button>
+      </div>
+      <div id="deleteAccountMessage" class="danger-message-box"></div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
+        <button class="zoom-btn" id="cancelDeleteAccountBtn" type="button" style="padding:10px 16px;">Cancel</button>
+        <button class="danger-reset-btn" id="confirmDeleteAccountBtn" type="button">Yes, Permanently Delete</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=20"></script>
+  <script src="app.js?v=21"></script>
 </body>
 </html>

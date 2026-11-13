@@ -234,6 +234,16 @@ async function loadProfile() {
   if (!sb) return;
   const { data: { user } } = await sb.auth.getUser();
   if (!user) return;
+  await fetchAdminModerationState();
+  if (adminModStateCache.deletedUserIds?.has(user.id)) {
+    try { await sb.auth.signOut(); } catch (e) {}
+    currentUser = null;
+    $('#appView')?.classList.add('hidden');
+    $('#bannedView')?.classList.add('hidden');
+    $('#authView')?.classList.remove('hidden');
+    authMsg('This account has been permanently deleted.');
+    return;
+  }
   const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).single();
   if (error || !data) {
     const { error: cErr } = await createProfile(user);
@@ -296,7 +306,7 @@ async function loadProfile() {
   }
 }
 
-let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map(), serverResetTs: 0, resetDoneMap: new Map(), deletedCoinIds: new Set() };
+let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map(), serverResetTs: 0, resetDoneMap: new Map(), deletedCoinIds: new Set(), deletedUserIds: new Set() };
 let pendingWarnAckTs = 0;
 
 async function fetchAdminModerationState() {
@@ -305,10 +315,11 @@ async function fetchAdminModerationState() {
   const warnings = new Map();
   const resetDoneMap = new Map();
   const deletedCoinIds = new Set();
+  const deletedUserIds = new Set();
   let serverResetTs = 0;
-  if (!sb) return { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds };
+  if (!sb) return { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds, deletedUserIds };
   try {
-    const [{ data }, { data: srvRows }, { data: doneRows }, { data: delCoinRows }] = await Promise.all([
+    const [{ data }, { data: srvRows }, { data: doneRows }, { data: delCoinRows }, { data: selfDelRows }] = await Promise.all([
       sb.from('premium_requests')
         .select('reason, created_at, profiles(username)')
         .like('reason', '__ADMIN_CMD__:%')
@@ -326,8 +337,15 @@ async function fetchAdminModerationState() {
       sb.from('premium_requests')
         .select('reason, profiles(username)')
         .like('reason', '__COIN_DEL__:%')
+        .limit(500),
+      sb.from('premium_requests')
+        .select('user_id')
+        .eq('reason', '__ACCOUNT_DELETED__')
         .limit(500)
     ]);
+    (selfDelRows || []).forEach(row => {
+      if (row.user_id) deletedUserIds.add(String(row.user_id));
+    });
     (delCoinRows || []).forEach(row => {
       if ((row.profiles?.username || '').toLowerCase() !== 'dompinator') return;
       const cid = String(row.reason || '').slice('__COIN_DEL__:'.length).trim();
@@ -359,6 +377,8 @@ async function fetchAdminModerationState() {
           bans.set(tid, { banned: true, reason: cmd.msg || 'Banned by an administrator.', ts });
         } else if (cmd.action === 'unban') {
           bans.set(tid, { banned: false, reason: '', ts });
+        } else if (cmd.action === 'delete') {
+          deletedUserIds.add(tid);
         } else if (cmd.action === 'reset') {
           const prev = resets.get(tid) || 0;
           if (ts > prev) resets.set(tid, ts);
@@ -370,7 +390,7 @@ async function fetchAdminModerationState() {
       } catch (e) {}
     });
   } catch (e) {}
-  adminModStateCache = { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds };
+  adminModStateCache = { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds, deletedUserIds };
   return adminModStateCache;
 }
 
@@ -386,10 +406,45 @@ function showBannedScreen(reason) {
   $('#bannedView')?.classList.remove('hidden');
 }
 
+function clearLocalUserState(uid) {
+  if (!uid) return;
+  [
+    'grind_pro_', 'grind_daily_', 'grind_watchlist_', 'grind_watchlist_ts_',
+    'grind_reset_done_', 'grind_warn_ack_', 'grind_upd_ack_',
+    'grind_tos_pending_', 'grind_tos_ack_'
+  ].forEach(prefix => {
+    try { localStorage.removeItem(prefix + uid); } catch (e) {}
+  });
+}
+
 async function applyAdminActionsForCurrentUser() {
   if (!currentUser || !sb) return;
-  const { bans, resets, warnings, serverResetTs } = await fetchAdminModerationState();
+  const { bans, resets, warnings, serverResetTs, deletedUserIds } = await fetchAdminModerationState();
   const uid = currentUser.id;
+
+  // 0. Check Permanent Account Deletion
+  if (deletedUserIds?.has(uid)) {
+    try { await sb.from('holdings').delete().eq('user_id', uid); } catch (e) {}
+    try { await sb.from('trades').delete().eq('user_id', uid); } catch (e) {}
+    try { await sb.from('coins').delete().eq('creator_id', uid); } catch (e) {}
+    try { await sb.from('profiles').delete().eq('id', uid); } catch (e) {}
+    clearLocalUserState(uid);
+    if (timeInterval) clearInterval(timeInterval);
+    if (realtimeChannel && sb) sb.removeChannel(realtimeChannel);
+    try { await sb.auth.signOut(); } catch (e) {}
+    currentUser = null;
+    $('#appView')?.classList.add('hidden');
+    $('#bannedView')?.classList.add('hidden');
+    $('#dailyModal')?.classList.add('hidden');
+    $('#profileModal')?.classList.add('hidden');
+    $('#warnModal')?.classList.add('hidden');
+    $('#updateModal')?.classList.add('hidden');
+    $('#tosModal')?.classList.add('hidden');
+    $('#authView')?.classList.remove('hidden');
+    setAuthMode('login');
+    authMsg('This account has been permanently deleted.');
+    return;
+  }
 
   // 1. Check Ban
   const banInfo = bans.get(uid);
@@ -937,6 +992,7 @@ function updateUIProfile() {
   }
   $('#navNotifications').classList.toggle('hidden', !isDompinator());
   $('#navAdmin')?.classList.toggle('hidden', !isDompinator());
+  $('#deleteOwnAccountSection')?.classList.toggle('hidden', isDompinator());
   updatePremiumSection();
 }
 
@@ -1075,8 +1131,10 @@ async function loadCoins() {
   }
   if (!res.error) {
     const delCoins = adminModStateCache.deletedCoinIds || new Set();
+    const delUsers = adminModStateCache.deletedUserIds || new Set();
     const list = (res.data || []).filter(c => {
       if (delCoins.has(String(c.id))) return false;
+      if (c.creator_id && delUsers.has(String(c.creator_id))) return false;
       if (!srvResetTs) return true;
       const cts = c.created_at ? new Date(c.created_at).getTime() : 0;
       return cts > srvResetTs;
@@ -1816,7 +1874,10 @@ async function loadCoinComments(coin) {
     }
   });
 
-  const activeComments = Array.from(commentsMap.values()).filter(cm => !deletedIds.has(cm.id));
+  const delUsers = adminModStateCache.deletedUserIds || new Set();
+  const activeComments = Array.from(commentsMap.values()).filter(cm =>
+    !deletedIds.has(cm.id) && !delUsers.has(String(cm.user_id))
+  );
   if (pinnedCommentId && !activeComments.some(cm => cm.id === pinnedCommentId)) {
     pinnedCommentId = null;
   }
@@ -2375,9 +2436,12 @@ async function renderLeaderboard() {
   if (!sb) return;
   await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
   if (currentUser) await updateNetWorth();
+  const delUsers = adminModStateCache.deletedUserIds || new Set();
   let query = sb.from('profiles').select('id, username, avatar_url, cash, net_worth, time_played, is_premium');
   const { data } = await query.limit(200);
-  let list = (data || []).map(getEffectiveProfileStats);
+  let list = (data || [])
+    .filter(p => !delUsers.has(String(p.id)))
+    .map(getEffectiveProfileStats);
   if (lbMode === 'networth') {
     list.sort((a, b) => Number(b.net_worth || 0) - Number(a.net_worth || 0));
   } else {
@@ -2448,8 +2512,8 @@ async function openProfileModal(userId) {
     .eq('id', userId)
     .maybeSingle();
 
-  if (!p) {
-    body.innerHTML = '<p class="muted">Trader not found.</p>';
+  if (!p || adminModStateCache.deletedUserIds?.has(String(p.id))) {
+    body.innerHTML = '<p class="muted">This account was permanently deleted or does not exist.</p>';
     return;
   }
 
@@ -2498,6 +2562,7 @@ async function openProfileModal(userId) {
           <button type="button" class="reset-btn hidden" id="adminResetConfirmBtn">Confirm Reset</button>
           <button type="button" class="zoom-btn hidden" id="adminResetCancelBtn">Cancel</button>
           <button type="button" class="${isTargetBanned ? 'unban-btn' : 'ban-btn'}" id="adminBanBtn">${isTargetBanned ? 'Unban Account' : 'Ban Account'}</button>
+          <button type="button" class="delete-acc-btn" id="adminDeleteAccBtn">Delete Account</button>
         </div>
         <p id="adminModMessage" class="form-message"></p>
       </div>
@@ -2557,6 +2622,10 @@ async function openProfileModal(userId) {
         openProfileModal(p.id);
         if (currentPage === 'admin') loadAdminAccounts();
       }
+    });
+
+    $('#adminDeleteAccBtn')?.addEventListener('click', () => {
+      openDeleteAccountModal(p.id, p.username || 'user', false);
     });
   }
 }
@@ -3145,7 +3214,8 @@ async function loadRequests() {
     .select('*, profiles(username)')
     .eq('status', 'pending')
     .order('created_at', { ascending: false });
-  const list = (data || []).filter(r => !String(r.reason || '').startsWith('__'));
+  const delUsers = adminModStateCache.deletedUserIds || new Set();
+  const list = (data || []).filter(r => !String(r.reason || '').startsWith('__') && !delUsers.has(String(r.user_id)));
   $('#requestsList').innerHTML = list.map(r => `
     <div class="request-card">
       <h4>${escapeHtml(r.profiles?.username || 'Unknown')}</h4>
@@ -3492,12 +3562,15 @@ function loadAdminPage() {
 async function loadAdminAccounts() {
   if (!sb || !isDompinator()) return;
   await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
+  const delUsers = adminModStateCache.deletedUserIds || new Set();
   const { data } = await sb
     .from('profiles')
     .select('id, username, avatar_url, cash, net_worth, is_premium, time_played')
     .order('net_worth', { ascending: false })
     .limit(200);
-  adminAccountsCache = (data || []).map(getEffectiveProfileStats)
+  adminAccountsCache = (data || [])
+    .filter(p => !delUsers.has(String(p.id)))
+    .map(getEffectiveProfileStats)
     .sort((a, b) => Number(b.net_worth || 0) - Number(a.net_worth || 0));
   renderAdminAccounts();
 }
@@ -3527,6 +3600,7 @@ function renderAdminAccounts() {
         <button type="button" class="warn-btn" data-acc-manage="${escapeHtml(p.id)}">Warn</button>
         <button type="button" class="reset-btn" data-acc-reset="${escapeHtml(p.id)}" data-acc-name="${escapeHtml(p.username || 'user')}">Reset</button>
         <button type="button" class="${isBanned ? 'unban-btn' : 'ban-btn'}" data-acc-ban="${escapeHtml(p.id)}" data-acc-banned="${isBanned ? '1' : '0'}" data-acc-name="${escapeHtml(p.username || 'user')}">${isBanned ? 'Unban' : 'Ban'}</button>
+        <button type="button" class="delete-acc-btn" data-acc-del="${escapeHtml(p.id)}" data-acc-name="${escapeHtml(p.username || 'user')}">Delete</button>
       </div>
     </div>`;
   }).join('');
@@ -3573,7 +3647,137 @@ function renderAdminAccounts() {
       }
     });
   });
+
+  $$('#adminAccountsList [data-acc-del]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openDeleteAccountModal(btn.dataset.accDel, btn.dataset.accName || 'user', false);
+    });
+  });
 }
+
+let pendingDeleteAccountTarget = null;
+
+function openDeleteAccountModal(userId, username, isSelf = false) {
+  if (!userId) return;
+  if (isSelf && isDompinator()) {
+    toast('Admin account cannot self-delete.');
+    return;
+  }
+  pendingDeleteAccountTarget = { userId: String(userId), username: String(username || 'user'), isSelf: Boolean(isSelf) };
+  const msgEl = $('#deleteAccountMessage');
+  if (msgEl) {
+    msgEl.innerHTML = isSelf
+      ? `Are you sure you want to <strong>permanently delete your own account</strong> (<strong>${escapeHtml(username)}</strong>)? Your profile, holdings, coins, and comments will be permanently removed and cannot be recovered.`
+      : `Are you sure you want to <strong>permanently delete ${escapeHtml(username)}</strong>? Their profile, holdings, coins, and comments will be permanently deleted and they will be blocked from signing back in.`;
+  }
+  $('#deleteAccountModal')?.classList.remove('hidden');
+}
+
+function closeDeleteAccountModal() {
+  pendingDeleteAccountTarget = null;
+  $('#deleteAccountModal')?.classList.add('hidden');
+}
+
+$('#closeDeleteAccountBtn')?.addEventListener('click', closeDeleteAccountModal);
+$('#cancelDeleteAccountBtn')?.addEventListener('click', closeDeleteAccountModal);
+$('#deleteAccountModal')?.addEventListener('click', e => {
+  if (e.target === $('#deleteAccountModal')) closeDeleteAccountModal();
+});
+$('#deleteOwnAccountBtn')?.addEventListener('click', () => {
+  if (!currentUser) return;
+  openDeleteAccountModal(currentUser.id, currentUser.username || 'your account', true);
+});
+
+$('#confirmDeleteAccountBtn')?.addEventListener('click', async () => {
+  if (!pendingDeleteAccountTarget || !currentUser || !sb) return;
+  const { userId, username, isSelf } = pendingDeleteAccountTarget;
+  const btn = $('#confirmDeleteAccountBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Deleting...';
+  }
+
+  if (isSelf) {
+    await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: '__ACCOUNT_DELETED__',
+      status: 'denied'
+    });
+    try { await sb.from('holdings').delete().eq('user_id', currentUser.id); } catch (e) {}
+    try { await sb.from('trades').delete().eq('user_id', currentUser.id); } catch (e) {}
+    try { await sb.from('coins').delete().eq('creator_id', currentUser.id); } catch (e) {}
+    try { await sb.from('profiles').delete().eq('id', currentUser.id); } catch (e) {}
+    clearLocalUserState(currentUser.id);
+    if (timeInterval) clearInterval(timeInterval);
+    if (realtimeChannel && sb) sb.removeChannel(realtimeChannel);
+    try { await sb.auth.signOut(); } catch (e) {}
+    currentUser = null;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Yes, Permanently Delete';
+    }
+    closeDeleteAccountModal();
+    $('#appView')?.classList.add('hidden');
+    $('#authView')?.classList.remove('hidden');
+    setAuthMode('login');
+    authMsg('Your account has been permanently deleted.');
+    return;
+  }
+
+  if (!isDompinator()) {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Yes, Permanently Delete';
+    }
+    closeDeleteAccountModal();
+    return;
+  }
+
+  const ok = await sendAdminCommand('delete', userId, 'Permanently deleted by administrator');
+  if (!ok) {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Yes, Permanently Delete';
+    }
+    return;
+  }
+
+  adminModStateCache.deletedUserIds?.add(String(userId));
+
+  // Best-effort full SQL removal of coins, holdings, trades, requests, and profile
+  try {
+    const { data: userCoins } = await sb.from('coins').select('id').eq('creator_id', userId);
+    for (const uc of (userCoins || [])) {
+      await sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__COIN_DEL__:' + uc.id,
+        status: 'denied'
+      });
+      adminModStateCache.deletedCoinIds?.add(String(uc.id));
+      await sb.from('holdings').delete().eq('coin_id', uc.id);
+      await sb.from('trades').delete().eq('coin_id', uc.id);
+      await sb.from('coins').delete().eq('id', uc.id);
+    }
+    await sb.from('holdings').delete().eq('user_id', userId);
+    await sb.from('trades').delete().eq('user_id', userId);
+    await sb.from('premium_requests').delete().eq('user_id', userId);
+    await sb.from('profiles').delete().eq('id', userId);
+  } catch (e) {
+    console.warn('Direct account delete cleanup note:', e);
+  }
+
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = 'Yes, Permanently Delete';
+  }
+  closeDeleteAccountModal();
+  $('#profileModal')?.classList.add('hidden');
+  toast(`Permanently deleted account: ${username}`);
+  await loadCoins();
+  if (currentPage === 'admin') loadAdminAccounts();
+  if (currentPage === 'global') renderLeaderboard();
+  if (currentPage === 'feed') renderFeed();
+});
 
 $('#adminAccountSearch')?.addEventListener('input', e => {
   adminAccountQuery = e.target.value || '';
