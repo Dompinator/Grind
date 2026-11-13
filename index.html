@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — The Meme Currency Market</title>
-  <link rel="stylesheet" href="styles.css?v=10">
+  <link rel="stylesheet" href="styles.css?v=11">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -172,6 +172,8 @@
             <div class="ad-controls">
               <div id="adStatusText" class="muted tiny"></div>
               <div class="ad-actions">
+                <button class="zoom-btn hidden" id="adPlayBtn" type="button">Pause</button>
+                <button class="zoom-btn hidden" id="adMuteBtn" type="button">Mute</button>
                 <button class="primary-btn hidden" id="adSkipBtn" type="button" disabled>Skip in 60s</button>
                 <button class="buy-btn hidden" id="adClaimBtn" type="button" disabled>Wait until video ends ($1.00)</button>
                 <button class="primary-btn hidden" id="adBackBtn" type="button">Back to Feed</button>
@@ -282,6 +284,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

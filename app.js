@@ -1731,11 +1731,15 @@ async function startAdsPage() {
   cleanupAds();
   const stage = $('#adStage');
   const statusEl = $('#adStatusText');
+  const playBtn = $('#adPlayBtn');
+  const muteBtn = $('#adMuteBtn');
   const skipBtn = $('#adSkipBtn');
   const claimBtn = $('#adClaimBtn');
   const backBtn = $('#adBackBtn');
   if (!stage) return;
 
+  playBtn?.classList.add('hidden');
+  muteBtn?.classList.add('hidden');
   skipBtn?.classList.add('hidden');
   claimBtn?.classList.add('hidden');
   backBtn?.classList.add('hidden');
@@ -1752,11 +1756,15 @@ function loadRandomAd(preloadedList) {
   const list = preloadedList || adsCache || [];
   const stage = $('#adStage');
   const statusEl = $('#adStatusText');
+  const playBtn = $('#adPlayBtn');
+  const muteBtn = $('#adMuteBtn');
   const skipBtn = $('#adSkipBtn');
   const claimBtn = $('#adClaimBtn');
   const backBtn = $('#adBackBtn');
   if (!stage) return;
 
+  playBtn?.classList.add('hidden');
+  muteBtn?.classList.add('hidden');
   skipBtn?.classList.add('hidden');
   claimBtn?.classList.add('hidden');
   backBtn?.classList.add('hidden');
@@ -1827,9 +1835,15 @@ function loadRandomAd(preloadedList) {
     adClaimed = false;
     let maxWatchedTime = 0;
 
-    stage.innerHTML = `<video id="adVideo" src="${escapeHtml(ad.url)}" playsinline controls autoplay></video>`;
+    stage.innerHTML = `<video id="adVideo" src="${escapeHtml(ad.url)}" playsinline autoplay disablePictureInPicture controlsList="nodownload noplaybackrate"></video>`;
     const video = $('#adVideo');
     if (video) {
+      video.defaultPlaybackRate = 1;
+      video.playbackRate = 1;
+      video.addEventListener('contextmenu', e => e.preventDefault());
+      video.addEventListener('ratechange', () => {
+        if (video.playbackRate !== 1) video.playbackRate = 1;
+      });
       video.onerror = () => {
         if (ad.fallbackUrl && !video.dataset.fallbackTried) {
           video.dataset.fallbackTried = '1';
@@ -1838,6 +1852,8 @@ function loadRandomAd(preloadedList) {
           return;
         }
         adLocked = false;
+        playBtn?.classList.add('hidden');
+        muteBtn?.classList.add('hidden');
         if (statusEl) statusEl.textContent = `Could not play "${ad.name}". Make sure it is a valid video file.`;
         claimBtn?.classList.add('hidden');
         backBtn?.classList.remove('hidden');
@@ -1853,13 +1869,37 @@ function loadRandomAd(preloadedList) {
     if (statusEl) statusEl.textContent = 'Watch the full video to claim your $1.00 reward.';
 
     if (video) {
-      video.play().catch(() => {
+      const syncVideoBtns = () => {
+        if (playBtn) playBtn.textContent = video.paused ? 'Play' : 'Pause';
+        if (muteBtn) muteBtn.textContent = video.muted ? 'Unmute' : 'Mute';
+      };
+      if (playBtn) {
+        playBtn.classList.remove('hidden');
+        playBtn.onclick = () => {
+          if (video.paused) video.play().catch(() => {});
+          else video.pause();
+        };
+      }
+      if (muteBtn) {
+        muteBtn.classList.remove('hidden');
+        muteBtn.onclick = () => {
+          video.muted = !video.muted;
+          syncVideoBtns();
+        };
+      }
+      video.addEventListener('play', syncVideoBtns);
+      video.addEventListener('pause', syncVideoBtns);
+      video.addEventListener('volumechange', syncVideoBtns);
+
+      video.play().then(syncVideoBtns).catch(() => {
         video.muted = true;
-        video.play().catch(() => {});
+        syncVideoBtns();
+        video.play().then(syncVideoBtns).catch(() => syncVideoBtns());
       });
 
       video.addEventListener('timeupdate', () => {
         if (token !== activeAdToken) return;
+        if (video.playbackRate !== 1) video.playbackRate = 1;
         if (!video.seeking && video.currentTime > maxWatchedTime) {
           maxWatchedTime = video.currentTime;
         }
@@ -1878,6 +1918,7 @@ function loadRandomAd(preloadedList) {
       video.addEventListener('ended', () => {
         if (token !== activeAdToken) return;
         adLocked = false;
+        syncVideoBtns();
         if (claimBtn) {
           claimBtn.disabled = false;
           claimBtn.textContent = 'Claim $1.00 Reward';
