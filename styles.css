@@ -131,7 +131,7 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .chart-inner { position: relative; }
 .chart-inner canvas { display: block; }
 .trade-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 20px; }
-.trade-buttons { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 14px; }
+.trade-buttons { display: grid; grid-template-columns: repeat(4, 1fr) 1.35fr; gap: 8px; margin-bottom: 14px; }
 .amount-btn { background: #201a2d; border: 1px solid var(--line); border-radius: 10px; padding: 13px 5px; color: #d8cde8; font-weight: 700; cursor: pointer; transition: .15s; }
 .amount-btn:hover, .amount-btn.active { border-color: var(--green); color: var(--green); }
 .trade-actions { display: flex; gap: 10px; }
@@ -172,6 +172,7 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
   .main-area { margin-left: 72px; width: calc(100% - 72px); }
   .coin-grid { grid-template-columns: 1fr; }
   .portfolio-summary, .form-grid, .trade-buttons { grid-template-columns: 1fr 1fr; }
+  .amount-custom { grid-column: span 2; }
   .coin-bottom-grid { grid-template-columns: 1fr; }
   .feed-toolbar { flex-direction: column; align-items: stretch; }
   .feed-search { width: 100%; }
@@ -244,3 +245,16 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .profile-modal-stats > div { background: #120e1c; border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
 .profile-modal-stats strong { display: block; font-size: 18px; margin-top: 4px; }
 .profile-coins-list { display: flex; flex-direction: column; gap: 8px; }
+
+/* Watchlist star & custom buy pen input */
+.fav-btn { margin-left: auto; flex-shrink: 0; width: 34px; height: 34px; border-radius: 10px; background: #1e1830; border: 1px solid var(--line); color: var(--muted); font-size: 18px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: .15s; }
+.fav-btn:hover { border-color: #fbbf24; color: #fbbf24; transform: scale(1.06); }
+.fav-btn.active { border-color: #fbbf24; background: rgba(251, 191, 36, .14); color: #fbbf24; text-shadow: 0 0 8px rgba(251, 191, 36, .45); }
+
+.amount-custom { display: flex; align-items: center; justify-content: center; gap: 5px; padding: 0 8px; cursor: text; }
+.amount-custom .pen-icon { font-size: 14px; flex-shrink: 0; opacity: 0.9; }
+.amount-custom input { width: 100%; min-width: 0; background: transparent; border: 0; color: white; font: inherit; font-weight: 700; font-size: 13px; text-align: center; outline: none; padding: 12px 0; -moz-appearance: textfield; }
+.amount-custom input::placeholder { color: var(--muted); font-weight: 600; }
+.amount-custom input::-webkit-outer-spin-button,
+.amount-custom input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+

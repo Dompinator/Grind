@@ -18,6 +18,8 @@ let currentUser = null;
 let coins = [];
 let selectedCoin = null;
 let selectedAmount = 5;
+let customBuyActive = false;
+let customBuyValue = '';
 let feedMode = 'new';
 let lbMode = 'networth';
 let pendingCoinImage = null;
@@ -35,6 +37,7 @@ let adLocked = false;
 let adClaimed = false;
 let feedSearchQuery = '';
 let proUserIds = new Set();
+let watchlistIds = new Set();
 let dailyStateCache = null;
 let lastCoinsDateKey = '';
 
@@ -267,7 +270,75 @@ async function loadProfile() {
     }
   }
 
+  await loadWatchlist();
   updateUIProfile();
+}
+
+async function loadWatchlist() {
+  if (!currentUser) return;
+  let localIds = [];
+  let localTs = 0;
+  try {
+    localIds = JSON.parse(localStorage.getItem('grind_watchlist_' + currentUser.id) || '[]');
+    localTs = Number(localStorage.getItem('grind_watchlist_ts_' + currentUser.id) || 0);
+  } catch (e) {}
+
+  let chosen = Array.isArray(localIds) ? localIds : [];
+  if (sb) {
+    try {
+      const { data } = await sb
+        .from('premium_requests')
+        .select('reason, created_at')
+        .eq('user_id', currentUser.id)
+        .like('reason', '__WATCHLIST__:%')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (data?.reason) {
+        const remoteIds = JSON.parse(data.reason.slice('__WATCHLIST__:'.length));
+        const remoteTs = data.created_at ? new Date(data.created_at).getTime() : 0;
+        if (Array.isArray(remoteIds) && remoteTs >= localTs) {
+          chosen = remoteIds;
+          localStorage.setItem('grind_watchlist_' + currentUser.id, JSON.stringify(chosen));
+          localStorage.setItem('grind_watchlist_ts_' + currentUser.id, String(remoteTs));
+        }
+      }
+    } catch (e) {}
+  }
+  watchlistIds = new Set(chosen.map(String));
+}
+
+async function toggleWatchlist(coinId) {
+  if (!currentUser || !coinId) return;
+  const id = String(coinId);
+  const adding = !watchlistIds.has(id);
+  if (adding) watchlistIds.add(id);
+  else watchlistIds.delete(id);
+
+  const list = [...watchlistIds];
+  localStorage.setItem('grind_watchlist_' + currentUser.id, JSON.stringify(list));
+  localStorage.setItem('grind_watchlist_ts_' + currentUser.id, String(Date.now()));
+
+  $$(`.fav-btn[data-fav="${id}"]`).forEach(btn => {
+    btn.classList.toggle('active', adding);
+    btn.textContent = adding ? '★' : '☆';
+    btn.title = adding ? 'Remove from watchlist' : 'Add to watchlist';
+  });
+
+  if (currentPage === 'feed' && feedMode === 'watchlist') {
+    renderFeed();
+  }
+  toast(adding ? 'Added to watchlist ★' : 'Removed from watchlist');
+
+  if (sb) {
+    try {
+      await sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__WATCHLIST__:' + JSON.stringify(list),
+        status: 'denied'
+      });
+    } catch (e) {}
+  }
 }
 
 function updateUIProfile() {
@@ -495,6 +566,9 @@ function renderFeed() {
     return;
   }
   let list = [...coins];
+  if (feedMode === 'watchlist') {
+    list = list.filter(c => watchlistIds.has(String(c.id)));
+  }
   if (feedSearchQuery) {
     list = list.filter(c =>
       (c.name || '').toLowerCase().includes(feedSearchQuery) ||
@@ -502,7 +576,7 @@ function renderFeed() {
     );
   }
   if (feedMode === 'cheap') list.sort((a, b) => Number(a.price) - Number(b.price));
-  if (feedMode === 'new') list.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  if (feedMode === 'new' || feedMode === 'watchlist') list.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   if (feedMode === 'trending') {
     list.sort((a, b) => {
       if ((b.recent_buys_24h || 0) !== (a.recent_buys_24h || 0)) {
@@ -523,14 +597,16 @@ function renderFeed() {
     const creatorName = creator?.username || 'Community';
     const creatorObj = creator ? { ...creator, id: c.creator_id } : { id: c.creator_id };
     const chg = formatChangePct(c.change_pct);
+    const isFav = watchlistIds.has(String(c.id));
     return `
     <article class="coin-card" data-coin="${c.id}">
       <div class="coin-top">
         <div class="coin-logo">${c.image_url ? `<img src="${escapeHtml(c.image_url)}">` : escapeHtml(c.ticker[0])}</div>
-        <div>
+        <div style="flex:1;min-width:0;">
           <div class="coin-name">${escapeHtml(c.name)}</div>
           <div class="coin-ticker">$${escapeHtml(c.ticker)}</div>
         </div>
+        <button type="button" class="fav-btn ${isFav ? 'active' : ''}" data-fav="${escapeHtml(c.id)}" title="${isFav ? 'Remove from watchlist' : 'Add to watchlist'}" aria-label="Toggle watchlist">${isFav ? '★' : '☆'}</button>
       </div>
       <div class="coin-price">${priceFmt(c.price)}</div>
       <div class="coin-change ${chg.cls}">${chg.text}</div>
@@ -543,9 +619,28 @@ function renderFeed() {
       ` : ''}
     </article>`;
   }).join('');
-  $('#emptyFeed').classList.toggle('hidden', list.length > 0);
+  const emptyEl = $('#emptyFeed');
+  if (emptyEl) {
+    const h3 = emptyEl.querySelector('h3');
+    const p = emptyEl.querySelector('p');
+    const btn = emptyEl.querySelector('.primary-btn');
+    if (feedMode === 'watchlist') {
+      if (h3) h3.textContent = feedSearchQuery ? 'No matching watchlist coins' : 'Your watchlist is empty';
+      if (p) p.textContent = feedSearchQuery ? 'Try another search term.' : 'Click the ☆ star on any coin to save it here.';
+      if (btn) btn.classList.add('hidden');
+    } else {
+      if (h3) h3.textContent = 'No currencies yet';
+      if (p) p.textContent = 'Be the first to create one!';
+      if (btn) btn.classList.remove('hidden');
+    }
+    emptyEl.classList.toggle('hidden', list.length > 0);
+  }
   $('#feedGrid').classList.toggle('hidden', list.length === 0);
   $$('.coin-card').forEach(card => card.addEventListener('click', () => openCoin(card.dataset.coin)));
+  $$('#feedGrid [data-fav]').forEach(btn => btn.addEventListener('click', e => {
+    e.stopPropagation();
+    toggleWatchlist(btn.dataset.fav);
+  }));
   $$('#feedGrid [data-profile]').forEach(btn => btn.addEventListener('click', e => {
     e.stopPropagation();
     openProfileModal(btn.dataset.profile);
@@ -697,6 +792,8 @@ async function renderCoinDetail() {
   const creator = c.profiles;
   const creatorName = creator?.username || 'Community';
   const creatorObj = creator ? { ...creator, id: c.creator_id } : { id: c.creator_id };
+  const isFav = watchlistIds.has(String(c.id));
+  const buyBtnLabel = selectedAmount > 0 ? `Buy ${money(selectedAmount)}` : 'Enter amount';
 
   $('#coinDetail').innerHTML = `
     <div class="coin-detail-hero">
@@ -711,6 +808,7 @@ async function renderCoinDetail() {
           </button>
         ` : `<p class="muted tiny">Community created</p>`}
       </div>
+      <button type="button" class="fav-btn ${isFav ? 'active' : ''}" data-fav="${escapeHtml(c.id)}" title="${isFav ? 'Remove from watchlist' : 'Add to watchlist'}" aria-label="Toggle watchlist">${isFav ? '★' : '☆'}</button>
     </div>
     <div class="detail-price">${priceFmt(c.price)}</div>
     <div class="coin-change ${detailChg.cls}">${detailChg.text}</div>
@@ -733,10 +831,14 @@ async function renderCoinDetail() {
       <div class="trade-panel">
         <h3>Trade $${escapeHtml(c.ticker)}</h3>
         <div class="trade-buttons">
-          ${[1, 5, 10, 25, 50].map(n => `<button class="amount-btn ${n === selectedAmount ? 'active' : ''}" data-buy="${n}">$${n}</button>`).join('')}
+          ${[1, 5, 10, 25].map(n => `<button class="amount-btn ${!customBuyActive && n === selectedAmount ? 'active' : ''}" data-buy="${n}">$${n}</button>`).join('')}
+          <div class="amount-btn amount-custom ${customBuyActive ? 'active' : ''}" id="customBuyWrap" title="Enter custom buy amount">
+            <span class="pen-icon" aria-hidden="true">✎</span>
+            <input id="customBuyInput" type="number" min="0.01" step="any" placeholder="Custom" value="${escapeHtml(customBuyValue)}">
+          </div>
         </div>
         <div class="trade-actions">
-          <button class="buy-btn" id="buyBtn">Buy ${money(selectedAmount)}</button>
+          <button class="buy-btn" id="buyBtn">${buyBtnLabel}</button>
           <div class="sell-group">
             <button class="sell-btn" data-sell="0.25">Sell 25%</button>
             <button class="sell-btn" data-sell="0.5">Sell 50%</button>
@@ -759,13 +861,49 @@ async function renderCoinDetail() {
     </div>
   `;
 
+  $$('#coinDetail [data-fav]').forEach(btn => btn.addEventListener('click', () => toggleWatchlist(btn.dataset.fav)));
   $$('#coinDetail [data-profile]').forEach(btn => btn.addEventListener('click', () => openProfileModal(btn.dataset.profile)));
   $$('[data-buy]').forEach(b => b.addEventListener('click', () => {
+    customBuyActive = false;
     selectedAmount = Number(b.dataset.buy);
     $$('[data-buy]').forEach(x => x.classList.toggle('active', x === b));
+    $('#customBuyWrap')?.classList.remove('active');
     $('#buyBtn').textContent = `Buy ${money(selectedAmount)}`;
   }));
-  $('#buyBtn')?.addEventListener('click', () => buy(c, selectedAmount));
+
+  const customWrap = $('#customBuyWrap');
+  const customInput = $('#customBuyInput');
+  const activateCustomBuy = () => {
+    customBuyActive = true;
+    $$('[data-buy]').forEach(x => x.classList.remove('active'));
+    customWrap?.classList.add('active');
+    customBuyValue = customInput?.value ?? '';
+    const val = Number(customBuyValue);
+    selectedAmount = Number.isFinite(val) && val > 0 ? val : 0;
+    const buyBtn = $('#buyBtn');
+    if (buyBtn) buyBtn.textContent = selectedAmount > 0 ? `Buy ${money(selectedAmount)}` : 'Enter amount';
+  };
+  customWrap?.addEventListener('click', () => {
+    customInput?.focus();
+    activateCustomBuy();
+  });
+  customInput?.addEventListener('focus', activateCustomBuy);
+  customInput?.addEventListener('input', activateCustomBuy);
+  customInput?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('#buyBtn')?.click();
+    }
+  });
+
+  $('#buyBtn')?.addEventListener('click', () => {
+    if (!selectedAmount || selectedAmount <= 0) {
+      const msg = $('#tradeMessage');
+      if (msg) msg.textContent = 'Enter a valid amount to buy.';
+      return;
+    }
+    buy(c, selectedAmount);
+  });
   $$('[data-sell]').forEach(b => b.addEventListener('click', () => sell(c, shares * Number(b.dataset.sell))));
 
   // Zoom Button Controls
