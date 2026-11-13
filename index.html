@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=23">
+  <link rel="stylesheet" href="styles.css?v=24">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -24,7 +24,7 @@
         <label>Password<input id="authPassword" type="password" autocomplete="current-password" minlength="6" required placeholder="Password (min 6)"></label>
         <button class="primary-btn full" id="authSubmit" type="submit">Log in</button>
       </form>
-      <p class="tiny muted">GRIND v0.4.5</p>
+      <p class="tiny muted">GRIND v0.5</p>
       <p id="authMessage" class="form-message" aria-live="polite"></p>
     </section>
   </main>
@@ -54,7 +54,7 @@
           </div>
         </div>
         <button id="logoutBtn" class="logout-btn">↗ Log out</button>
-        <div class="version">GRIND v0.4.5</div>
+        <div class="version">GRIND v0.5</div>
       </div>
     </aside>
 
@@ -357,7 +357,7 @@
           </div>
           <div class="admin-update-grid">
             <div class="form-card">
-              <label>Title<input id="updateTitleInput" maxlength="80" placeholder="e.g. GRIND v0.4.6 Update"></label>
+              <label>Title<input id="updateTitleInput" maxlength="80" placeholder="e.g. GRIND v0.5.1 Update"></label>
               <label>Message<textarea id="updateBodyInput" rows="3" maxlength="800" placeholder="Describe what changed or important info..."></textarea></label>
               <div style="margin:14px 0;">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
@@ -549,6 +549,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=23"></script>
+  <script src="app.js?v=24"></script>
 </body>
 </html>
