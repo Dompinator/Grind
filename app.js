@@ -36,6 +36,7 @@ let adClaimed = false;
 let feedSearchQuery = '';
 let proUserIds = new Set();
 let dailyStateCache = null;
+let lastCoinsDateKey = '';
 
 const DAILY_REWARDS = [5, 5, 10, 12, 13, 15, 'PRO'];
 const GOLD_CROWN_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 18h18v2H3v-2zm0-2L1 6l5.5 4.5L12 4l5.5 6.5L23 6l-2 10H3z"/></svg>`;
@@ -46,6 +47,19 @@ function money(n) { return '$' + Number(n || 0).toFixed(2); }
 function priceFmt(n) {
   n = Number(n || 0);
   return '$' + n.toFixed(n < 1 ? 4 : 2);
+}
+function getStartOfTodayDate() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+function formatChangePct(rawPct) {
+  const val = Number(rawPct || 0);
+  const pct = Math.abs(val) < 0.005 ? 0 : val;
+  const isUp = pct >= 0;
+  return {
+    cls: isUp ? 'up' : 'down',
+    text: `${isUp ? '↗ +' : '↘ '}${pct.toFixed(2)}% today`
+  };
 }
 function escapeHtml(s = '') {
   return String(s).replace(/[&<>"']/g, c => ({
@@ -404,13 +418,22 @@ async function loadCoins() {
   if (!res.error) {
     const list = res.data || [];
     const stats = new Map();
+    const openPriceMap = new Map();
+    const tradedTodaySet = new Set();
+    const startOfTodayIso = getStartOfTodayDate().toISOString();
+    lastCoinsDateKey = getLocalDateKey(0);
     try {
-      const { data: buyRows } = await sb
-        .from('trades')
-        .select('coin_id, amount_usd, created_at')
-        .eq('type', 'buy')
-        .order('created_at', { ascending: false })
-        .limit(1000);
+      const [{ data: buyRows }, { data: todayRows }] = await Promise.all([
+        sb.from('trades')
+          .select('coin_id, amount_usd, created_at')
+          .eq('type', 'buy')
+          .order('created_at', { ascending: false })
+          .limit(1000),
+        sb.from('trades')
+          .select('coin_id')
+          .gte('created_at', startOfTodayIso)
+          .limit(1000)
+      ]);
       const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
       (buyRows || []).forEach(t => {
         if (!t.coin_id) return;
@@ -422,11 +445,39 @@ async function loadCoins() {
         if (ts > s.lastBuy) s.lastBuy = ts;
         stats.set(t.coin_id, s);
       });
+      const tradedTodayIds = [...new Set((todayRows || []).map(t => t.coin_id).filter(Boolean))];
+      tradedTodayIds.forEach(id => tradedTodaySet.add(id));
+      if (tradedTodayIds.length > 0) {
+        const prevResults = await Promise.all(
+          tradedTodayIds.map(id =>
+            sb.from('trades')
+              .select('price_after')
+              .eq('coin_id', id)
+              .lt('created_at', startOfTodayIso)
+              .order('created_at', { ascending: false })
+              .limit(1)
+              .maybeSingle()
+          )
+        );
+        prevResults.forEach((r, idx) => {
+          const cid = tradedTodayIds[idx];
+          openPriceMap.set(cid, r.data && r.data.price_after != null ? Number(r.data.price_after) : 1);
+        });
+      }
     } catch (e) {}
     coins = list.map(c => {
       const st = stats.get(c.id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
+      const currentPrice = Number(c.price) || 1;
+      const tradedToday = tradedTodaySet.has(c.id);
+      const openToday = tradedToday ? (openPriceMap.get(c.id) || 1) : currentPrice;
+      const rawTodayPct = tradedToday && openToday > 0
+        ? ((currentPrice - openToday) / openToday) * 100
+        : 0;
+      const todayPct = Math.abs(rawTodayPct) < 0.005 ? 0 : rawTodayPct;
       return {
         ...c,
+        today_open_price: openToday,
+        change_pct: todayPct,
         recent_buys_24h: st.recent,
         total_buys: st.total,
         buy_volume: st.volume,
@@ -439,6 +490,10 @@ async function loadCoins() {
 }
 
 function renderFeed() {
+  if (lastCoinsDateKey && lastCoinsDateKey !== getLocalDateKey(0)) {
+    loadCoins();
+    return;
+  }
   let list = [...coins];
   if (feedSearchQuery) {
     list = list.filter(c =>
@@ -467,6 +522,7 @@ function renderFeed() {
     const creator = c.profiles;
     const creatorName = creator?.username || 'Community';
     const creatorObj = creator ? { ...creator, id: c.creator_id } : { id: c.creator_id };
+    const chg = formatChangePct(c.change_pct);
     return `
     <article class="coin-card" data-coin="${c.id}">
       <div class="coin-top">
@@ -477,7 +533,7 @@ function renderFeed() {
         </div>
       </div>
       <div class="coin-price">${priceFmt(c.price)}</div>
-      <div class="coin-change ${(c.change_pct || 0) >= 0 ? 'up' : 'down'}">${(c.change_pct || 0) >= 0 ? '↗ +' : '↘ '}${Number(c.change_pct || 0).toFixed(2)}% today</div>
+      <div class="coin-change ${chg.cls}">${chg.text}</div>
       <p class="coin-desc">${escapeHtml(c.description || 'Community currency.')}</p>
       ${c.creator_id ? `
         <button type="button" class="creator-chip" data-profile="${escapeHtml(c.creator_id)}">
@@ -624,6 +680,20 @@ async function renderCoinDetail() {
   const trades = Array.from(tradeMap.values());
   trades.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
+  const startOfTodayMs = getStartOfTodayDate().getTime();
+  const todayTrades = trades.filter(t => new Date(t.created_at || 0).getTime() >= startOfTodayMs);
+  const preTodayTrade = trades.find(t => new Date(t.created_at || 0).getTime() < startOfTodayMs);
+  let detailTodayPct = Number(c.change_pct || 0);
+  if (todayTrades.length === 0) {
+    detailTodayPct = 0;
+  } else if (preTodayTrade && preTodayTrade.price_after != null) {
+    const openP = Number(preTodayTrade.price_after) || 1;
+    detailTodayPct = ((Number(c.price) - openP) / openP) * 100;
+  } else if ((dbTrades || []).length < 100) {
+    detailTodayPct = ((Number(c.price) - 1) / 1) * 100;
+  }
+  const detailChg = formatChangePct(detailTodayPct);
+
   const creator = c.profiles;
   const creatorName = creator?.username || 'Community';
   const creatorObj = creator ? { ...creator, id: c.creator_id } : { id: c.creator_id };
@@ -643,7 +713,7 @@ async function renderCoinDetail() {
       </div>
     </div>
     <div class="detail-price">${priceFmt(c.price)}</div>
-    <div class="coin-change ${(c.change_pct || 0) >= 0 ? 'up' : 'down'}">${(c.change_pct || 0) >= 0 ? '↗ +' : '↘ '}${Number(c.change_pct || 0).toFixed(2)}%</div>
+    <div class="coin-change ${detailChg.cls}">${detailChg.text}</div>
     <div class="chart-wrap">
       <div class="chart-head">
         <div>
@@ -793,16 +863,18 @@ async function freshCoin(coin) {
 
 async function buy(coin, amount) {
   if (!currentUser || currentUser.cash < amount) return $('#tradeMessage').textContent = 'Not enough cash.';
+  const prevOpenToday = Number(coin.today_open_price) || Number(coin.price) || 1;
   coin = await freshCoin(coin);   // use the live price, not a stale one
   const impact = calculateImpact(amount, coin.price);
   const newPrice = coin.price * (1 + impact);
+  const todayPct = prevOpenToday > 0 ? ((newPrice - prevOpenToday) / prevOpenToday) * 100 : 0;
   const shares = amount / coin.price;
   const newCash = currentUser.cash - amount;
 
   const { error: cashErr } = await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
   if (cashErr) return $('#tradeMessage').textContent = 'Cash error: ' + cashErr.message;
 
-  await sb.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) + impact * 100 }).eq('id', coin.id);
+  await sb.from('coins').update({ price: newPrice, change_pct: todayPct }).eq('id', coin.id);
 
   const { data: existing } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
   const newShares = (existing?.shares || 0) + shares;
@@ -837,7 +909,8 @@ async function buy(coin, amount) {
 
   currentUser.cash = newCash;
   coin.price = newPrice;
-  coin.change_pct = (coin.change_pct || 0) + impact * 100;
+  coin.today_open_price = prevOpenToday;
+  coin.change_pct = todayPct;
   updateUIProfile();
   await updateNetWorth();
   toast(`Bought for ${money(amount)}! Price ${priceFmt(coin.price)} (+${(impact * 100).toFixed(impact < 0.1 ? 2 : 0)}%)`);
@@ -848,6 +921,7 @@ async function buy(coin, amount) {
 
 async function sell(coin, sharesToSell) {
   if (!currentUser || sharesToSell <= 0) return $('#tradeMessage').textContent = 'No shares to sell.';
+  const prevOpenToday = Number(coin.today_open_price) || Number(coin.price) || 1;
   coin = await freshCoin(coin);
   const { data: hold } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
   const owned = hold?.shares || 0;
@@ -856,11 +930,12 @@ async function sell(coin, sharesToSell) {
   const proceeds = sellShares * coin.price;
   const impact = calculateImpact(proceeds, coin.price) * 0.6;
   const newPrice = Math.max(0.01, coin.price / (1 + impact));   // never drops below 0 / over 100%
+  const todayPct = prevOpenToday > 0 ? ((newPrice - prevOpenToday) / prevOpenToday) * 100 : 0;
   const newCash = currentUser.cash + proceeds;
 
   const remainingShares = owned - sellShares < 1e-8 ? 0 : owned - sellShares;
   await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
-  await sb.from('coins').update({ price: newPrice, change_pct: (coin.change_pct || 0) - (1 - newPrice / coin.price) * 100 }).eq('id', coin.id);
+  await sb.from('coins').update({ price: newPrice, change_pct: todayPct }).eq('id', coin.id);
   await sb.from('holdings').update({ shares: remainingShares }).eq('user_id', currentUser.id).eq('coin_id', coin.id);
   await sb.from('trades').insert({
     coin_id: coin.id,
@@ -889,6 +964,8 @@ async function sell(coin, sharesToSell) {
 
   currentUser.cash = newCash;
   coin.price = newPrice;
+  coin.today_open_price = prevOpenToday;
+  coin.change_pct = todayPct;
   updateUIProfile();
   await updateNetWorth();
   toast(`Sold for ${money(proceeds)}`);
