@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=21">
+  <link rel="stylesheet" href="styles.css?v=22">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -35,12 +35,14 @@
       <div class="side-label">MARKET</div>
       <nav class="main-nav">
         <button class="nav-btn active" data-page="feed"><span>◈</span> Feed</button>
+        <button class="nav-btn" data-page="live"><span>◉</span> Live</button>
         <button class="nav-btn" data-page="create"><span>＋</span> Create</button>
         <button class="nav-btn" data-page="money"><span>▣</span> Money</button>
         <button class="nav-btn" data-page="global"><span>⊕</span> Global</button>
         <button class="nav-btn" data-page="ads"><span>▷</span> Ads</button>
         <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
-        <button class="nav-btn hidden" id="navNotifications" data-page="notifications"><span>✦</span> Notifications</button>
+        <button class="nav-btn" data-page="report"><span>△</span> Report</button>
+        <button class="nav-btn hidden" id="navNotifications" data-page="notifications"><span>✦</span> Notifications <span id="navNotificationsBadge" class="nav-count-badge hidden">0</span></button>
         <button class="nav-btn hidden" id="navAdmin" data-page="admin"><span>❖</span> Admin</button>
       </nav>
       <div class="sidebar-bottom">
@@ -92,6 +94,28 @@
             <h3>No currencies yet</h3>
             <p>Be the first to create one!</p>
             <button class="primary-btn" data-goto="create">Create currency</button>
+          </div>
+        </section>
+
+        <!-- LIVE -->
+        <section id="page-live" class="page hidden">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow purple-text" style="display:flex;align-items:center;gap:8px;"><span class="live-dot"></span> REAL-TIME MARKET STREAM</div>
+              <h3>Live Activity</h3>
+              <p class="muted">Real-time buys, sells, and newly launched coins across all traders.</p>
+            </div>
+          </div>
+          <div class="feed-tabs" id="liveFilterTabs">
+            <button type="button" class="feed-tab active" data-live="all">All</button>
+            <button type="button" class="feed-tab" data-live="trades">Trades</button>
+            <button type="button" class="feed-tab" data-live="coins">New Coins</button>
+          </div>
+          <div id="liveFeedList" class="live-feed-list"></div>
+          <div id="emptyLiveFeed" class="empty-state hidden">
+            <div class="empty-icon">◉</div>
+            <h3>No live activity yet</h3>
+            <p>Trades and new currencies will appear here in real time.</p>
           </div>
         </section>
 
@@ -240,13 +264,71 @@
           </div>
         </section>
 
+        <!-- REPORT -->
+        <section id="page-report" class="page hidden">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow purple-text">SAFETY &amp; SUPPORT</div>
+              <h3>Report Player or Bug</h3>
+              <p class="muted">Select whether you want to report a player or a bug/exploit. Reports go directly to Dompinator notifications.</p>
+            </div>
+          </div>
+          <div class="form-card">
+            <div class="feed-tabs report-type-tabs" id="reportTypeTabs">
+              <button type="button" class="feed-tab active" data-report-type="player">Report Player</button>
+              <button type="button" class="feed-tab" data-report-type="bug">Report Bug / Exploit</button>
+            </div>
+            <div id="reportPlayerWrap">
+              <label>Player to report
+                <select id="reportPlayerSelect">
+                  <option value="">Select a player...</option>
+                </select>
+              </label>
+              <label>Or type username manually (optional)
+                <input id="reportPlayerManual" maxlength="20" placeholder="Exact username if not in list">
+              </label>
+            </div>
+            <div id="reportBugWrap" class="hidden">
+              <label>Bug / Exploit title
+                <input id="reportBugTitle" maxlength="80" placeholder="e.g. Issue when selling or chart glitch">
+              </label>
+            </div>
+            <label>Details
+              <textarea id="reportDetails" rows="4" maxlength="600" placeholder="Explain what happened, steps to reproduce, or rule violation details..."></textarea>
+            </label>
+            <button class="primary-btn full" id="submitReportBtn" type="button">Send report to Dompinator</button>
+            <p id="reportMessage" class="form-message"></p>
+          </div>
+        </section>
+
         <!-- NOTIFICATIONS (only Dompinator) -->
         <section id="page-notifications" class="page hidden">
           <div class="section-head">
             <div>
-              <div class="eyebrow purple-text">ADMIN</div>
-              <h3>Premium requests</h3>
-              <p class="muted">Only the Dompinator account sees this page.</p>
+              <div class="eyebrow purple-text">ADMIN INBOX</div>
+              <h3>Notifications &amp; Reports</h3>
+              <p class="muted">Player reports, bug reports, and premium requests. Only Dompinator sees this page.</p>
+            </div>
+          </div>
+
+          <div class="notif-block-head">
+            <div class="eyebrow purple-text">PLAYER &amp; BUG REPORTS</div>
+            <div class="feed-tabs" id="reportsFilterTabs" style="margin:10px 0 14px;">
+              <button type="button" class="feed-tab active" data-repfilter="all">All</button>
+              <button type="button" class="feed-tab" data-repfilter="player">Players</button>
+              <button type="button" class="feed-tab" data-repfilter="bug">Bugs</button>
+            </div>
+          </div>
+          <div id="reportsList" class="requests-list" style="margin-bottom:28px;"></div>
+          <div id="emptyReports" class="empty-state hidden" style="padding:28px 20px;">
+            <p>No open reports.</p>
+          </div>
+
+          <hr style="border-color:#3a2e4a;margin:24px 0">
+          <div class="section-head" style="margin-bottom:14px;">
+            <div>
+              <div class="eyebrow purple-text">TIERS</div>
+              <h3 style="margin:4px 0 0;">Premium requests</h3>
             </div>
           </div>
           <div id="requestsList" class="requests-list"></div>
@@ -467,6 +549,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=21"></script>
+  <script src="app.js?v=22"></script>
 </body>
 </html>

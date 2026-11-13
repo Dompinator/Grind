@@ -994,6 +994,7 @@ function updateUIProfile() {
   $('#navAdmin')?.classList.toggle('hidden', !isDompinator());
   $('#deleteOwnAccountSection')?.classList.toggle('hidden', isDompinator());
   updatePremiumSection();
+  if (isDompinator()) updateNotificationsBadge();
 }
 
 function enterApp() {
@@ -1055,21 +1056,25 @@ function showPage(page) {
   $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   const titles = {
     feed: 'Discover currencies',
+    live: 'Live market',
     create: 'Create currency',
     money: 'Your money',
     global: 'Global leaderboards',
     ads: 'Ads',
     account: 'Account settings',
+    report: 'Report player or bug',
     notifications: 'Notifications',
     admin: 'Admin',
     coin: 'Currency'
   };
   $('#pageTitle').textContent = titles[page] || 'GRIND';
   if (page === 'feed') renderFeed();
+  if (page === 'live') loadLiveFeed();
   if (page === 'money') renderMoney();
   if (page === 'global') renderLeaderboard();
   if (page === 'ads' && !(wasAds && adLocked)) startAdsPage();
   if (page === 'account') updatePremiumSection();
+  if (page === 'report') loadReportPage();
   if (page === 'notifications' && isDompinator()) loadRequests();
   if (page === 'admin' && isDompinator()) loadAdminPage();
 }
@@ -1089,6 +1094,25 @@ $$('.feed-tab').forEach(b => {
       lbMode = b.dataset.lb;
       $$('.feed-tab[data-lb]').forEach(x => x.classList.toggle('active', x === b));
       renderLeaderboard();
+    });
+  }
+  if (b.dataset.live) {
+    b.addEventListener('click', () => {
+      liveMode = b.dataset.live;
+      $$('.feed-tab[data-live]').forEach(x => x.classList.toggle('active', x === b));
+      renderLiveFeed();
+    });
+  }
+  if (b.dataset.reportType) {
+    b.addEventListener('click', () => {
+      setReportType(b.dataset.reportType);
+    });
+  }
+  if (b.dataset.repfilter) {
+    b.addEventListener('click', () => {
+      notifReportFilter = b.dataset.repfilter;
+      $$('.feed-tab[data-repfilter]').forEach(x => x.classList.toggle('active', x === b));
+      renderReportsList();
     });
   }
 });
@@ -3208,17 +3232,468 @@ $('#sendRequestBtn')?.addEventListener('click', async () => {
 let adminAccountsCache = [];
 let adminAccountQuery = '';
 
+// ---------- LIVE FEED ----------
+let liveMode = 'all';
+let liveEventsCache = [];
+
+async function loadLiveFeed() {
+  if (!sb) return;
+  await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
+  const srvResetTs = adminModStateCache.serverResetTs || 0;
+  const delCoins = adminModStateCache.deletedCoinIds || new Set();
+  const delUsers = adminModStateCache.deletedUserIds || new Set();
+
+  let tradesQ = sb
+    .from('trades')
+    .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, image_url), profiles(id, username, avatar_url, is_premium)')
+    .order('created_at', { ascending: false })
+    .limit(60);
+  let coinsQ = sb
+    .from('coins')
+    .select('id, name, ticker, price, image_url, creator_id, created_at, profiles!coins_creator_id_fkey(id, username, avatar_url, is_premium)')
+    .order('created_at', { ascending: false })
+    .limit(40);
+  if (srvResetTs > 0) {
+    const srvIso = new Date(srvResetTs).toISOString();
+    tradesQ = tradesQ.gt('created_at', srvIso);
+    coinsQ = coinsQ.gt('created_at', srvIso);
+  }
+
+  let [tRes, cRes, pRes] = await Promise.all([
+    tradesQ,
+    coinsQ,
+    sb.from('profiles').select('id, username, avatar_url, is_premium').limit(500)
+  ]);
+
+  if (tRes.error) {
+    let fallbackT = sb.from('trades').select('id, coin_id, user_id, type, amount_usd, price_after, created_at').order('created_at', { ascending: false }).limit(60);
+    if (srvResetTs > 0) fallbackT = fallbackT.gt('created_at', new Date(srvResetTs).toISOString());
+    tRes = await fallbackT;
+  }
+  if (cRes.error) {
+    let fallbackC = sb.from('coins').select('id, name, ticker, price, image_url, creator_id, created_at').order('created_at', { ascending: false }).limit(40);
+    if (srvResetTs > 0) fallbackC = fallbackC.gt('created_at', new Date(srvResetTs).toISOString());
+    cRes = await fallbackC;
+  }
+
+  const profMap = new Map();
+  (pRes?.data || []).forEach(p => {
+    if (p?.id) profMap.set(String(p.id), p);
+  });
+  const coinMap = new Map();
+  coins.forEach(c => coinMap.set(String(c.id), c));
+  (cRes?.data || []).forEach(c => {
+    if (c?.id && !coinMap.has(String(c.id))) coinMap.set(String(c.id), c);
+  });
+
+  const events = [];
+  (tRes?.data || []).forEach(t => {
+    const cid = String(t.coin_id || '');
+    const uid = String(t.user_id || '');
+    if (!cid || delCoins.has(cid) || (uid && delUsers.has(uid))) return;
+    const cObj = t.coins || coinMap.get(cid);
+    if (!cObj) return;
+    const pObj = t.profiles || profMap.get(uid) || { id: uid, username: 'Trader' };
+    const ts = t.created_at ? new Date(t.created_at).getTime() : Date.now();
+    if (srvResetTs && ts <= srvResetTs) return;
+    events.push({
+      kind: 'trade',
+      tradeType: t.type === 'sell' ? 'sell' : 'buy',
+      ts,
+      userId: uid,
+      profile: pObj,
+      coin: cObj,
+      amountUsd: Number(t.amount_usd || 0),
+      price: Number(t.price_after ?? cObj.price ?? 1)
+    });
+  });
+
+  (cRes?.data || []).forEach(c => {
+    const cid = String(c.id || '');
+    const uid = String(c.creator_id || '');
+    if (!cid || delCoins.has(cid) || (uid && delUsers.has(uid))) return;
+    const pObj = c.profiles || profMap.get(uid) || { id: uid, username: 'Trader' };
+    const ts = c.created_at ? new Date(c.created_at).getTime() : Date.now();
+    if (srvResetTs && ts <= srvResetTs) return;
+    events.push({
+      kind: 'coin',
+      ts,
+      userId: uid,
+      profile: pObj,
+      coin: c,
+      price: Number(c.price || 1)
+    });
+  });
+
+  events.sort((a, b) => b.ts - a.ts);
+  liveEventsCache = events;
+  if (currentPage === 'live') renderLiveFeed();
+}
+
+function renderLiveFeed() {
+  const listEl = $('#liveFeedList');
+  const emptyEl = $('#emptyLiveFeed');
+  if (!listEl || !emptyEl) return;
+
+  const filtered = liveEventsCache.filter(ev => {
+    if (liveMode === 'trades') return ev.kind === 'trade';
+    if (liveMode === 'coins') return ev.kind === 'coin';
+    return true;
+  });
+
+  emptyEl.classList.toggle('hidden', filtered.length > 0);
+  if (!filtered.length) {
+    listEl.innerHTML = '';
+    return;
+  }
+
+  listEl.innerHTML = filtered.slice(0, 80).map(ev => {
+    const uname = ev.profile?.username || 'Trader';
+    const av = ev.profile?.avatar_url
+      ? `<img src="${escapeHtml(ev.profile.avatar_url)}" alt="">`
+      : escapeHtml(uname[0].toUpperCase());
+    const profObj = { id: ev.userId, ...ev.profile };
+    const coinImg = ev.coin?.image_url
+      ? `<img src="${escapeHtml(ev.coin.image_url)}" alt="">`
+      : escapeHtml((ev.coin?.ticker || '?')[0]);
+    const coinTag = `
+      <span class="live-coin-chip" data-live-coin="${escapeHtml(ev.coin.id)}">
+        <span class="live-coin-mini">${coinImg}</span>
+        <span>${escapeHtml(ev.coin.name)} ($${escapeHtml(ev.coin.ticker)})</span>
+      </span>
+    `;
+    let badgeHtml = '';
+    let actionHtml = '';
+    let rightLabel = '';
+    if (ev.kind === 'coin') {
+      badgeHtml = `<span class="live-badge coin">NEW COIN</span>`;
+      actionHtml = `launched ${coinTag}`;
+      rightLabel = `Start ${priceFmt(ev.price || 1)}`;
+    } else if (ev.tradeType === 'sell') {
+      badgeHtml = `<span class="live-badge sell">SELL</span>`;
+      actionHtml = `sold <strong>${money(ev.amountUsd)}</strong> of ${coinTag}`;
+      rightLabel = `@ ${priceFmt(ev.price)}`;
+    } else {
+      badgeHtml = `<span class="live-badge buy">BUY</span>`;
+      actionHtml = `bought <strong>${money(ev.amountUsd)}</strong> of ${coinTag}`;
+      rightLabel = `@ ${priceFmt(ev.price)}`;
+    }
+    return `
+      <div class="live-row">
+        <div class="live-row-left">
+          <div class="avatar profile-link" data-profile="${escapeHtml(ev.userId)}" style="cursor:pointer;">${av}</div>
+          <div class="live-row-main">
+            <div class="live-row-line">
+              ${badgeHtml}
+              <strong class="profile-link" data-profile="${escapeHtml(ev.userId)}">${escapeHtml(uname)}${tierBadgeHtml(profObj)}</strong>
+              <span class="muted">${actionHtml}</span>
+            </div>
+          </div>
+        </div>
+        <div class="live-row-right">
+          <span class="live-row-price">${escapeHtml(rightLabel)}</span>
+          <span class="muted tiny">${escapeHtml(formatRelativeTime(ev.ts))}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  listEl.querySelectorAll('[data-profile]').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el.dataset.profile) openProfileModal(el.dataset.profile);
+    });
+  });
+  listEl.querySelectorAll('[data-live-coin]').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el.dataset.liveCoin) openCoin(el.dataset.liveCoin);
+    });
+  });
+}
+
+// ---------- REPORT PLAYER OR BUG ----------
+let reportType = 'player';
+let reportPlayersCache = [];
+
+function setReportType(type) {
+  reportType = type === 'bug' ? 'bug' : 'player';
+  $$('.feed-tab[data-report-type]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.reportType === reportType);
+  });
+  $('#reportPlayerWrap')?.classList.toggle('hidden', reportType !== 'player');
+  $('#reportBugWrap')?.classList.toggle('hidden', reportType !== 'bug');
+  const msg = $('#reportMessage');
+  if (msg) {
+    msg.textContent = '';
+    msg.style.color = '';
+  }
+}
+
+async function loadReportPage() {
+  if (!sb) return;
+  await fetchAdminModerationState();
+  const delUsers = adminModStateCache.deletedUserIds || new Set();
+  const sel = $('#reportPlayerSelect');
+  if (!sel) return;
+
+  const { data } = await sb
+    .from('profiles')
+    .select('id, username')
+    .order('username', { ascending: true })
+    .limit(500);
+
+  const list = (data || []).filter(p =>
+    p.id && p.username && !delUsers.has(String(p.id)) && (!currentUser || p.id !== currentUser.id)
+  );
+  reportPlayersCache = list;
+
+  const prev = sel.value;
+  sel.innerHTML = `<option value="">Select a player...</option>` + list.map(p =>
+    `<option value="${escapeHtml(p.id)}">${escapeHtml(p.username)}</option>`
+  ).join('');
+  if (prev && list.some(p => String(p.id) === String(prev))) sel.value = prev;
+}
+
+$('#submitReportBtn')?.addEventListener('click', async () => {
+  if (!sb || !currentUser) return;
+  const msgEl = $('#reportMessage');
+  const details = ($('#reportDetails')?.value || '').trim();
+  if (msgEl) {
+    msgEl.textContent = '';
+    msgEl.style.color = '#fca5a5';
+  }
+
+  let targetId = null;
+  let targetName = null;
+  let bugTitle = null;
+
+  if (reportType === 'player') {
+    const selId = $('#reportPlayerSelect')?.value || '';
+    const manual = ($('#reportPlayerManual')?.value || '').trim();
+    if (!selId && !manual) {
+      if (msgEl) msgEl.textContent = 'Select a player or enter their username.';
+      return;
+    }
+    if (selId) {
+      targetId = selId;
+      const found = reportPlayersCache.find(p => String(p.id) === String(selId));
+      targetName = found?.username || manual || 'Unknown player';
+    } else {
+      targetName = manual;
+      const found = reportPlayersCache.find(p => p.username.toLowerCase() === manual.toLowerCase());
+      if (found) {
+        targetId = found.id;
+        targetName = found.username;
+      }
+    }
+  } else {
+    bugTitle = ($('#reportBugTitle')?.value || '').trim();
+    if (!bugTitle) {
+      if (msgEl) msgEl.textContent = 'Enter a short bug or exploit title.';
+      $('#reportBugTitle')?.focus();
+      return;
+    }
+  }
+
+  if (!details) {
+    if (msgEl) msgEl.textContent = 'Please describe the issue in Details.';
+    $('#reportDetails')?.focus();
+    return;
+  }
+
+  const btn = $('#submitReportBtn');
+  if (btn) btn.disabled = true;
+
+  const payload = {
+    id: 'rep_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    type: reportType,
+    target_id: targetId,
+    target_name: targetName,
+    title: bugTitle,
+    details,
+    ts: Date.now()
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__REPORT__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+
+  if (btn) btn.disabled = false;
+  if (error) {
+    if (msgEl) msgEl.textContent = error.message;
+    return;
+  }
+
+  if ($('#reportPlayerSelect')) $('#reportPlayerSelect').value = '';
+  if ($('#reportPlayerManual')) $('#reportPlayerManual').value = '';
+  if ($('#reportBugTitle')) $('#reportBugTitle').value = '';
+  if ($('#reportDetails')) $('#reportDetails').value = '';
+  if (msgEl) {
+    msgEl.style.color = '#34d399';
+    msgEl.textContent = 'Report sent to Dompinator notifications!';
+  }
+  toast('Report sent to Dompinator!');
+});
+
+// ---------- DOMPINATOR NOTIFICATIONS (REPORTS + PREMIUM) ----------
+let notifReportsCache = [];
+let notifReportFilter = 'all';
+
+function setNotificationsBadgeCount(total) {
+  const badge = $('#navNotificationsBadge');
+  if (!badge) return;
+  if (isDompinator() && total > 0) {
+    badge.textContent = total > 99 ? '99+' : String(total);
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+}
+
+async function fetchReportsAndPending() {
+  if (!sb || !isDompinator()) return { reports: [], pendingRequests: [] };
+  await fetchAdminModerationState();
+  const delUsers = adminModStateCache.deletedUserIds || new Set();
+
+  const [{ data: pendingRaw }, { data: reportRaw }, { data: doneRaw }] = await Promise.all([
+    sb.from('premium_requests')
+      .select('*, profiles(username)')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false }),
+    sb.from('premium_requests')
+      .select('id, user_id, reason, created_at, profiles(username, avatar_url, is_premium)')
+      .like('reason', '__REPORT__:%')
+      .order('created_at', { ascending: false })
+      .limit(200),
+    sb.from('premium_requests')
+      .select('reason, profiles(username)')
+      .like('reason', '__REPORT_DONE__:%')
+      .limit(500)
+  ]);
+
+  const doneIds = new Set();
+  (doneRaw || []).forEach(r => {
+    if ((r.profiles?.username || '').toLowerCase() !== 'dompinator') return;
+    const rid = String(r.reason || '').slice('__REPORT_DONE__:'.length).trim();
+    if (rid) doneIds.add(rid);
+  });
+
+  const pendingRequests = (pendingRaw || []).filter(r =>
+    !String(r.reason || '').startsWith('__') && !delUsers.has(String(r.user_id))
+  );
+
+  const reports = [];
+  (reportRaw || []).forEach(r => {
+    try {
+      const parsed = JSON.parse(String(r.reason || '').slice('__REPORT__:'.length));
+      if (!parsed || !parsed.id || doneIds.has(String(parsed.id))) return;
+      reports.push({
+        rowId: r.id,
+        id: String(parsed.id),
+        type: parsed.type === 'bug' ? 'bug' : 'player',
+        targetId: parsed.target_id || null,
+        targetName: parsed.target_name || null,
+        title: parsed.title || null,
+        details: parsed.details || '',
+        ts: Number(parsed.ts) || (r.created_at ? new Date(r.created_at).getTime() : Date.now()),
+        reporterId: r.user_id,
+        reporterName: r.profiles?.username || 'Unknown',
+        reporterProfile: { id: r.user_id, ...(r.profiles || {}) }
+      });
+    } catch (e) {}
+  });
+
+  reports.sort((a, b) => b.ts - a.ts);
+  setNotificationsBadgeCount(reports.length + pendingRequests.length);
+  return { reports, pendingRequests };
+}
+
+async function updateNotificationsBadge() {
+  if (!sb || !isDompinator()) return;
+  try {
+    await fetchReportsAndPending();
+  } catch (e) {}
+}
+
+async function resolveReport(reportId) {
+  if (!sb || !currentUser || !isDompinator() || !reportId) return;
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__REPORT_DONE__:' + reportId,
+    status: 'denied'
+  });
+  if (error) {
+    toast('Failed to resolve report: ' + error.message);
+    return;
+  }
+  toast('Report marked as resolved');
+  await loadRequests();
+}
+
+function renderReportsList() {
+  const listEl = $('#reportsList');
+  const emptyEl = $('#emptyReports');
+  if (!listEl || !emptyEl) return;
+
+  const filtered = notifReportsCache.filter(r => {
+    if (notifReportFilter === 'player') return r.type === 'player';
+    if (notifReportFilter === 'bug') return r.type === 'bug';
+    return true;
+  });
+
+  emptyEl.classList.toggle('hidden', filtered.length > 0);
+  if (!filtered.length) {
+    listEl.innerHTML = '';
+    return;
+  }
+
+  listEl.innerHTML = filtered.map(r => {
+    const isPlayer = r.type === 'player';
+    const subjectLine = isPlayer
+      ? `Reported player: <strong${r.targetId ? ` class="profile-link" data-profile="${escapeHtml(r.targetId)}"` : ''}>${escapeHtml(r.targetName || 'Unknown')}</strong>`
+      : `Bug / Exploit: <strong>${escapeHtml(r.title || 'Bug Report')}</strong>`;
+    return `
+      <div class="report-card">
+        <div class="report-card-head">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span class="report-tag ${isPlayer ? 'player' : 'bug'}">${isPlayer ? 'Player Report' : 'Bug / Exploit'}</span>
+            <span class="muted tiny">from <strong class="profile-link" data-profile="${escapeHtml(r.reporterId)}">${escapeHtml(r.reporterName)}${tierBadgeHtml(r.reporterProfile)}</strong></span>
+          </div>
+          <span class="muted tiny">${escapeHtml(formatRelativeTime(r.ts))}</span>
+        </div>
+        <div class="report-target-line">${subjectLine}</div>
+        <div class="report-details-box">${escapeHtml(r.details).replace(/\n/g, '<br>')}</div>
+        <div class="request-actions">
+          ${isPlayer && r.targetId ? `<button type="button" class="warn-btn" data-inspect-user="${escapeHtml(r.targetId)}">Moderate / View Profile</button>` : ''}
+          <button type="button" class="resolve-btn" data-resolve-report="${escapeHtml(r.id)}">Resolve</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  listEl.querySelectorAll('[data-profile]').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el.dataset.profile) openProfileModal(el.dataset.profile);
+    });
+  });
+  listEl.querySelectorAll('[data-inspect-user]').forEach(btn => {
+    btn.addEventListener('click', () => openProfileModal(btn.dataset.inspectUser));
+  });
+  listEl.querySelectorAll('[data-resolve-report]').forEach(btn => {
+    btn.addEventListener('click', () => resolveReport(btn.dataset.resolveReport));
+  });
+}
+
 async function loadRequests() {
   if (!sb) return;
-  const { data } = await sb.from('premium_requests')
-    .select('*, profiles(username)')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: false });
-  const delUsers = adminModStateCache.deletedUserIds || new Set();
-  const list = (data || []).filter(r => !String(r.reason || '').startsWith('__') && !delUsers.has(String(r.user_id)));
-  $('#requestsList').innerHTML = list.map(r => `
+  const { reports, pendingRequests } = await fetchReportsAndPending();
+  notifReportsCache = reports;
+  renderReportsList();
+
+  $('#requestsList').innerHTML = pendingRequests.map(r => `
     <div class="request-card">
-      <h4>${escapeHtml(r.profiles?.username || 'Unknown')}</h4>
+      <h4 class="profile-link" data-profile="${escapeHtml(r.user_id)}">${escapeHtml(r.profiles?.username || 'Unknown')}</h4>
       <p>${escapeHtml(r.reason)}</p>
       <div class="request-actions">
         <button class="approve-btn" data-id="${r.id}" data-user="${r.user_id}">Approve</button>
@@ -3226,7 +3701,12 @@ async function loadRequests() {
       </div>
     </div>
   `).join('');
-  $('#emptyRequests').classList.toggle('hidden', list.length > 0);
+  $('#emptyRequests').classList.toggle('hidden', pendingRequests.length > 0);
+  $('#requestsList').querySelectorAll('[data-profile]').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el.dataset.profile) openProfileModal(el.dataset.profile);
+    });
+  });
   $$('.approve-btn').forEach(b => b.addEventListener('click', () => handleRequest(b.dataset.id, b.dataset.user, 'approved')));
   $$('.deny-btn').forEach(b => b.addEventListener('click', () => handleRequest(b.dataset.id, null, 'denied')));
 }
@@ -3803,16 +4283,21 @@ async function handleRequest(reqId, userId, status) {
 function startRealtime() {
   if (!sb) return;
   realtimeChannel = sb.channel('grind-live')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'coins' }, () => loadCoins())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'coins' }, () => {
+      loadCoins();
+      if (currentPage === 'live') loadLiveFeed();
+    })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
       loadCoins();
       if (selectedCoin && currentPage === 'coin') renderCoinDetail();
+      if (currentPage === 'live') loadLiveFeed();
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, () => {
       if (currentUser) loadProfile();
       if (selectedCoin && currentPage === 'coin') loadCoinComments(selectedCoin);
       if (isDompinator()) {
-        loadRequests();
+        if (currentPage === 'notifications') loadRequests();
+        else updateNotificationsBadge();
         if (currentPage === 'admin') loadAdminPage();
       }
     })
