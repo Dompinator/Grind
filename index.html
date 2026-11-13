@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=15">
+  <link rel="stylesheet" href="styles.css?v=16">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -395,7 +395,21 @@
     </div>
   </div>
 
+  <!-- TERMS OF SERVICE MODAL -->
+  <div id="tosModal" class="modal-backdrop hidden" style="z-index:105;" role="dialog" aria-modal="true">
+    <div class="modal-card tos-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow" style="color:#38bdf8;">LEGAL &amp; RULES</div>
+          <h3>Terms of Service</h3>
+        </div>
+        <button class="zoom-btn" id="closeTosBtn" type="button" aria-label="Close Terms of Service">✕</button>
+      </div>
+      <div id="tosModalBody" class="tos-content-box">Loading Terms of Service...</div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=15"></script>
+  <script src="app.js?v=16"></script>
 </body>
 </html>

@@ -450,6 +450,95 @@ async function applyAdminActionsForCurrentUser() {
 let activeUpdateQueue = [];
 let currentUpdateModalItem = null;
 let isPreviewUpdateModal = false;
+let cachedTosText = null;
+
+const FALLBACK_TOS_TEXT = `GRIND — TERMS OF SERVICE
+Last Updated: November 13, 2026
+
+Welcome to GRIND ("Grind your way through the market"). By creating an account or accessing GRIND, you agree to be bound by these Terms of Service. If you do not agree to these rules, you may not use the service.
+
+1. ONE ACCOUNT PER PERSON
+- You may only create and operate ONE (1) account per person.
+- Creating alternative accounts ("alts"), multi-accounting, transferring value between accounts owned by the same person, or creating a new account to bypass a warning, reset, or ban (ban evasion) is strictly prohibited.
+- Account sharing, selling, or trading accounts is not allowed.
+
+2. NO EXPLOITING & FAIR PLAY
+- You must play fairly and use GRIND only as intended.
+- You may NOT exploit bugs, glitches, calculation errors, race conditions, or unintended mechanics to gain unfair cash, coins, tier upgrades, or leaderboard advantage.
+- Automation, bots, auto-clickers, modified clients, network tampering, or bypassing timers (such as ad cooldowns or daily reward limits) is strictly forbidden.
+
+3. MANDATORY EXPLOIT & BUG REPORTING
+- If you discover a bug, glitch, security issue, or exploit, you MUST immediately stop triggering or benefiting from it.
+- You are required to report any discovered exploit or vulnerability to an administrator (Dompinator) as soon as possible, along with clear details on how to reproduce it.
+- Continuing to use an exploit or sharing an exploit publicly/with other players instead of reporting it will result in immediate enforcement action.
+
+4. VIRTUAL CURRENCY DISCLAIMER
+- All currencies, balances, coins, net worth values, tiers, and rewards in GRIND are 100% virtual and exist solely for entertainment within the platform.
+- Virtual cash and coins have no real-world monetary value and cannot be exchanged, redeemed, or traded for real money, goods, or services.
+
+5. USER CONTENT & CONDUCT
+- Usernames, profile pictures, coin names, tickers, descriptions, and uploaded logos must not contain hate speech, harassment, illegal material, explicit/NSFW imagery, spam, or impersonation of administrators or other users.
+- Do not attempt to harass, scam, or disrupt other players.
+
+6. MODERATION & ENFORCEMENT
+- Administrators (including Dompinator) reserve the right to monitor activity and take moderation action at their sole discretion to protect the market and community.
+- Violations of these Terms may result in:
+  * Official account warnings
+  * Removal of unfairly gained cash, coins, or coins created by the user
+  * Full account reset
+  * Temporary or permanent account ban
+
+7. SERVICE CHANGES & AVAILABILITY
+- GRIND is provided "as is" without warranties of any kind. Features, pricing formulas, rewards, and data may be updated, balanced, reset, or discontinued at any time.
+- We may update these Terms of Service at any time. Continued use of GRIND after changes or an in-app update notice constitutes acceptance of the updated Terms.`;
+
+function formatUpdateTextWithTos(text, preserveNewlines = false) {
+  let html = escapeHtml(text || '');
+  if (preserveNewlines) html = html.replace(/\n/g, '<br>');
+  return html.replace(/\b(TOS)\b/gi, '<button type="button" class="tos-inline-link" data-open-tos="1">$1</button>');
+}
+
+async function openTosModal() {
+  const modal = $('#tosModal');
+  const body = $('#tosModalBody');
+  if (!modal || !body) return;
+  modal.classList.remove('hidden');
+  if (cachedTosText) {
+    body.textContent = cachedTosText;
+    return;
+  }
+  body.textContent = 'Loading Terms of Service...';
+  try {
+    const res = await fetch('TERMS_OF_SERVICE.txt', { cache: 'no-store' });
+    if (res.ok) {
+      const txt = (await res.text()).trim();
+      if (txt) cachedTosText = txt;
+    }
+  } catch (e) {}
+  if (!cachedTosText) cachedTosText = FALLBACK_TOS_TEXT;
+  body.textContent = cachedTosText;
+}
+
+function closeTosModal() {
+  $('#tosModal')?.classList.add('hidden');
+}
+
+$('#closeTosBtn')?.addEventListener('click', closeTosModal);
+$('#tosModal')?.addEventListener('click', e => {
+  if (e.target === $('#tosModal')) closeTosModal();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$('#tosModal')?.classList.contains('hidden')) {
+    closeTosModal();
+  }
+});
+document.addEventListener('click', e => {
+  const tosBtn = e.target.closest?.('[data-open-tos="1"]');
+  if (!tosBtn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  openTosModal();
+});
 
 async function fetchActiveUpdates() {
   if (!sb) return [];
@@ -534,7 +623,7 @@ function renderUpdateModalContent(upd, isPreview = false) {
   if (closeBtn) closeBtn.classList.toggle('hidden', !isPreview);
   if (titleEl) titleEl.textContent = upd.title || 'Important Update';
   if (bodyEl) {
-    const safeBody = escapeHtml(upd.body || '').replace(/\n/g, '<br>');
+    const safeBody = formatUpdateTextWithTos(upd.body || '', true);
     bodyEl.innerHTML = safeBody || '<span class="muted">Please review the items below.</span>';
   }
 
@@ -543,7 +632,7 @@ function renderUpdateModalContent(upd, isPreview = false) {
     boxesEl.innerHTML = boxes.map((b, i) => `
       <label class="update-check-item">
         <input type="checkbox" class="update-box-input" data-idx="${i}" data-req="${b.required ? '1' : '0'}">
-        <span class="update-check-text">${escapeHtml(b.text || '')}</span>
+        <span class="update-check-text">${formatUpdateTextWithTos(b.text || '', false)}</span>
         <span class="check-tag ${b.required ? 'req' : 'opt'}">${b.required ? 'Required' : 'Optional'}</span>
       </label>
     `).join('');
@@ -774,6 +863,7 @@ $('#logoutBtn')?.addEventListener('click', async () => {
   currentUser = null;
   if (realtimeChannel && sb) sb.removeChannel(realtimeChannel);
   $('#appView').classList.add('hidden');
+  $('#tosModal')?.classList.add('hidden');
   $('#updateModal')?.classList.add('hidden');
   $('#warnModal')?.classList.add('hidden');
   $('#dailyModal')?.classList.add('hidden');
@@ -2595,7 +2685,7 @@ function renderUpdateLivePreview() {
 
   titleEl.textContent = title || 'Update Notification';
   bodyEl.innerHTML = body
-    ? escapeHtml(body).replace(/\n/g, '<br>')
+    ? formatUpdateTextWithTos(body, true)
     : '<span class="muted">Your update message will appear here as you type...</span>';
 
   const prevChecked = new Map();
@@ -2607,7 +2697,7 @@ function renderUpdateLivePreview() {
     boxesEl.innerHTML = draftBoxes.map((b, i) => `
       <label class="update-check-item">
         <input type="checkbox" class="update-preview-box-input" data-idx="${i}" data-req="${b.required ? '1' : '0'}" ${prevChecked.get(String(i)) ? 'checked' : ''}>
-        <span class="update-check-text">${escapeHtml(b.text)}</span>
+        <span class="update-check-text">${formatUpdateTextWithTos(b.text, false)}</span>
         <span class="check-tag ${b.required ? 'req' : 'opt'}">${b.required ? 'Required' : 'Optional'}</span>
       </label>
     `).join('');
@@ -2769,12 +2859,12 @@ async function loadAdminUpdatesList() {
         </div>
         <button type="button" class="ban-btn" data-del-upd="${escapeHtml(u.id)}">Remove</button>
       </div>
-      ${u.body ? `<p style="margin:10px 0 8px;">${escapeHtml(u.body)}</p>` : ''}
+      ${u.body ? `<p style="margin:10px 0 8px;">${formatUpdateTextWithTos(u.body, true)}</p>` : ''}
       ${boxes.length ? `
         <div class="update-check-list" style="margin-top:8px;">
           ${boxes.map(b => `
             <div class="update-check-item" style="cursor:default;">
-              <span class="update-check-text">☐ ${escapeHtml(b.text)}</span>
+              <span class="update-check-text">☐ ${formatUpdateTextWithTos(b.text, false)}</span>
               <span class="check-tag ${b.required ? 'req' : 'opt'}">${b.required ? 'Required' : 'Optional'}</span>
             </div>
           `).join('')}
