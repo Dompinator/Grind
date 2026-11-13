@@ -174,6 +174,9 @@ async function makeUniqueUsername(email) {
 }
 
 async function createProfile(user) {
+  try {
+    if (user?.id) localStorage.setItem('grind_tos_pending_' + user.id, '1');
+  } catch (e) {}
   const username = await makeUniqueUsername(user.email);
   return sb.from('profiles').insert({
     id: user.id,
@@ -198,6 +201,9 @@ $('#authForm')?.addEventListener('submit', async (e) => {
     const { data, error } = await sb.auth.signUp({ email, password });
     if (error) return authMsg(error.message);
     if (!data.user) return authMsg('Signup failed. Try again.');
+    try {
+      localStorage.setItem('grind_tos_pending_' + data.user.id, '1');
+    } catch (e) {}
 
     // Log in (needed before we may create the profile row)
     const { error: loginErr } = await sb.auth.signInWithPassword({ email, password });
@@ -249,6 +255,7 @@ async function loadProfile() {
     return loadProfile();
   }
   currentUser = data;
+  currentUser.auth_created_at = user.created_at || data.created_at || null;
 
   // Auto-sync approved premium & PRO status
   await loadProUserIds();
@@ -498,6 +505,19 @@ function formatUpdateTextWithTos(text, preserveNewlines = false) {
   return html.replace(/\b(TOS)\b/gi, '<button type="button" class="tos-inline-link" data-open-tos="1">$1</button>');
 }
 
+async function loadTosText() {
+  if (cachedTosText) return cachedTosText;
+  try {
+    const res = await fetch('TERMS_OF_SERVICE.txt', { cache: 'no-store' });
+    if (res.ok) {
+      const txt = (await res.text()).trim();
+      if (txt) cachedTosText = txt;
+    }
+  } catch (e) {}
+  if (!cachedTosText) cachedTosText = FALLBACK_TOS_TEXT;
+  return cachedTosText;
+}
+
 async function openTosModal() {
   const modal = $('#tosModal');
   const body = $('#tosModalBody');
@@ -508,15 +528,7 @@ async function openTosModal() {
     return;
   }
   body.textContent = 'Loading Terms of Service...';
-  try {
-    const res = await fetch('TERMS_OF_SERVICE.txt', { cache: 'no-store' });
-    if (res.ok) {
-      const txt = (await res.text()).trim();
-      if (txt) cachedTosText = txt;
-    }
-  } catch (e) {}
-  if (!cachedTosText) cachedTosText = FALLBACK_TOS_TEXT;
-  body.textContent = cachedTosText;
+  body.textContent = await loadTosText();
 }
 
 function closeTosModal() {
@@ -573,14 +585,12 @@ async function fetchActiveUpdates() {
   return posts;
 }
 
+const TOS_SIGNUP_ENFORCE_SINCE_MS = Date.UTC(2026, 10, 13, 13, 4, 0);
+
 async function checkPendingUpdateNotifications() {
   if (!currentUser || currentUser.is_banned || !sb) return;
   const uid = currentUser.id;
   const posts = await fetchActiveUpdates();
-  if (!posts.length) {
-    $('#updateModal')?.classList.add('hidden');
-    return;
-  }
 
   let ackIds = [];
   try {
@@ -602,7 +612,29 @@ async function checkPendingUpdateNotifications() {
     });
   } catch (e) {}
 
-  activeUpdateQueue = posts.filter(u => !ackSet.has(String(u.id)));
+  const queue = [];
+  const createdMs = currentUser.auth_created_at ? new Date(currentUser.auth_created_at).getTime() : 0;
+  const isPendingNewSignup = localStorage.getItem('grind_tos_pending_' + uid) === '1'
+    || (createdMs >= TOS_SIGNUP_ENFORCE_SINCE_MS);
+  const hasAcceptedTos = ackSet.has('tos_signup_v1') || localStorage.getItem('grind_tos_ack_' + uid) === '1';
+
+  if (isPendingNewSignup && !hasAcceptedTos) {
+    const tosText = await loadTosText();
+    queue.push({
+      id: 'tos_signup_v1',
+      isTosSignup: true,
+      eyebrow: 'TERMS OF SERVICE',
+      title: 'Terms of Service',
+      body: tosText,
+      boxes: [
+        { text: 'I have read and accept the terms of service', required: true }
+      ]
+    });
+  }
+
+  posts.filter(u => !ackSet.has(String(u.id))).forEach(u => queue.push(u));
+  activeUpdateQueue = queue;
+
   if (activeUpdateQueue.length > 0) {
     showNextUpdateModal();
   } else {
@@ -619,12 +651,22 @@ function renderUpdateModalContent(upd, isPreview = false) {
   const hintEl = $('#updateModalHint');
   const btn = $('#updateContinueBtn');
 
-  if (eyebrowEl) eyebrowEl.textContent = isPreview ? 'PREVIEW · UPDATE NOTIFICATION' : 'UPDATE NOTIFICATION';
+  if (eyebrowEl) {
+    eyebrowEl.textContent = isPreview
+      ? 'PREVIEW · UPDATE NOTIFICATION'
+      : (upd.eyebrow || 'UPDATE NOTIFICATION');
+    eyebrowEl.style.color = upd.isTosSignup ? '#38bdf8' : '#fbbf24';
+  }
   if (closeBtn) closeBtn.classList.toggle('hidden', !isPreview);
   if (titleEl) titleEl.textContent = upd.title || 'Important Update';
   if (bodyEl) {
-    const safeBody = formatUpdateTextWithTos(upd.body || '', true);
-    bodyEl.innerHTML = safeBody || '<span class="muted">Please review the items below.</span>';
+    bodyEl.classList.toggle('tos-signup-body', Boolean(upd.isTosSignup));
+    if (upd.isTosSignup) {
+      bodyEl.textContent = upd.body || FALLBACK_TOS_TEXT;
+    } else {
+      const safeBody = formatUpdateTextWithTos(upd.body || '', true);
+      bodyEl.innerHTML = safeBody || '<span class="muted">Please review the items below.</span>';
+    }
   }
 
   const boxes = Array.isArray(upd.boxes) ? upd.boxes : [];
@@ -632,7 +674,7 @@ function renderUpdateModalContent(upd, isPreview = false) {
     boxesEl.innerHTML = boxes.map((b, i) => `
       <label class="update-check-item">
         <input type="checkbox" class="update-box-input" data-idx="${i}" data-req="${b.required ? '1' : '0'}">
-        <span class="update-check-text">${formatUpdateTextWithTos(b.text || '', false)}</span>
+        <span class="update-check-text">${upd.isTosSignup ? escapeHtml(b.text || '') : formatUpdateTextWithTos(b.text || '', false)}</span>
         <span class="check-tag ${b.required ? 'req' : 'opt'}">${b.required ? 'Required' : 'Optional'}</span>
       </label>
     `).join('');
@@ -687,7 +729,15 @@ $('#updateContinueBtn')?.addEventListener('click', async () => {
   }
   if (!currentUpdateModalItem || !currentUser) return;
   const updId = String(currentUpdateModalItem.id);
+  const isTosSignup = Boolean(currentUpdateModalItem.isTosSignup);
   const uid = currentUser.id;
+
+  if (isTosSignup) {
+    try {
+      localStorage.removeItem('grind_tos_pending_' + uid);
+      localStorage.setItem('grind_tos_ack_' + uid, '1');
+    } catch (e) {}
+  }
 
   let ackIds = [];
   try {

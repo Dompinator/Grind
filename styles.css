@@ -303,6 +303,8 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .tos-inline-link:hover { color: #7dd3fc; background: rgba(56, 189, 248, .15); }
 .tos-modal-card { max-width: 660px; border-color: rgba(56, 189, 248, .45); }
 .tos-content-box { background: #120e1c; border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; font-size: 13px; line-height: 1.6; color: #e9e2f5; white-space: pre-wrap; max-height: 64vh; overflow-y: auto; }
+.warn-message-box.tos-signup-body { max-height: 46vh; overflow-y: auto; white-space: pre-wrap; font-size: 13px; line-height: 1.55; color: #e9e2f5; background: #120e1c; border-color: rgba(56, 189, 248, .35); }
+
 
 
 
