@@ -207,13 +207,15 @@ $('#authForm')?.addEventListener('submit', async (e) => {
       return;
     }
     await loadProfile();   // creates the profile with an auto username if missing
-    enterApp();
-    toast('Welcome to GRIND! Set your username under Account.');
+    if (!currentUser?.is_banned) {
+      enterApp();
+      toast('Welcome to GRIND! Set your username under Account.');
+    }
   } else {
     const { error } = await sb.auth.signInWithPassword({ email, password });
     if (error) return authMsg('Wrong email or password.');
     await loadProfile();
-    enterApp();
+    if (!currentUser?.is_banned) enterApp();
   }
 });
 
@@ -278,8 +280,191 @@ async function loadProfile() {
   }
 
   await loadWatchlist();
-  updateUIProfile();
+  await applyAdminActionsForCurrentUser();
+  if (!currentUser?.is_banned) {
+    updateUIProfile();
+  }
 }
+
+let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map() };
+let pendingWarnAckTs = 0;
+
+async function fetchAdminModerationState() {
+  const bans = new Map();
+  const resets = new Map();
+  const warnings = new Map();
+  if (!sb) return { bans, resets, warnings };
+  try {
+    const { data } = await sb
+      .from('premium_requests')
+      .select('reason, created_at, profiles(username)')
+      .like('reason', '__ADMIN_CMD__:%')
+      .order('created_at', { ascending: true })
+      .limit(1000);
+    (data || []).forEach(row => {
+      if ((row.profiles?.username || '').toLowerCase() !== 'dompinator') return;
+      try {
+        const cmd = JSON.parse(String(row.reason).slice('__ADMIN_CMD__:'.length));
+        if (!cmd || !cmd.target || !cmd.action) return;
+        const tid = String(cmd.target);
+        const ts = Number(cmd.ts) || (row.created_at ? new Date(row.created_at).getTime() : 0);
+        if (cmd.action === 'ban') {
+          bans.set(tid, { banned: true, reason: cmd.msg || 'Banned by an administrator.', ts });
+        } else if (cmd.action === 'unban') {
+          bans.set(tid, { banned: false, reason: '', ts });
+        } else if (cmd.action === 'reset') {
+          const prev = resets.get(tid) || 0;
+          if (ts > prev) resets.set(tid, ts);
+        } else if (cmd.action === 'warn') {
+          const arr = warnings.get(tid) || [];
+          arr.push({ ts, msg: cmd.msg || 'Please follow the rules.' });
+          warnings.set(tid, arr);
+        }
+      } catch (e) {}
+    });
+  } catch (e) {}
+  adminModStateCache = { bans, resets, warnings };
+  return adminModStateCache;
+}
+
+function showBannedScreen(reason) {
+  if (timeInterval) clearInterval(timeInterval);
+  $('#authView')?.classList.add('hidden');
+  $('#appView')?.classList.add('hidden');
+  $('#dailyModal')?.classList.add('hidden');
+  $('#profileModal')?.classList.add('hidden');
+  $('#warnModal')?.classList.add('hidden');
+  const txt = $('#bannedReasonText');
+  if (txt) txt.textContent = reason || 'Your account has been banned by an administrator.';
+  $('#bannedView')?.classList.remove('hidden');
+}
+
+async function applyAdminActionsForCurrentUser() {
+  if (!currentUser || !sb) return;
+  const { bans, resets, warnings } = await fetchAdminModerationState();
+  const uid = currentUser.id;
+
+  // 1. Check Ban
+  const banInfo = bans.get(uid);
+  if (banInfo?.banned) {
+    currentUser.is_banned = true;
+    currentUser.ban_reason = banInfo.reason;
+    showBannedScreen(banInfo.reason);
+    return;
+  }
+  currentUser.is_banned = false;
+  $('#bannedView')?.classList.add('hidden');
+
+  // 2. Check Reset
+  const latestResetTs = resets.get(uid) || 0;
+  if (latestResetTs > 0) {
+    let appliedResetTs = Number(localStorage.getItem('grind_reset_done_' + uid) || 0);
+    try {
+      const { data: ackRows } = await sb
+        .from('premium_requests')
+        .select('reason')
+        .eq('user_id', uid)
+        .like('reason', '__RESET_DONE__:%')
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if (ackRows?.[0]?.reason) {
+        appliedResetTs = Math.max(appliedResetTs, Number(ackRows[0].reason.slice('__RESET_DONE__:'.length)) || 0);
+      }
+    } catch (e) {}
+
+    if (latestResetTs > appliedResetTs) {
+      try {
+        await sb.from('holdings').delete().eq('user_id', uid);
+      } catch (e) {}
+      try {
+        await sb.from('profiles').update({
+          cash: 15,
+          net_worth: 15,
+          is_premium: false,
+          time_played: 0
+        }).eq('id', uid);
+      } catch (e) {}
+
+      currentUser.cash = 15;
+      currentUser.net_worth = 15;
+      currentUser.is_premium = false;
+      currentUser.is_pro = false;
+      currentUser.time_played = 0;
+      proUserIds.delete(uid);
+      watchlistIds = new Set();
+
+      localStorage.removeItem('grind_pro_' + uid);
+      localStorage.removeItem('grind_daily_' + uid);
+      localStorage.removeItem('grind_watchlist_' + uid);
+      localStorage.removeItem('grind_watchlist_ts_' + uid);
+      localStorage.setItem('grind_reset_done_' + uid, String(latestResetTs));
+
+      try {
+        await sb.from('premium_requests').insert({
+          user_id: uid,
+          reason: '__RESET_DONE__:' + latestResetTs,
+          status: 'denied'
+        });
+      } catch (e) {}
+
+      updateUIProfile();
+      if (currentPage === 'money') renderMoney();
+      if (currentPage === 'coin') renderCoinDetail();
+      if (currentPage === 'feed') renderFeed();
+      toast('Your account was reset by an administrator.');
+    }
+  }
+
+  // 3. Check Warnings
+  const userWarns = warnings.get(uid) || [];
+  if (userWarns.length > 0) {
+    let ackTs = Number(localStorage.getItem('grind_warn_ack_' + uid) || 0);
+    try {
+      const { data: ackRows } = await sb
+        .from('premium_requests')
+        .select('reason')
+        .eq('user_id', uid)
+        .like('reason', '__WARN_ACK__:%')
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if (ackRows?.[0]?.reason) {
+        ackTs = Math.max(ackTs, Number(ackRows[0].reason.slice('__WARN_ACK__:'.length)) || 0);
+      }
+    } catch (e) {}
+
+    const unread = userWarns.filter(w => w.ts > ackTs);
+    if (unread.length > 0) {
+      pendingWarnAckTs = unread[unread.length - 1].ts;
+      const box = $('#warnModalBody');
+      if (box) {
+        box.innerHTML = unread.map(w => `<div style="margin-bottom:6px;">• ${escapeHtml(w.msg)}</div>`).join('');
+      }
+      $('#warnModal')?.classList.remove('hidden');
+    }
+  }
+}
+
+$('#ackWarnBtn')?.addEventListener('click', async () => {
+  $('#warnModal')?.classList.add('hidden');
+  if (!currentUser || !pendingWarnAckTs) return;
+  const ts = pendingWarnAckTs;
+  pendingWarnAckTs = 0;
+  localStorage.setItem('grind_warn_ack_' + currentUser.id, String(ts));
+  if (sb) {
+    try {
+      await sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__WARN_ACK__:' + ts,
+        status: 'denied'
+      });
+    } catch (e) {}
+  }
+});
+
+$('#bannedLogoutBtn')?.addEventListener('click', () => {
+  $('#bannedView')?.classList.add('hidden');
+  $('#logoutBtn')?.click();
+});
 
 async function loadWatchlist() {
   if (!currentUser) return;
@@ -1435,7 +1620,39 @@ async function renderLeaderboard() {
   $$('#leaderboardList [data-profile]').forEach(el => el.addEventListener('click', () => openProfileModal(el.dataset.profile)));
 }
 
-// ---------- Profile Preview Modal (Public stats only) ----------
+// ---------- Profile Preview Modal (Public stats + Dompinator Admin Controls) ----------
+async function sendAdminCommand(action, targetUserId, msg = '') {
+  if (!isDompinator() || !currentUser || !sb || !targetUserId) return false;
+  if (targetUserId === currentUser.id) {
+    toast('You cannot moderate your own admin account.');
+    return false;
+  }
+  const ts = Date.now();
+  const payload = { action, target: targetUserId, ts, msg: String(msg || '').trim() };
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__ADMIN_CMD__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+  if (error) {
+    toast('Admin action error: ' + error.message);
+    return false;
+  }
+
+  if (action === 'reset') {
+    try {
+      await sb.from('premium_requests')
+        .update({ status: 'denied' })
+        .eq('user_id', targetUserId)
+        .eq('status', 'approved');
+      await sb.from('profiles')
+        .update({ cash: 15, net_worth: 15, is_premium: false, time_played: 0 })
+        .eq('id', targetUserId);
+    } catch (e) {}
+  }
+  return true;
+}
+
 async function openProfileModal(userId) {
   if (!sb || !userId) return;
   const modal = $('#profileModal');
@@ -1445,6 +1662,7 @@ async function openProfileModal(userId) {
   modal.classList.remove('hidden');
 
   await loadProUserIds();
+  await fetchAdminModerationState();
   const { data: p } = await sb
     .from('profiles')
     .select('id, username, avatar_url, net_worth, time_played, is_premium')
@@ -1457,11 +1675,14 @@ async function openProfileModal(userId) {
   }
 
   const userCoins = coins.filter(c => c.creator_id === p.id);
+  const isTargetBanned = Boolean(adminModStateCache.bans.get(p.id)?.banned);
+  const canModerate = isDompinator() && currentUser && p.id !== currentUser.id;
+
   body.innerHTML = `
     <div class="profile-modal-hero">
       <div class="avatar" style="width:58px;height:58px;font-size:22px;">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
       <div>
-        <h3 style="margin:0;">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}</h3>
+        <h3 style="margin:0;">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}${isTargetBanned ? '<span class="banned-tag">BANNED</span>' : ''}</h3>
         <div class="muted tiny">${tierLabel(p)}</div>
       </div>
     </div>
@@ -1488,12 +1709,77 @@ async function openProfileModal(userId) {
         </div>
       ` : '<p class="muted tiny">No created currencies yet.</p>'}
     </div>
+    ${canModerate ? `
+      <div class="admin-mod-box">
+        <div class="eyebrow purple-text" style="margin-bottom:8px;">DOMPINATOR ADMIN CONTROLS</div>
+        <input id="adminModReason" class="admin-mod-input" type="text" maxlength="200" placeholder="Warning or ban reason...">
+        <div class="admin-mod-actions">
+          <button type="button" class="warn-btn" id="adminWarnBtn">Warn</button>
+          <button type="button" class="reset-btn" id="adminResetBtn">Reset Account</button>
+          <button type="button" class="reset-btn hidden" id="adminResetConfirmBtn">Confirm Reset</button>
+          <button type="button" class="zoom-btn hidden" id="adminResetCancelBtn">Cancel</button>
+          <button type="button" class="${isTargetBanned ? 'unban-btn' : 'ban-btn'}" id="adminBanBtn">${isTargetBanned ? 'Unban Account' : 'Ban Account'}</button>
+        </div>
+        <p id="adminModMessage" class="form-message"></p>
+      </div>
+    ` : ''}
   `;
 
   $$('[data-modal-coin]').forEach(el => el.addEventListener('click', () => {
     modal.classList.add('hidden');
     openCoin(el.dataset.modalCoin);
   }));
+
+  if (canModerate) {
+    const msgEl = $('#adminModMessage');
+    const reasonEl = $('#adminModReason');
+
+    $('#adminWarnBtn')?.addEventListener('click', async () => {
+      const text = reasonEl?.value.trim() || '';
+      if (!text) {
+        if (msgEl) msgEl.textContent = 'Write a warning message first.';
+        reasonEl?.focus();
+        return;
+      }
+      if (msgEl) msgEl.textContent = '';
+      const ok = await sendAdminCommand('warn', p.id, text);
+      if (ok) {
+        toast(`Warning sent to ${p.username}`);
+        if (reasonEl) reasonEl.value = '';
+      }
+    });
+
+    $('#adminResetBtn')?.addEventListener('click', () => {
+      $('#adminResetBtn')?.classList.add('hidden');
+      $('#adminResetConfirmBtn')?.classList.remove('hidden');
+      $('#adminResetCancelBtn')?.classList.remove('hidden');
+    });
+    $('#adminResetCancelBtn')?.addEventListener('click', () => {
+      $('#adminResetBtn')?.classList.remove('hidden');
+      $('#adminResetConfirmBtn')?.classList.add('hidden');
+      $('#adminResetCancelBtn')?.classList.add('hidden');
+    });
+    $('#adminResetConfirmBtn')?.addEventListener('click', async () => {
+      const ok = await sendAdminCommand('reset', p.id, 'Reset by administrator');
+      if (ok) {
+        toast(`Account reset for ${p.username}`);
+        openProfileModal(p.id);
+        if (currentPage === 'notifications') loadAdminAccounts();
+        if (currentPage === 'global') renderLeaderboard();
+      }
+    });
+
+    $('#adminBanBtn')?.addEventListener('click', async () => {
+      const action = isTargetBanned ? 'unban' : 'ban';
+      const reason = reasonEl?.value.trim() || 'Banned by an administrator.';
+      const ok = await sendAdminCommand(action, p.id, action === 'ban' ? reason : '');
+      if (ok) {
+        toast(action === 'ban' ? `Banned ${p.username}` : `Unbanned ${p.username}`);
+        openProfileModal(p.id);
+        if (currentPage === 'notifications') loadAdminAccounts();
+      }
+    });
+  }
 }
 
 $('#closeProfileBtn')?.addEventListener('click', () => $('#profileModal')?.classList.add('hidden'));
@@ -2071,13 +2357,16 @@ $('#sendRequestBtn')?.addEventListener('click', async () => {
   $('#premiumReason').value = '';
 });
 
+let adminAccountsCache = [];
+let adminAccountQuery = '';
+
 async function loadRequests() {
   if (!sb) return;
   const { data } = await sb.from('premium_requests')
     .select('*, profiles(username)')
     .eq('status', 'pending')
     .order('created_at', { ascending: false });
-  const list = data || [];
+  const list = (data || []).filter(r => !String(r.reason || '').startsWith('__'));
   $('#requestsList').innerHTML = list.map(r => `
     <div class="request-card">
       <h4>${escapeHtml(r.profiles?.username || 'Unknown')}</h4>
@@ -2091,7 +2380,98 @@ async function loadRequests() {
   $('#emptyRequests').classList.toggle('hidden', list.length > 0);
   $$('.approve-btn').forEach(b => b.addEventListener('click', () => handleRequest(b.dataset.id, b.dataset.user, 'approved')));
   $$('.deny-btn').forEach(b => b.addEventListener('click', () => handleRequest(b.dataset.id, null, 'denied')));
+  loadAdminAccounts();
 }
+
+async function loadAdminAccounts() {
+  if (!sb || !isDompinator()) return;
+  await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
+  const { data } = await sb
+    .from('profiles')
+    .select('id, username, avatar_url, cash, net_worth, is_premium')
+    .order('net_worth', { ascending: false })
+    .limit(200);
+  adminAccountsCache = data || [];
+  renderAdminAccounts();
+}
+
+function renderAdminAccounts() {
+  const listEl = $('#adminAccountsList');
+  if (!listEl) return;
+  const q = adminAccountQuery.trim().toLowerCase();
+  const filtered = adminAccountsCache.filter(p =>
+    p.id !== currentUser?.id &&
+    (!q || (p.username || '').toLowerCase().includes(q))
+  );
+  if (!filtered.length) {
+    listEl.innerHTML = '<div class="empty-state" style="padding:20px;"><p>No matching accounts.</p></div>';
+    return;
+  }
+  listEl.innerHTML = filtered.map(p => {
+    const isBanned = Boolean(adminModStateCache.bans.get(p.id)?.banned);
+    return `
+    <div class="lb-row admin-acc-row">
+      <div class="avatar">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
+      <div class="lb-info">
+        <strong class="profile-link" data-profile="${escapeHtml(p.id)}">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}${isBanned ? '<span class="banned-tag">BANNED</span>' : ''}</strong>
+        <div class="muted tiny">Cash ${money(p.cash || 0)} · Net Worth ${money(p.net_worth || 0)}</div>
+      </div>
+      <div class="admin-acc-actions">
+        <button type="button" class="warn-btn" data-acc-manage="${escapeHtml(p.id)}">Warn</button>
+        <button type="button" class="reset-btn" data-acc-reset="${escapeHtml(p.id)}" data-acc-name="${escapeHtml(p.username || 'user')}">Reset</button>
+        <button type="button" class="${isBanned ? 'unban-btn' : 'ban-btn'}" data-acc-ban="${escapeHtml(p.id)}" data-acc-banned="${isBanned ? '1' : '0'}" data-acc-name="${escapeHtml(p.username || 'user')}">${isBanned ? 'Unban' : 'Ban'}</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  $$('#adminAccountsList [data-profile], #adminAccountsList [data-acc-manage]').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.profile || el.dataset.accManage;
+      openProfileModal(id);
+    });
+  });
+
+  $$('#adminAccountsList [data-acc-reset]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (btn.dataset.armed !== '1') {
+        btn.dataset.armed = '1';
+        btn.textContent = 'Confirm?';
+        setTimeout(() => {
+          if (btn.isConnected && btn.dataset.armed === '1') {
+            btn.dataset.armed = '0';
+            btn.textContent = 'Reset';
+          }
+        }, 3500);
+        return;
+      }
+      const ok = await sendAdminCommand('reset', btn.dataset.accReset, 'Reset by administrator');
+      if (ok) {
+        toast(`Account reset for ${btn.dataset.accName}`);
+        loadAdminAccounts();
+      }
+    });
+  });
+
+  $$('#adminAccountsList [data-acc-ban]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const currentlyBanned = btn.dataset.accBanned === '1';
+      if (!currentlyBanned) {
+        openProfileModal(btn.dataset.accBan);
+        return;
+      }
+      const ok = await sendAdminCommand('unban', btn.dataset.accBan, '');
+      if (ok) {
+        toast(`Unbanned ${btn.dataset.accName}`);
+        loadAdminAccounts();
+      }
+    });
+  });
+}
+
+$('#adminAccountSearch')?.addEventListener('input', e => {
+  adminAccountQuery = e.target.value || '';
+  renderAdminAccounts();
+});
 
 async function handleRequest(reqId, userId, status) {
   if (!sb) return;
@@ -2135,7 +2515,7 @@ $('#backToFeed')?.addEventListener('click', () => showPage('feed'));
   const { data: { session } } = await sb.auth.getSession();
   if (session) {
     await loadProfile();
-    enterApp();
+    if (!currentUser?.is_banned) enterApp();
   } else {
     setAuthMode('login');
   }

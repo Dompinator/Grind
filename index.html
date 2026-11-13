@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — The Meme Currency Market</title>
-  <link rel="stylesheet" href="styles.css?v=12">
+  <link rel="stylesheet" href="styles.css?v=13">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -242,6 +242,18 @@
           <div id="emptyRequests" class="empty-state">
             <p>No pending requests.</p>
           </div>
+          <hr style="border-color:#3a2e4a;margin:28px 0">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow purple-text">ACCOUNT MODERATION</div>
+              <h3>Manage accounts</h3>
+              <p class="muted">Warn, reset, or ban player accounts (Dompinator only).</p>
+            </div>
+          </div>
+          <div class="admin-search-bar">
+            <input id="adminAccountSearch" class="feed-search" type="search" placeholder="Search username...">
+          </div>
+          <div id="adminAccountsList" class="leaderboard-list"></div>
         </section>
 
         <!-- COIN DETAIL -->
@@ -283,7 +295,34 @@
     </div>
   </div>
 
+  <!-- WARNING MODAL -->
+  <div id="warnModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card profile-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow" style="color:#fbbf24;">ACCOUNT WARNING</div>
+          <h3>Warning from Admin</h3>
+        </div>
+      </div>
+      <div id="warnModalBody" class="warn-message-box"></div>
+      <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+        <button class="primary-btn" id="ackWarnBtn" type="button">I Understand</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- BANNED ACCOUNT SCREEN -->
+  <main id="bannedView" class="auth-shell hidden">
+    <section class="auth-card">
+      <div class="brand-mark" style="background:linear-gradient(135deg,#ef4444,#991b1b);">!</div>
+      <div class="eyebrow" style="color:#fca5a5;">ACCOUNT SUSPENDED</div>
+      <h1>Banned<span>.</span></h1>
+      <p id="bannedReasonText" class="muted">Your account has been banned by an administrator.</p>
+      <button class="primary-btn full" id="bannedLogoutBtn" type="button" style="margin-top:14px;">Log out</button>
+    </section>
+  </main>
+
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=13"></script>
 </body>
 </html>

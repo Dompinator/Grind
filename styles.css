@@ -259,3 +259,24 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .amount-custom input::-webkit-outer-spin-button,
 .amount-custom input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 
+/* Admin moderation (Dompinator) */
+.admin-search-bar { margin-bottom: 14px; }
+.admin-search-bar .feed-search { width: 100%; max-width: 360px; }
+.admin-mod-box { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.admin-mod-input { width: 100%; background: #120e1c; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; color: white; font-size: 13px; margin-bottom: 10px; }
+.admin-mod-input:focus { outline: none; border-color: var(--purple); }
+.admin-mod-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.warn-btn { background: rgba(251, 191, 36, .16); color: #fbbf24; border: 1px solid rgba(251, 191, 36, .45); border-radius: 10px; padding: 8px 13px; font-size: 12px; font-weight: 700; cursor: pointer; transition: .15s; }
+.warn-btn:hover { background: rgba(251, 191, 36, .28); }
+.reset-btn { background: rgba(192, 132, 252, .14); color: #d8b4fe; border: 1px solid rgba(192, 132, 252, .45); border-radius: 10px; padding: 8px 13px; font-size: 12px; font-weight: 700; cursor: pointer; transition: .15s; }
+.reset-btn:hover { background: rgba(192, 132, 252, .28); }
+.ban-btn { background: #3a1a24; color: #fca5a5; border: 1px solid #7f1d1d; border-radius: 10px; padding: 8px 13px; font-size: 12px; font-weight: 700; cursor: pointer; transition: .15s; }
+.ban-btn:hover { background: #5a1e2d; color: white; }
+.unban-btn { background: rgba(52, 211, 153, .16); color: var(--green); border: 1px solid rgba(52, 211, 153, .45); border-radius: 10px; padding: 8px 13px; font-size: 12px; font-weight: 700; cursor: pointer; transition: .15s; }
+.unban-btn:hover { background: rgba(52, 211, 153, .28); }
+.banned-tag { display: inline-block; margin-left: 6px; padding: 2px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; background: #5a1e2d; color: #fecaca; border: 1px solid #ef4444; vertical-align: middle; }
+.warn-message-box { background: rgba(251, 191, 36, .1); border: 1px solid rgba(251, 191, 36, .35); border-radius: 12px; padding: 14px; font-size: 14px; line-height: 1.5; color: #fef3c7; }
+.admin-acc-row { flex-wrap: wrap; }
+.admin-acc-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+
