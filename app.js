@@ -502,7 +502,7 @@ Welcome to GRIND ("Grind your way through the market"). By creating an account o
 function formatUpdateTextWithTos(text, preserveNewlines = false) {
   let html = escapeHtml(text || '');
   if (preserveNewlines) html = html.replace(/\n/g, '<br>');
-  return html.replace(/\b(TOS)\b/gi, '<button type="button" class="tos-inline-link" data-open-tos="1">$1</button>');
+  return html.replace(/\b(TOS)\b/gi, '<a href="#tos" class="tos-inline-link" data-open-tos="1">$1</a>');
 }
 
 async function loadTosText() {
@@ -550,7 +550,7 @@ document.addEventListener('click', e => {
   e.preventDefault();
   e.stopPropagation();
   openTosModal();
-});
+}, true);
 
 async function fetchActiveUpdates() {
   if (!sb) return [];
@@ -658,7 +658,11 @@ function renderUpdateModalContent(upd, isPreview = false) {
     eyebrowEl.style.color = upd.isTosSignup ? '#38bdf8' : '#fbbf24';
   }
   if (closeBtn) closeBtn.classList.toggle('hidden', !isPreview);
-  if (titleEl) titleEl.textContent = upd.title || 'Important Update';
+  if (titleEl) {
+    titleEl.innerHTML = upd.isTosSignup
+      ? escapeHtml(upd.title || 'Terms of Service')
+      : formatUpdateTextWithTos(upd.title || 'Important Update', false);
+  }
   if (bodyEl) {
     bodyEl.classList.toggle('tos-signup-body', Boolean(upd.isTosSignup));
     if (upd.isTosSignup) {
@@ -2733,7 +2737,7 @@ function renderUpdateLivePreview() {
     required: Boolean(b.required)
   }));
 
-  titleEl.textContent = title || 'Update Notification';
+  titleEl.innerHTML = formatUpdateTextWithTos(title || 'Update Notification', false);
   bodyEl.innerHTML = body
     ? formatUpdateTextWithTos(body, true)
     : '<span class="muted">Your update message will appear here as you type...</span>';
@@ -2904,7 +2908,7 @@ async function loadAdminUpdatesList() {
     <div class="request-card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
         <div>
-          <h4 style="margin:0 0 4px;">${escapeHtml(u.title || 'Update')}</h4>
+          <h4 style="margin:0 0 4px;">${formatUpdateTextWithTos(u.title || 'Update', false)}</h4>
           <div class="muted tiny">${u.ts ? new Date(u.ts).toLocaleString() : ''}</div>
         </div>
         <button type="button" class="ban-btn" data-del-upd="${escapeHtml(u.id)}">Remove</button>

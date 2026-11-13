@@ -299,8 +299,8 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .admin-update-submit-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .update-preview-card { max-width: none; max-height: none; overflow: visible; }
 
-.tos-inline-link { display: inline; background: none; border: 0; padding: 0 2px; margin: 0; font: inherit; font-weight: 800; color: #38bdf8; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; border-radius: 4px; transition: color .15s, background .15s; }
-.tos-inline-link:hover { color: #7dd3fc; background: rgba(56, 189, 248, .15); }
+.tos-inline-link { display: inline; background: none; border: 0; padding: 0 3px; margin: 0; font: inherit; font-weight: 800; color: #38bdf8 !important; text-decoration: underline !important; text-underline-offset: 3px; cursor: pointer !important; border-radius: 4px; transition: color .15s, background .15s; }
+.tos-inline-link:hover { color: #7dd3fc !important; background: rgba(56, 189, 248, .18); }
 .tos-modal-card { max-width: 660px; border-color: rgba(56, 189, 248, .45); }
 .tos-content-box { background: #120e1c; border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; font-size: 13px; line-height: 1.6; color: #e9e2f5; white-space: pre-wrap; max-height: 64vh; overflow-y: auto; }
 .warn-message-box.tos-signup-body { max-height: 46vh; overflow-y: auto; white-space: pre-wrap; font-size: 13px; line-height: 1.55; color: #e9e2f5; background: #120e1c; border-color: rgba(56, 189, 248, .35); }
