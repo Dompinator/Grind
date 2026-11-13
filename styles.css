@@ -305,6 +305,14 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .tos-content-box { background: #120e1c; border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; font-size: 13px; line-height: 1.6; color: #e9e2f5; white-space: pre-wrap; max-height: 64vh; overflow-y: auto; }
 .warn-message-box.tos-signup-body { max-height: 46vh; overflow-y: auto; white-space: pre-wrap; font-size: 13px; line-height: 1.55; color: #e9e2f5; background: #120e1c; border-color: rgba(56, 189, 248, .35); }
 
+.danger-zone-card { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; background: linear-gradient(135deg, rgba(127, 29, 29, .28) 0%, rgba(58, 26, 36, .45) 100%); border: 1px solid rgba(239, 68, 68, .55); border-radius: 18px; padding: 18px 20px; margin-bottom: 24px; }
+.danger-reset-btn { background: linear-gradient(110deg, #ef4444, #b91c1c); color: #fff; border: 1px solid #f87171; border-radius: 12px; padding: 12px 20px; font-weight: 800; font-size: 14px; cursor: pointer; transition: .15s; box-shadow: 0 4px 14px rgba(239, 68, 68, .3); flex-shrink: 0; }
+.danger-reset-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.danger-reset-btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+.danger-modal-card { border-color: rgba(239, 68, 68, .6); }
+.danger-message-box { background: rgba(127, 29, 29, .25); border: 1px solid rgba(239, 68, 68, .45); border-radius: 12px; padding: 14px; font-size: 14px; line-height: 1.5; color: #fee2e2; }
+
+
 
 
 

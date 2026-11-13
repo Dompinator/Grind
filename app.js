@@ -268,13 +268,16 @@ async function loadProfile() {
 
   if (!currentUser.is_premium) {
     try {
-      const { data: approvedReq } = await sb.from('premium_requests')
-        .select('id, reason')
+      let reqQuery = sb.from('premium_requests')
+        .select('id, reason, created_at')
         .eq('user_id', user.id)
         .eq('status', 'approved')
         .neq('reason', '__PRO_TIER__')
-        .limit(1)
-        .maybeSingle();
+        .limit(1);
+      if (adminModStateCache.serverResetTs > 0) {
+        reqQuery = reqQuery.gt('created_at', new Date(adminModStateCache.serverResetTs).toISOString());
+      }
+      const { data: approvedReq } = await reqQuery.maybeSingle();
 
       if (approvedReq) {
         currentUser.is_premium = true;
@@ -293,21 +296,48 @@ async function loadProfile() {
   }
 }
 
-let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map() };
+let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map(), serverResetTs: 0, resetDoneMap: new Map() };
 let pendingWarnAckTs = 0;
 
 async function fetchAdminModerationState() {
   const bans = new Map();
   const resets = new Map();
   const warnings = new Map();
-  if (!sb) return { bans, resets, warnings };
+  const resetDoneMap = new Map();
+  let serverResetTs = 0;
+  if (!sb) return { bans, resets, warnings, serverResetTs, resetDoneMap };
   try {
-    const { data } = await sb
-      .from('premium_requests')
-      .select('reason, created_at, profiles(username)')
-      .like('reason', '__ADMIN_CMD__:%')
-      .order('created_at', { ascending: true })
-      .limit(1000);
+    const [{ data }, { data: srvRows }, { data: doneRows }] = await Promise.all([
+      sb.from('premium_requests')
+        .select('reason, created_at, profiles(username)')
+        .like('reason', '__ADMIN_CMD__:%')
+        .order('created_at', { ascending: true })
+        .limit(1000),
+      sb.from('premium_requests')
+        .select('reason, created_at, profiles(username)')
+        .like('reason', '__SERVER_RESET__:%')
+        .order('created_at', { ascending: false })
+        .limit(20),
+      sb.from('premium_requests')
+        .select('user_id, reason')
+        .like('reason', '__RESET_DONE__:%')
+        .limit(1000)
+    ]);
+    (srvRows || []).forEach(row => {
+      if ((row.profiles?.username || '').toLowerCase() !== 'dompinator') return;
+      try {
+        const parsed = JSON.parse(String(row.reason).slice('__SERVER_RESET__:'.length));
+        const ts = Number(parsed?.ts) || (row.created_at ? new Date(row.created_at).getTime() : 0);
+        if (ts > serverResetTs) serverResetTs = ts;
+      } catch (e) {}
+    });
+    (doneRows || []).forEach(row => {
+      if (!row.user_id) return;
+      const ts = Number(String(row.reason || '').slice('__RESET_DONE__:'.length)) || 0;
+      if (ts > (resetDoneMap.get(row.user_id) || 0)) {
+        resetDoneMap.set(row.user_id, ts);
+      }
+    });
     (data || []).forEach(row => {
       if ((row.profiles?.username || '').toLowerCase() !== 'dompinator') return;
       try {
@@ -330,7 +360,7 @@ async function fetchAdminModerationState() {
       } catch (e) {}
     });
   } catch (e) {}
-  adminModStateCache = { bans, resets, warnings };
+  adminModStateCache = { bans, resets, warnings, serverResetTs, resetDoneMap };
   return adminModStateCache;
 }
 
@@ -348,7 +378,7 @@ function showBannedScreen(reason) {
 
 async function applyAdminActionsForCurrentUser() {
   if (!currentUser || !sb) return;
-  const { bans, resets, warnings } = await fetchAdminModerationState();
+  const { bans, resets, warnings, serverResetTs } = await fetchAdminModerationState();
   const uid = currentUser.id;
 
   // 1. Check Ban
@@ -362,8 +392,26 @@ async function applyAdminActionsForCurrentUser() {
   currentUser.is_banned = false;
   $('#bannedView')?.classList.add('hidden');
 
-  // 2. Check Reset
-  const latestResetTs = resets.get(uid) || 0;
+  // 2. Check Account Reset or Global Server Reset
+  const userResetTs = resets.get(uid) || 0;
+  const userCreatedMs = currentUser.auth_created_at ? new Date(currentUser.auth_created_at).getTime() : 0;
+  const appliesServerReset = serverResetTs > 0 && (!userCreatedMs || userCreatedMs <= serverResetTs);
+  const latestResetTs = Math.max(userResetTs, appliesServerReset ? serverResetTs : 0);
+
+  if (serverResetTs > 0 && userCreatedMs > serverResetTs) {
+    const acked = Number(localStorage.getItem('grind_reset_done_' + uid) || 0);
+    if (acked < serverResetTs) {
+      localStorage.setItem('grind_reset_done_' + uid, String(serverResetTs));
+      try {
+        await sb.from('premium_requests').insert({
+          user_id: uid,
+          reason: '__RESET_DONE__:' + serverResetTs,
+          status: 'denied'
+        });
+      } catch (e) {}
+    }
+  }
+
   if (latestResetTs > 0) {
     let appliedResetTs = Number(localStorage.getItem('grind_reset_done_' + uid) || 0);
     try {
@@ -380,6 +428,7 @@ async function applyAdminActionsForCurrentUser() {
     } catch (e) {}
 
     if (latestResetTs > appliedResetTs) {
+      const keepAdminPremium = isDompinator();
       try {
         await sb.from('holdings').delete().eq('user_id', uid);
       } catch (e) {}
@@ -387,14 +436,14 @@ async function applyAdminActionsForCurrentUser() {
         await sb.from('profiles').update({
           cash: 15,
           net_worth: 15,
-          is_premium: false,
+          is_premium: keepAdminPremium,
           time_played: 0
         }).eq('id', uid);
       } catch (e) {}
 
       currentUser.cash = 15;
       currentUser.net_worth = 15;
-      currentUser.is_premium = false;
+      currentUser.is_premium = keepAdminPremium;
       currentUser.is_pro = false;
       currentUser.time_played = 0;
       proUserIds.delete(uid);
@@ -418,7 +467,9 @@ async function applyAdminActionsForCurrentUser() {
       if (currentPage === 'money') renderMoney();
       if (currentPage === 'coin') renderCoinDetail();
       if (currentPage === 'feed') renderFeed();
-      toast('Your account was reset by an administrator.');
+      toast(appliesServerReset && latestResetTs === serverResetTs
+        ? 'Servers were reset by an administrator. All coins cleared & accounts reset to $15.'
+        : 'Your account was reset by an administrator.');
     }
   }
 
@@ -984,11 +1035,15 @@ $('#feedSearch')?.addEventListener('input', e => {
 async function loadProUserIds() {
   if (!sb) return;
   try {
-    const { data } = await sb
+    let q = sb
       .from('premium_requests')
-      .select('user_id')
+      .select('user_id, created_at')
       .eq('status', 'approved')
       .eq('reason', '__PRO_TIER__');
+    if (adminModStateCache.serverResetTs > 0) {
+      q = q.gt('created_at', new Date(adminModStateCache.serverResetTs).toISOString());
+    }
+    const { data } = await q;
     proUserIds = new Set((data || []).map(r => r.user_id).filter(Boolean));
     if (currentUser && localStorage.getItem('grind_pro_' + currentUser.id) === '1') {
       proUserIds.add(currentUser.id);
@@ -999,7 +1054,8 @@ async function loadProUserIds() {
 // ---------- Coins & Feed ----------
 async function loadCoins() {
   if (!sb) return;
-  await loadProUserIds();
+  await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
+  const srvResetTs = adminModStateCache.serverResetTs || 0;
   let res = await sb
     .from('coins')
     .select('*, profiles!coins_creator_id_fkey(id, username, avatar_url, is_premium)')
@@ -1008,24 +1064,32 @@ async function loadCoins() {
     res = await sb.from('coins').select('*').order('created_at', { ascending: false });
   }
   if (!res.error) {
-    const list = res.data || [];
+    const list = (res.data || []).filter(c => {
+      if (!srvResetTs) return true;
+      const cts = c.created_at ? new Date(c.created_at).getTime() : 0;
+      return cts > srvResetTs;
+    });
     const stats = new Map();
     const openPriceMap = new Map();
     const tradedTodaySet = new Set();
     const startOfTodayIso = getStartOfTodayDate().toISOString();
     lastCoinsDateKey = getLocalDateKey(0);
     try {
-      const [{ data: buyRows }, { data: todayRows }] = await Promise.all([
-        sb.from('trades')
-          .select('coin_id, amount_usd, created_at')
-          .eq('type', 'buy')
-          .order('created_at', { ascending: false })
-          .limit(1000),
-        sb.from('trades')
-          .select('coin_id')
-          .gte('created_at', startOfTodayIso)
-          .limit(1000)
-      ]);
+      let buyQ = sb.from('trades')
+        .select('coin_id, amount_usd, created_at')
+        .eq('type', 'buy')
+        .order('created_at', { ascending: false })
+        .limit(1000);
+      let todayQ = sb.from('trades')
+        .select('coin_id, created_at')
+        .gte('created_at', startOfTodayIso)
+        .limit(1000);
+      if (srvResetTs > 0) {
+        const srvIso = new Date(srvResetTs).toISOString();
+        buyQ = buyQ.gt('created_at', srvIso);
+        todayQ = todayQ.gt('created_at', srvIso);
+      }
+      const [{ data: buyRows }, { data: todayRows }] = await Promise.all([buyQ, todayQ]);
       const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
       (buyRows || []).forEach(t => {
         if (!t.coin_id) return;
@@ -1219,7 +1283,11 @@ $('#createForm')?.addEventListener('submit', async (e) => {
 
     if (!isDompinator()) {
       try {
-        const { count, error: countErr } = await sb.from('coins').select('*', { count: 'exact', head: true }).eq('creator_id', currentUser.id);
+        let countQ = sb.from('coins').select('*', { count: 'exact', head: true }).eq('creator_id', currentUser.id);
+        if (adminModStateCache.serverResetTs > 0) {
+          countQ = countQ.gt('created_at', new Date(adminModStateCache.serverResetTs).toISOString());
+        }
+        const { count, error: countErr } = await countQ;
         const max = currentUser.is_premium ? 3 : (currentUser.is_pro ? 2 : 1);
         if (!countErr && count !== null && count >= max) {
           if (msgEl) msgEl.textContent = `Max ${max} coin${max > 1 ? 's' : ''} for your ${tierLabel(currentUser)} account.`;
@@ -1521,11 +1589,15 @@ function calcHoldingsValue(price, shares) {
 
 async function updateNetWorth() {
   if (!currentUser || !sb) return;
-  const [{ data: holds }, { data: myCoins }] = await Promise.all([
-    sb.from('holdings').select('shares, coins(price)').eq('user_id', currentUser.id),
-    sb.from('coins').select('price').eq('creator_id', currentUser.id)
-  ]);
-  const holdingsValue = (holds || []).reduce((s, h) => s + calcHoldingsValue(h.coins?.price, h.shares), 0);
+  const srvResetTs = adminModStateCache.serverResetTs || 0;
+  let holdsQ = sb.from('holdings').select('shares, coins(price, created_at)').eq('user_id', currentUser.id);
+  let coinsQ = sb.from('coins').select('price, created_at').eq('creator_id', currentUser.id);
+  if (srvResetTs > 0) {
+    coinsQ = coinsQ.gt('created_at', new Date(srvResetTs).toISOString());
+  }
+  const [{ data: holds }, { data: myCoins }] = await Promise.all([holdsQ, coinsQ]);
+  const validHolds = (holds || []).filter(h => !srvResetTs || (h.coins?.created_at && new Date(h.coins.created_at).getTime() > srvResetTs));
+  const holdingsValue = validHolds.reduce((s, h) => s + calcHoldingsValue(h.coins?.price, h.shares), 0);
   const createdValue = (myCoins || []).reduce((s, c) => s + Number(c.price || 0), 0);
   const portValue = holdingsValue + createdValue;
   const nw = Number(currentUser.cash || 0) + portValue;
@@ -1782,12 +1854,17 @@ function drawChartWithBubbles(coin, trades) {
 // ---------- Money / Portfolio (Personal P&L is strictly private to currentUser) ----------
 async function renderMoney() {
   if (!currentUser || !sb) return;
-  const [{ data: holds }, { data: myCoins }, { data: myTrades }] = await Promise.all([
-    sb.from('holdings').select('*, coins(name, ticker, price, image_url)').eq('user_id', currentUser.id).gt('shares', 0),
-    sb.from('coins').select('*').eq('creator_id', currentUser.id).order('created_at', { ascending: false }),
-    sb.from('trades').select('coin_id, type, amount_usd').eq('user_id', currentUser.id)
-  ]);
-  const list = holds || [];
+  const srvResetTs = adminModStateCache.serverResetTs || 0;
+  let holdsQ = sb.from('holdings').select('*, coins(name, ticker, price, image_url, created_at)').eq('user_id', currentUser.id).gt('shares', 0);
+  let coinsQ = sb.from('coins').select('*').eq('creator_id', currentUser.id).order('created_at', { ascending: false });
+  let tradesQ = sb.from('trades').select('coin_id, type, amount_usd, created_at').eq('user_id', currentUser.id);
+  if (srvResetTs > 0) {
+    const srvIso = new Date(srvResetTs).toISOString();
+    coinsQ = coinsQ.gt('created_at', srvIso);
+    tradesQ = tradesQ.gt('created_at', srvIso);
+  }
+  const [{ data: holds }, { data: myCoins }, { data: myTrades }] = await Promise.all([holdsQ, coinsQ, tradesQ]);
+  const list = (holds || []).filter(h => !srvResetTs || (h.coins?.created_at && new Date(h.coins.created_at).getTime() > srvResetTs));
   const created = myCoins || [];
   const holdingsValue = list.reduce((s, h) => s + calcHoldingsValue(h.coins?.price, h.shares), 0);
   const createdValue = created.reduce((s, c) => s + Number(c.price || 0), 0);
@@ -1922,18 +1999,36 @@ function renderSpendRows(rows, emptyText = 'No buyers yet.') {
   `).join('');
 }
 
+function getEffectiveProfileStats(p) {
+  const srvTs = adminModStateCache.serverResetTs || 0;
+  if (!srvTs) return p;
+  const isAdm = (p.username || '').toLowerCase() === 'dompinator';
+  const ackTs = adminModStateCache.resetDoneMap?.get(p.id) || 0;
+  if (ackTs >= srvTs) {
+    return p;
+  }
+  return {
+    ...p,
+    cash: 15,
+    net_worth: 15,
+    time_played: 0,
+    is_premium: isAdm ? p.is_premium : false
+  };
+}
+
 async function renderLeaderboard() {
   if (!sb) return;
-  await loadProUserIds();
+  await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
   if (currentUser) await updateNetWorth();
-  let query = sb.from('profiles').select('id, username, avatar_url, net_worth, time_played, is_premium');
+  let query = sb.from('profiles').select('id, username, avatar_url, cash, net_worth, time_played, is_premium');
+  const { data } = await query.limit(200);
+  let list = (data || []).map(getEffectiveProfileStats);
   if (lbMode === 'networth') {
-    query = query.order('net_worth', { ascending: false }).limit(100);
+    list.sort((a, b) => Number(b.net_worth || 0) - Number(a.net_worth || 0));
   } else {
-    query = query.order('time_played', { ascending: false }).limit(100);
+    list.sort((a, b) => Number(b.time_played || 0) - Number(a.time_played || 0));
   }
-  const { data } = await query;
-  const list = data || [];
+  list = list.slice(0, 100);
   $('#leaderboardList').innerHTML = list.map((p, i) => `
     <div class="lb-row">
       <div class="lb-rank ${i < 3 ? 'top3' : ''}">#${i + 1}</div>
@@ -2944,6 +3039,95 @@ async function loadAdminUpdatesList() {
   });
 }
 
+function openServerResetModal() {
+  if (!isDompinator()) return;
+  $('#serverResetModal')?.classList.remove('hidden');
+}
+function closeServerResetModal() {
+  $('#serverResetModal')?.classList.add('hidden');
+}
+$('#openServerResetBtn')?.addEventListener('click', openServerResetModal);
+$('#closeServerResetBtn')?.addEventListener('click', closeServerResetModal);
+$('#cancelServerResetBtn')?.addEventListener('click', closeServerResetModal);
+$('#serverResetModal')?.addEventListener('click', e => {
+  if (e.target === $('#serverResetModal')) closeServerResetModal();
+});
+
+$('#confirmServerResetBtn')?.addEventListener('click', async () => {
+  if (!isDompinator() || !currentUser || !sb) return;
+  const btn = $('#confirmServerResetBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Resetting...';
+  }
+
+  const ts = Date.now();
+  const { error: cmdErr } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__SERVER_RESET__:' + JSON.stringify({ ts }),
+    status: 'denied'
+  });
+  if (cmdErr) {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Yes, Reset Servers';
+    }
+    toast('Server reset failed: ' + cmdErr.message);
+    return;
+  }
+
+  // Attempt full DB cleanup (RLS-permitting; self-reset & filters backstop any RLS-protected rows)
+  try {
+    const { data: allCoins } = await sb.from('coins').select('id');
+    const coinIds = (allCoins || []).map(c => c.id).filter(Boolean);
+    await sb.from('holdings').delete().not('user_id', 'is', null);
+    await sb.from('trades').delete().not('coin_id', 'is', null);
+    if (coinIds.length) {
+      await sb.from('coins').delete().in('id', coinIds);
+    }
+  } catch (e) {}
+
+  try {
+    await sb.from('premium_requests').update({ status: 'denied' }).eq('status', 'approved');
+    await sb.from('profiles').update({ cash: 15, net_worth: 15, is_premium: false, time_played: 0 }).neq('id', currentUser.id);
+    await sb.from('profiles').update({ cash: 15, net_worth: 15, time_played: 0 }).eq('id', currentUser.id);
+  } catch (e) {}
+
+  const uid = currentUser.id;
+  currentUser.cash = 15;
+  currentUser.net_worth = 15;
+  currentUser.is_pro = false;
+  currentUser.time_played = 0;
+  coins = [];
+  selectedCoin = null;
+  proUserIds = new Set();
+  watchlistIds = new Set();
+  localStorage.removeItem('grind_pro_' + uid);
+  localStorage.removeItem('grind_daily_' + uid);
+  localStorage.removeItem('grind_watchlist_' + uid);
+  localStorage.removeItem('grind_watchlist_ts_' + uid);
+  localStorage.setItem('grind_reset_done_' + uid, String(ts));
+
+  try {
+    await sb.from('premium_requests').insert({
+      user_id: uid,
+      reason: '__RESET_DONE__:' + ts,
+      status: 'denied'
+    });
+  } catch (e) {}
+
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = 'Yes, Reset Servers';
+  }
+  closeServerResetModal();
+  updateUIProfile();
+  await loadCoins();
+  renderFeed();
+  loadAdminAccounts();
+  toast('Servers reset! All coins cleared & all accounts reset to $15.00.');
+});
+
 function loadAdminPage() {
   renderUpdateCheckboxesBuilder();
   loadAdminUpdatesList();
@@ -2955,10 +3139,11 @@ async function loadAdminAccounts() {
   await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
   const { data } = await sb
     .from('profiles')
-    .select('id, username, avatar_url, cash, net_worth, is_premium')
+    .select('id, username, avatar_url, cash, net_worth, is_premium, time_played')
     .order('net_worth', { ascending: false })
     .limit(200);
-  adminAccountsCache = data || [];
+  adminAccountsCache = (data || []).map(getEffectiveProfileStats)
+    .sort((a, b) => Number(b.net_worth || 0) - Number(a.net_worth || 0));
   renderAdminAccounts();
 }
 

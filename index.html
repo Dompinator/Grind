@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=18">
+  <link rel="stylesheet" href="styles.css?v=19">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -247,6 +247,15 @@
 
         <!-- ADMIN (only Dompinator) -->
         <section id="page-admin" class="page hidden">
+          <div class="danger-zone-card">
+            <div>
+              <div class="eyebrow" style="color:#fca5a5;">BETA SERVER CONTROLS</div>
+              <h3 style="margin:4px 0;">Reset Servers</h3>
+              <p class="muted tiny" style="margin:0;">Clear all coins/currencies, trades, and holdings, and reset every account back to $15.00 cash, $15.00 net worth, and 0m playtime.</p>
+            </div>
+            <button type="button" class="danger-reset-btn" id="openServerResetBtn">Reset Servers</button>
+          </div>
+
           <div class="section-head">
             <div>
               <div class="eyebrow purple-text">ADMIN</div>
@@ -409,7 +418,27 @@
     </div>
   </div>
 
+  <!-- SERVER RESET CONFIRMATION MODAL -->
+  <div id="serverResetModal" class="modal-backdrop hidden" style="z-index:106;" role="dialog" aria-modal="true">
+    <div class="modal-card profile-modal-card danger-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow" style="color:#f87171;">BETA SERVER RESET</div>
+          <h3>Reset All Servers?</h3>
+        </div>
+        <button class="zoom-btn" id="closeServerResetBtn" type="button">✕</button>
+      </div>
+      <div class="danger-message-box">
+        This will permanently clear <strong>all coins/currencies, trades, and holdings</strong> and reset <strong>every account</strong> back to $15.00 cash, $15.00 net worth, 0m playtime, and starter tier status. Active bans and warnings stay intact.
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
+        <button class="zoom-btn" id="cancelServerResetBtn" type="button" style="padding:10px 16px;">Cancel</button>
+        <button class="danger-reset-btn" id="confirmServerResetBtn" type="button">Yes, Reset Servers</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=18"></script>
+  <script src="app.js?v=19"></script>
 </body>
 </html>
