@@ -174,7 +174,7 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
   .coin-grid { grid-template-columns: 1fr; }
   .portfolio-summary, .form-grid, .trade-buttons { grid-template-columns: 1fr 1fr; }
   .amount-custom { grid-column: span 2; }
-  .coin-bottom-grid { grid-template-columns: 1fr; }
+  .coin-bottom-grid, .admin-update-grid { grid-template-columns: 1fr; }
   .feed-toolbar { flex-direction: column; align-items: stretch; }
   .feed-search { width: 100%; }
   .daily-grid { grid-template-columns: repeat(2, 1fr); }
@@ -294,7 +294,10 @@ label input:focus, label textarea:focus { outline: none; border-color: var(--pur
 .check-tag { font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 999px; flex-shrink: 0; }
 .check-tag.req { background: rgba(251, 191, 36, .16); color: #fbbf24; border: 1px solid rgba(251, 191, 36, .45); }
 .check-tag.opt { background: #201a2d; color: var(--muted); border: 1px solid var(--line); }
-#updateContinueBtn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+#updateContinueBtn:disabled, #updatePreviewContinueBtn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+.admin-update-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px; align-items: start; margin-bottom: 22px; }
+.admin-update-submit-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.update-preview-card { max-width: none; max-height: none; overflow: visible; }
 
 
 

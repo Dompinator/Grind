@@ -449,6 +449,7 @@ async function applyAdminActionsForCurrentUser() {
 
 let activeUpdateQueue = [];
 let currentUpdateModalItem = null;
+let isPreviewUpdateModal = false;
 
 async function fetchActiveUpdates() {
   if (!sb) return [];
@@ -520,20 +521,17 @@ async function checkPendingUpdateNotifications() {
   }
 }
 
-function showNextUpdateModal() {
-  if (!activeUpdateQueue.length) {
-    currentUpdateModalItem = null;
-    $('#updateModal')?.classList.add('hidden');
-    return;
-  }
-  const upd = activeUpdateQueue[0];
-  currentUpdateModalItem = upd;
+function renderUpdateModalContent(upd, isPreview = false) {
+  const eyebrowEl = $('#updateModalEyebrow');
+  const closeBtn = $('#closeUpdatePreviewBtn');
   const titleEl = $('#updateModalTitle');
   const bodyEl = $('#updateModalBody');
   const boxesEl = $('#updateModalBoxes');
   const hintEl = $('#updateModalHint');
   const btn = $('#updateContinueBtn');
 
+  if (eyebrowEl) eyebrowEl.textContent = isPreview ? 'PREVIEW · UPDATE NOTIFICATION' : 'UPDATE NOTIFICATION';
+  if (closeBtn) closeBtn.classList.toggle('hidden', !isPreview);
   if (titleEl) titleEl.textContent = upd.title || 'Important Update';
   if (bodyEl) {
     const safeBody = escapeHtml(upd.body || '').replace(/\n/g, '<br>');
@@ -568,9 +566,37 @@ function showNextUpdateModal() {
   $('#updateModal')?.classList.remove('hidden');
 }
 
+function showNextUpdateModal() {
+  if (!activeUpdateQueue.length) {
+    currentUpdateModalItem = null;
+    isPreviewUpdateModal = false;
+    $('#updateModal')?.classList.add('hidden');
+    return;
+  }
+  isPreviewUpdateModal = false;
+  const upd = activeUpdateQueue[0];
+  currentUpdateModalItem = upd;
+  renderUpdateModalContent(upd, false);
+}
+
+$('#closeUpdatePreviewBtn')?.addEventListener('click', () => {
+  if (!isPreviewUpdateModal) return;
+  isPreviewUpdateModal = false;
+  $('#updateModal')?.classList.add('hidden');
+  if (activeUpdateQueue.length > 0) showNextUpdateModal();
+});
+
 $('#updateContinueBtn')?.addEventListener('click', async () => {
   const btn = $('#updateContinueBtn');
-  if (!btn || btn.disabled || !currentUpdateModalItem || !currentUser) return;
+  if (!btn || btn.disabled) return;
+  if (isPreviewUpdateModal) {
+    isPreviewUpdateModal = false;
+    $('#updateModal')?.classList.add('hidden');
+    toast('Preview passed!');
+    if (activeUpdateQueue.length > 0) showNextUpdateModal();
+    return;
+  }
+  if (!currentUpdateModalItem || !currentUser) return;
   const updId = String(currentUpdateModalItem.id);
   const uid = currentUser.id;
 
@@ -2543,11 +2569,92 @@ async function loadRequests() {
 
 let draftUpdateBoxes = [];
 
+function getDraftUpdateData() {
+  const title = $('#updateTitleInput')?.value.trim() || '';
+  const body = $('#updateBodyInput')?.value.trim() || '';
+  const boxes = draftUpdateBoxes
+    .map(b => ({ text: (b.text || '').trim(), required: Boolean(b.required) }))
+    .filter(b => b.text.length > 0);
+  return { title, body, boxes };
+}
+
+function renderUpdateLivePreview() {
+  const titleEl = $('#updatePreviewTitle');
+  const bodyEl = $('#updatePreviewBody');
+  const boxesEl = $('#updatePreviewBoxes');
+  const hintEl = $('#updatePreviewHint');
+  const btn = $('#updatePreviewContinueBtn');
+  if (!titleEl || !bodyEl || !boxesEl) return;
+
+  const title = $('#updateTitleInput')?.value.trim() || '';
+  const body = $('#updateBodyInput')?.value.trim() || '';
+  const draftBoxes = draftUpdateBoxes.map((b, i) => ({
+    text: (b.text || '').trim() || `Checkbox ${i + 1}`,
+    required: Boolean(b.required)
+  }));
+
+  titleEl.textContent = title || 'Update Notification';
+  bodyEl.innerHTML = body
+    ? escapeHtml(body).replace(/\n/g, '<br>')
+    : '<span class="muted">Your update message will appear here as you type...</span>';
+
+  const prevChecked = new Map();
+  $$('#updatePreviewBoxes .update-preview-box-input').forEach(inp => {
+    prevChecked.set(inp.dataset.idx, inp.checked);
+  });
+
+  if (draftBoxes.length) {
+    boxesEl.innerHTML = draftBoxes.map((b, i) => `
+      <label class="update-check-item">
+        <input type="checkbox" class="update-preview-box-input" data-idx="${i}" data-req="${b.required ? '1' : '0'}" ${prevChecked.get(String(i)) ? 'checked' : ''}>
+        <span class="update-check-text">${escapeHtml(b.text)}</span>
+        <span class="check-tag ${b.required ? 'req' : 'opt'}">${b.required ? 'Required' : 'Optional'}</span>
+      </label>
+    `).join('');
+  } else {
+    boxesEl.innerHTML = '<p class="muted tiny" style="margin:0;">Checkboxes you add will appear here.</p>';
+  }
+
+  const hasReq = draftBoxes.some(b => b.required);
+  const syncPreviewBtn = () => {
+    const reqInputs = $$('#updatePreviewBoxes .update-preview-box-input[data-req="1"]');
+    const allReqChecked = reqInputs.every(inp => inp.checked);
+    if (btn) btn.disabled = !allReqChecked;
+    if (hintEl) {
+      hintEl.textContent = hasReq && !allReqChecked
+        ? 'Check all required boxes above to continue using GRIND.'
+        : '';
+    }
+  };
+  $$('#updatePreviewBoxes .update-preview-box-input').forEach(inp => inp.addEventListener('change', syncPreviewBtn));
+  syncPreviewBtn();
+}
+
+$('#updateTitleInput')?.addEventListener('input', renderUpdateLivePreview);
+$('#updateBodyInput')?.addEventListener('input', renderUpdateLivePreview);
+$('#updatePreviewContinueBtn')?.addEventListener('click', () => {
+  if ($('#updatePreviewContinueBtn')?.disabled) return;
+  toast('Preview: user can continue!');
+});
+
+$('#testUpdatePopupBtn')?.addEventListener('click', () => {
+  if (!isDompinator()) return;
+  const { title, body, boxes } = getDraftUpdateData();
+  isPreviewUpdateModal = true;
+  renderUpdateModalContent({
+    id: 'preview',
+    title: title || 'Update Notification',
+    body: body || 'Preview message...',
+    boxes
+  }, true);
+});
+
 function renderUpdateCheckboxesBuilder() {
   const wrap = $('#updateCheckboxesBuilder');
   if (!wrap) return;
   if (!draftUpdateBoxes.length) {
     wrap.innerHTML = '<p class="muted tiny" style="margin:0;">No checkboxes added yet. Click "+ Add checkbox" to add optional or required checkboxes.</p>';
+    renderUpdateLivePreview();
     return;
   }
   wrap.innerHTML = draftUpdateBoxes.map((b, i) => `
@@ -2565,6 +2672,7 @@ function renderUpdateCheckboxesBuilder() {
     inp.addEventListener('input', e => {
       const idx = Number(inp.dataset.idx);
       if (draftUpdateBoxes[idx]) draftUpdateBoxes[idx].text = e.target.value;
+      renderUpdateLivePreview();
     });
   });
   $$('#updateCheckboxesBuilder .box-req-input').forEach(chk => {
@@ -2575,6 +2683,7 @@ function renderUpdateCheckboxesBuilder() {
         const lbl = chk.parentElement?.querySelector('span');
         if (lbl) lbl.textContent = chk.checked ? 'Required' : 'Optional';
       }
+      renderUpdateLivePreview();
     });
   });
   $$('#updateCheckboxesBuilder .box-remove-btn').forEach(btn => {
@@ -2584,6 +2693,7 @@ function renderUpdateCheckboxesBuilder() {
       renderUpdateCheckboxesBuilder();
     });
   });
+  renderUpdateLivePreview();
 }
 
 $('#addUpdateCheckboxBtn')?.addEventListener('click', () => {

@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
-  <title>GRIND — The Meme Currency Market</title>
-  <link rel="stylesheet" href="styles.css?v=14">
+  <title>GRIND — Grind your way through the market</title>
+  <link rel="stylesheet" href="styles.css?v=15">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
   <main id="authView" class="auth-shell">
     <section class="auth-card">
       <div class="brand-mark">G</div>
-      <div class="eyebrow">THE MEME CURRENCY MARKET</div>
+      <div class="eyebrow">GRIND YOUR WAY THROUGH THE MARKET</div>
       <h1>GRIND<span>.</span></h1>
       <p class="muted">Create, discover and trade community currencies. Live with everyone.</p>
       <div class="auth-tabs">
@@ -254,18 +254,38 @@
               <p class="muted">Broadcast an update popup with optional or required checkboxes to all players.</p>
             </div>
           </div>
-          <div class="form-card" style="margin-bottom:22px;">
-            <label>Title<input id="updateTitleInput" maxlength="80" placeholder="e.g. GRIND v0.4.6 Update"></label>
-            <label>Message<textarea id="updateBodyInput" rows="3" maxlength="800" placeholder="Describe what changed or important info..."></textarea></label>
-            <div style="margin:14px 0;">
-              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
-                <strong style="font-size:13px;">Checkboxes</strong>
-                <button type="button" class="zoom-btn" id="addUpdateCheckboxBtn">+ Add checkbox</button>
+          <div class="admin-update-grid">
+            <div class="form-card">
+              <label>Title<input id="updateTitleInput" maxlength="80" placeholder="e.g. GRIND v0.4.6 Update"></label>
+              <label>Message<textarea id="updateBodyInput" rows="3" maxlength="800" placeholder="Describe what changed or important info..."></textarea></label>
+              <div style="margin:14px 0;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
+                  <strong style="font-size:13px;">Checkboxes</strong>
+                  <button type="button" class="zoom-btn" id="addUpdateCheckboxBtn">+ Add checkbox</button>
+                </div>
+                <div id="updateCheckboxesBuilder" class="update-builder-list"></div>
               </div>
-              <div id="updateCheckboxesBuilder" class="update-builder-list"></div>
+              <div class="admin-update-submit-row">
+                <button type="button" class="primary-btn" style="flex:1;" id="publishUpdateBtn">Publish update notification</button>
+                <button type="button" class="zoom-btn" id="testUpdatePopupBtn">Preview popup</button>
+              </div>
+              <p id="updatePostMessage" class="form-message"></p>
             </div>
-            <button type="button" class="primary-btn full" id="publishUpdateBtn">Publish update notification</button>
-            <p id="updatePostMessage" class="form-message"></p>
+
+            <div class="modal-card profile-modal-card update-modal-card update-preview-card">
+              <div class="modal-head">
+                <div>
+                  <div class="eyebrow" style="color:#fbbf24;">LIVE PREVIEW · UPDATE NOTIFICATION</div>
+                  <h3 id="updatePreviewTitle">Update Notification</h3>
+                </div>
+              </div>
+              <div id="updatePreviewBody" class="warn-message-box"></div>
+              <div id="updatePreviewBoxes" class="update-check-list"></div>
+              <p id="updatePreviewHint" class="muted tiny" style="margin:10px 0 0;"></p>
+              <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+                <button class="primary-btn" id="updatePreviewContinueBtn" type="button">Continue</button>
+              </div>
+            </div>
           </div>
 
           <div class="section-head">
@@ -361,9 +381,10 @@
     <div class="modal-card profile-modal-card update-modal-card">
       <div class="modal-head">
         <div>
-          <div class="eyebrow" style="color:#fbbf24;">UPDATE NOTIFICATION</div>
+          <div class="eyebrow" style="color:#fbbf24;" id="updateModalEyebrow">UPDATE NOTIFICATION</div>
           <h3 id="updateModalTitle">Update</h3>
         </div>
+        <button class="zoom-btn hidden" id="closeUpdatePreviewBtn" type="button">✕</button>
       </div>
       <div id="updateModalBody" class="warn-message-box"></div>
       <div id="updateModalBoxes" class="update-check-list"></div>
@@ -375,6 +396,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=15"></script>
 </body>
 </html>
