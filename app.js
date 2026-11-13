@@ -40,6 +40,7 @@ let proUserIds = new Set();
 let watchlistIds = new Set();
 let dailyStateCache = null;
 let lastCoinsDateKey = '';
+let tradeInFlight = false;
 
 const DAILY_REWARDS = [5, 5, 10, 12, 13, 15, 'PRO'];
 const GOLD_CROWN_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 18h18v2H3v-2zm0-2L1 6l5.5 4.5L12 4l5.5 6.5L23 6l-2 10H3z"/></svg>`;
@@ -851,7 +852,7 @@ async function renderCoinDetail() {
             <button class="sell-btn" data-sell="1">Sell 100%</button>
           </div>
         </div>
-        <p class="muted tiny" style="margin-top:10px">You own: ${shares.toFixed(4)} shares · Worth ${money(shares * c.price)} · Cash ${money(currentUser.cash)}</p>
+        <p class="muted tiny" style="margin-top:10px">You own: ${shares.toFixed(4)} shares · Sell value ${money(calcHoldingsValue(c.price, shares))} · Cash ${money(currentUser.cash)}</p>
         <p class="form-message" id="tradeMessage"></p>
         ${isDompinator() ? `
           <button class="delete-coin-btn" id="deleteCoinBtn">🗑 Delete currency (Dompinator admin)</button>
@@ -974,12 +975,34 @@ async function renderCoinDetail() {
   });
 }
 
-// Market impact:
-// If price is low (e.g. 1), moves price by a HUGE difference!
-// If price is high (e.g. 50), moves price much less.
-function calculateImpact(amount, price) {
-  const p = Math.max(Number(price) || 1, 0.2);
-  return (amount * 0.3) / Math.pow(p, 2.2);
+// Path-independent exponential bonding curve:
+// Total reserve in curve down to $0 is P / CURVE_K.
+// Buying `amount` USD raises price by CURVE_K * amount and mints exact integral shares:
+//   shares = ln(newPrice / oldPrice) / CURVE_K
+// Selling `shares` reverses along the exact same curve so you can never extract
+// more USD than you put in unless someone else buys in first.
+const CURVE_K = 0.30;
+
+function calcCurveBuy(price, amount) {
+  const p = Math.max(Number(price) || 1, 0.01);
+  const amt = Math.max(Number(amount) || 0, 0);
+  const newPrice = p + CURVE_K * amt;
+  const shares = Math.log(newPrice / p) / CURVE_K;
+  return { newPrice, shares };
+}
+
+function calcCurveSell(price, sharesToSell) {
+  const p = Math.max(Number(price) || 1, 0.01);
+  const s = Math.max(Number(sharesToSell) || 0, 0);
+  if (s <= 0) return { newPrice: p, proceeds: 0 };
+  const newPrice = Math.max(0.01, p * Math.exp(-CURVE_K * s));
+  const rawProceeds = Math.max(0, (p - newPrice) / CURVE_K);
+  const proceeds = Math.floor((rawProceeds + 1e-9) * 100) / 100;
+  return { newPrice, proceeds };
+}
+
+function calcHoldingsValue(price, shares) {
+  return calcCurveSell(price, shares).proceeds;
 }
 
 async function updateNetWorth() {
@@ -988,7 +1011,7 @@ async function updateNetWorth() {
     sb.from('holdings').select('shares, coins(price)').eq('user_id', currentUser.id),
     sb.from('coins').select('price').eq('creator_id', currentUser.id)
   ]);
-  const holdingsValue = (holds || []).reduce((s, h) => s + Number(h.shares || 0) * Number(h.coins?.price || 0), 0);
+  const holdingsValue = (holds || []).reduce((s, h) => s + calcHoldingsValue(h.coins?.price, h.shares), 0);
   const createdValue = (myCoins || []).reduce((s, c) => s + Number(c.price || 0), 0);
   const portValue = holdingsValue + createdValue;
   const nw = Number(currentUser.cash || 0) + portValue;
@@ -1006,116 +1029,131 @@ async function freshCoin(coin) {
 }
 
 async function buy(coin, amount) {
-  if (!currentUser || currentUser.cash < amount) return $('#tradeMessage').textContent = 'Not enough cash.';
-  const prevOpenToday = Number(coin.today_open_price) || Number(coin.price) || 1;
-  coin = await freshCoin(coin);   // use the live price, not a stale one
-  const impact = calculateImpact(amount, coin.price);
-  const newPrice = coin.price * (1 + impact);
-  const todayPct = prevOpenToday > 0 ? ((newPrice - prevOpenToday) / prevOpenToday) * 100 : 0;
-  const shares = amount / coin.price;
-  const newCash = currentUser.cash - amount;
+  if (tradeInFlight) return;
+  amount = Math.round(Number(amount || 0) * 100) / 100;
+  if (!currentUser || amount < 0.01) return $('#tradeMessage').textContent = 'Minimum buy is $0.01.';
+  if (currentUser.cash < amount) return $('#tradeMessage').textContent = 'Not enough cash.';
 
-  const { error: cashErr } = await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
-  if (cashErr) return $('#tradeMessage').textContent = 'Cash error: ' + cashErr.message;
+  tradeInFlight = true;
+  try {
+    const prevOpenToday = Number(coin.today_open_price) || Number(coin.price) || 1;
+    coin = await freshCoin(coin);   // use the live price, not a stale one
+    const oldPrice = Math.max(Number(coin.price) || 1, 0.01);
+    const { newPrice, shares } = calcCurveBuy(oldPrice, amount);
+    const impact = (newPrice - oldPrice) / oldPrice;
+    const todayPct = prevOpenToday > 0 ? ((newPrice - prevOpenToday) / prevOpenToday) * 100 : 0;
+    const newCash = currentUser.cash - amount;
 
-  await sb.from('coins').update({ price: newPrice, change_pct: todayPct }).eq('id', coin.id);
+    const { error: cashErr } = await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
+    if (cashErr) return $('#tradeMessage').textContent = 'Cash error: ' + cashErr.message;
 
-  const { data: existing } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
-  const newShares = (existing?.shares || 0) + shares;
-  await sb.from('holdings').upsert({ user_id: currentUser.id, coin_id: coin.id, shares: newShares });
+    await sb.from('coins').update({ price: newPrice, change_pct: todayPct }).eq('id', coin.id);
 
-  const { error: tErr } = await sb.from('trades').insert({
-    coin_id: coin.id,
-    user_id: currentUser.id,
-    type: 'buy',
-    amount_usd: amount,
-    shares,
-    price_after: newPrice
-  });
-  if (tErr) toast('Trade log error: ' + tErr.message);
+    const { data: existing } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
+    const newShares = (existing?.shares || 0) + shares;
+    await sb.from('holdings').upsert({ user_id: currentUser.id, coin_id: coin.id, shares: newShares });
 
-  // Store local trade for immediate timeline bubble rendering
-  coin.localTrades = coin.localTrades || [];
-  coin.localTrades.unshift({
-    id: 'trd_' + Date.now(),
-    coin_id: coin.id,
-    user_id: currentUser.id,
-    type: 'buy',
-    amount_usd: amount,
-    shares,
-    price_after: newPrice,
-    created_at: new Date().toISOString(),
-    profiles: {
-      username: currentUser.username,
-      avatar_url: currentUser.avatar_url
-    }
-  });
+    const { error: tErr } = await sb.from('trades').insert({
+      coin_id: coin.id,
+      user_id: currentUser.id,
+      type: 'buy',
+      amount_usd: amount,
+      shares,
+      price_after: newPrice
+    });
+    if (tErr) toast('Trade log error: ' + tErr.message);
 
-  currentUser.cash = newCash;
-  coin.price = newPrice;
-  coin.today_open_price = prevOpenToday;
-  coin.change_pct = todayPct;
-  updateUIProfile();
-  await updateNetWorth();
-  toast(`Bought for ${money(amount)}! Price ${priceFmt(coin.price)} (+${(impact * 100).toFixed(impact < 0.1 ? 2 : 0)}%)`);
-  await loadCoins();
-  selectedCoin = coins.find(x => x.id === coin.id) || coin;
-  renderCoinDetail();
+    // Store local trade for immediate timeline bubble rendering
+    coin.localTrades = coin.localTrades || [];
+    coin.localTrades.unshift({
+      id: 'trd_' + Date.now(),
+      coin_id: coin.id,
+      user_id: currentUser.id,
+      type: 'buy',
+      amount_usd: amount,
+      shares,
+      price_after: newPrice,
+      created_at: new Date().toISOString(),
+      profiles: {
+        username: currentUser.username,
+        avatar_url: currentUser.avatar_url
+      }
+    });
+
+    currentUser.cash = newCash;
+    coin.price = newPrice;
+    coin.today_open_price = prevOpenToday;
+    coin.change_pct = todayPct;
+    updateUIProfile();
+    await updateNetWorth();
+    toast(`Bought for ${money(amount)}! Price ${priceFmt(coin.price)} (+${(impact * 100).toFixed(impact < 0.1 ? 2 : 0)}%)`);
+    await loadCoins();
+    selectedCoin = coins.find(x => x.id === coin.id) || coin;
+    renderCoinDetail();
+  } finally {
+    tradeInFlight = false;
+  }
 }
 
 async function sell(coin, sharesToSell) {
+  if (tradeInFlight) return;
   if (!currentUser || sharesToSell <= 0) return $('#tradeMessage').textContent = 'No shares to sell.';
-  const prevOpenToday = Number(coin.today_open_price) || Number(coin.price) || 1;
-  coin = await freshCoin(coin);
-  const { data: hold } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
-  const owned = hold?.shares || 0;
-  const sellShares = Math.min(sharesToSell, owned);
-  if (sellShares <= 0) return;
-  const proceeds = sellShares * coin.price;
-  const impact = calculateImpact(proceeds, coin.price) * 0.6;
-  const newPrice = Math.max(0.01, coin.price / (1 + impact));   // never drops below 0 / over 100%
-  const todayPct = prevOpenToday > 0 ? ((newPrice - prevOpenToday) / prevOpenToday) * 100 : 0;
-  const newCash = currentUser.cash + proceeds;
 
-  const remainingShares = owned - sellShares < 1e-8 ? 0 : owned - sellShares;
-  await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
-  await sb.from('coins').update({ price: newPrice, change_pct: todayPct }).eq('id', coin.id);
-  await sb.from('holdings').update({ shares: remainingShares }).eq('user_id', currentUser.id).eq('coin_id', coin.id);
-  await sb.from('trades').insert({
-    coin_id: coin.id,
-    user_id: currentUser.id,
-    type: 'sell',
-    amount_usd: proceeds,
-    shares: sellShares,
-    price_after: newPrice
-  });
+  tradeInFlight = true;
+  try {
+    const prevOpenToday = Number(coin.today_open_price) || Number(coin.price) || 1;
+    coin = await freshCoin(coin);
+    const { data: hold } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', coin.id).maybeSingle();
+    const owned = hold?.shares || 0;
+    const sellShares = Math.min(sharesToSell, owned);
+    if (sellShares <= 0) return;
 
-  coin.localTrades = coin.localTrades || [];
-  coin.localTrades.unshift({
-    id: 'trd_' + Date.now(),
-    coin_id: coin.id,
-    user_id: currentUser.id,
-    type: 'sell',
-    amount_usd: proceeds,
-    shares: sellShares,
-    price_after: newPrice,
-    created_at: new Date().toISOString(),
-    profiles: {
-      username: currentUser.username,
-      avatar_url: currentUser.avatar_url
-    }
-  });
+    const { newPrice, proceeds } = calcCurveSell(coin.price, sellShares);
+    const todayPct = prevOpenToday > 0 ? ((newPrice - prevOpenToday) / prevOpenToday) * 100 : 0;
+    const newCash = currentUser.cash + proceeds;
 
-  currentUser.cash = newCash;
-  coin.price = newPrice;
-  coin.today_open_price = prevOpenToday;
-  coin.change_pct = todayPct;
-  updateUIProfile();
-  await updateNetWorth();
-  toast(`Sold for ${money(proceeds)}`);
-  await loadCoins();
-  selectedCoin = coins.find(x => x.id === coin.id) || coin;
-  renderCoinDetail();
+    const remainingShares = owned - sellShares < 1e-8 ? 0 : owned - sellShares;
+    await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
+    await sb.from('coins').update({ price: newPrice, change_pct: todayPct }).eq('id', coin.id);
+    await sb.from('holdings').update({ shares: remainingShares }).eq('user_id', currentUser.id).eq('coin_id', coin.id);
+    await sb.from('trades').insert({
+      coin_id: coin.id,
+      user_id: currentUser.id,
+      type: 'sell',
+      amount_usd: proceeds,
+      shares: sellShares,
+      price_after: newPrice
+    });
+
+    coin.localTrades = coin.localTrades || [];
+    coin.localTrades.unshift({
+      id: 'trd_' + Date.now(),
+      coin_id: coin.id,
+      user_id: currentUser.id,
+      type: 'sell',
+      amount_usd: proceeds,
+      shares: sellShares,
+      price_after: newPrice,
+      created_at: new Date().toISOString(),
+      profiles: {
+        username: currentUser.username,
+        avatar_url: currentUser.avatar_url
+      }
+    });
+
+    currentUser.cash = newCash;
+    coin.price = newPrice;
+    coin.today_open_price = prevOpenToday;
+    coin.change_pct = todayPct;
+    updateUIProfile();
+    await updateNetWorth();
+    toast(`Sold for ${money(proceeds)}`);
+    await loadCoins();
+    selectedCoin = coins.find(x => x.id === coin.id) || coin;
+    renderCoinDetail();
+  } finally {
+    tradeInFlight = false;
+  }
 }
 
 function drawChartWithBubbles(coin, trades) {
@@ -1237,7 +1275,7 @@ async function renderMoney() {
   ]);
   const list = holds || [];
   const created = myCoins || [];
-  const holdingsValue = list.reduce((s, h) => s + Number(h.shares || 0) * Number(h.coins?.price || 0), 0);
+  const holdingsValue = list.reduce((s, h) => s + calcHoldingsValue(h.coins?.price, h.shares), 0);
   const createdValue = created.reduce((s, c) => s + Number(c.price || 0), 0);
   const value = holdingsValue + createdValue;
   const nw = Number(currentUser.cash || 0) + value;
@@ -1294,7 +1332,7 @@ async function renderMoney() {
   `).join('');
 
   const holdsHtml = list.map(h => {
-    const curVal = Number(h.shares || 0) * Number(h.coins?.price || 0);
+    const curVal = calcHoldingsValue(h.coins?.price, h.shares);
     const st = personalStats.get(h.coin_id);
     let pnlLine = '';
     if (st && (st.spent > 0 || st.sold > 0)) {
