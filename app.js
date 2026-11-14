@@ -6033,7 +6033,156 @@ function hasGrindTopic(question) {
   return false;
 }
 
-function generateLocalGrindBotReply(question, userHoldings = []) {
+function trySolveMathExpression(question) {
+  const raw = String(question || '').trim();
+  const pctMatch = raw.match(/(?:what(?:'s|\s+is)\s+)?(-?\d+(?:\.\d+)?)\s*%\s*of\s*(-?\d+(?:\.\d+)?)/i);
+  if (pctMatch) {
+    const p = Number(pctMatch[1]);
+    const base = Number(pctMatch[2]);
+    if (Number.isFinite(p) && Number.isFinite(base)) {
+      const res = (p / 100) * base;
+      return `**${p}%** of **${base}** = **${Number.isInteger(res) ? res : Number(res.toFixed(6))}**`;
+    }
+  }
+  const sqrtMatch = raw.match(/(?:square\s*root\s*of|sqrt)\s*\(?\s*(\d+(?:\.\d+)?)\s*\)?/i);
+  if (sqrtMatch) {
+    const v = Number(sqrtMatch[1]);
+    if (Number.isFinite(v) && v >= 0) {
+      const res = Math.sqrt(v);
+      return `√**${v}** = **${Number.isInteger(res) ? res : Number(res.toFixed(6))}**`;
+    }
+  }
+  let expr = raw
+    .replace(/^(what(?:'s|\s+is)|calculate|solve|compute|eval)\s+/i, '')
+    .replace(/[?=]+$/g, '')
+    .replace(/×/g, '*')
+    .replace(/÷/g, '/')
+    .trim();
+  if (!expr || !/^[\d\s+\-*/().^]+$/.test(expr) || !/\d/.test(expr) || !/[+\-*/^]/.test(expr)) {
+    return null;
+  }
+  const tokens = expr.match(/\d+(?:\.\d+)?|[+\-*/()^]/g);
+  if (!tokens) return null;
+  let pos = 0;
+  function parseExpr() {
+    let left = parseTerm();
+    while (tokens[pos] === '+' || tokens[pos] === '-') {
+      const op = tokens[pos++];
+      const right = parseTerm();
+      left = op === '+' ? left + right : left - right;
+    }
+    return left;
+  }
+  function parseTerm() {
+    let left = parsePower();
+    while (tokens[pos] === '*' || tokens[pos] === '/') {
+      const op = tokens[pos++];
+      const right = parsePower();
+      if (op === '/' && right === 0) throw new Error('Division by zero');
+      left = op === '*' ? left * right : left / right;
+    }
+    return left;
+  }
+  function parsePower() {
+    let base = parseFactor();
+    if (tokens[pos] === '^') {
+      pos++;
+      const exp = parsePower();
+      base = Math.pow(base, exp);
+    }
+    return base;
+  }
+  function parseFactor() {
+    if (tokens[pos] === '-') {
+      pos++;
+      return -parseFactor();
+    }
+    if (tokens[pos] === '+') {
+      pos++;
+      return parseFactor();
+    }
+    if (tokens[pos] === '(') {
+      pos++;
+      const val = parseExpr();
+      if (tokens[pos] !== ')') throw new Error('Mismatched parens');
+      pos++;
+      return val;
+    }
+    const num = Number(tokens[pos++]);
+    if (!Number.isFinite(num)) throw new Error('Invalid number');
+    return num;
+  }
+  try {
+    const val = parseExpr();
+    if (pos !== tokens.length || !Number.isFinite(val)) return null;
+    const formatted = Number.isInteger(val) ? String(val) : String(Number(val.toFixed(6)));
+    return `**${expr}** = **${formatted}**`;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function tryWikipediaLookup(question) {
+  const cleanQ = String(question || '')
+    .replace(/^(who\s+(?:is|was|are|were)|what\s+(?:is|was|are|were)|where\s+(?:is|are)|when\s+(?:did|was|were)|tell\s+me\s+about|explain|define|search\s+(?:for)?)\s+/i, '')
+    .replace(/[?!.]+$/g, '')
+    .trim();
+  if (!cleanQ || cleanQ.length < 2) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(cleanQ)}&srlimit=1&utf8=&format=json&origin=*`;
+    const sRes = await fetch(searchUrl, { signal: controller.signal });
+    if (!sRes.ok) return null;
+    const sData = await sRes.json();
+    const hit = sData?.query?.search?.[0];
+    if (!hit?.pageid) return null;
+
+    const extUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&exsentences=4&pageids=${hit.pageid}&format=json&origin=*`;
+    const eRes = await fetch(extUrl, { signal: controller.signal });
+    if (!eRes.ok) return null;
+    const eData = await eRes.json();
+    const page = eData?.query?.pages?.[String(hit.pageid)];
+    const extract = String(page?.extract || '').trim();
+    if (!extract) return null;
+    return `**${page.title || hit.title}**\n\n${extract}`;
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function generatePremiumGeneralReply(question) {
+  const q = String(question || '').trim();
+  const lower = q.toLowerCase();
+
+  const mathRes = trySolveMathExpression(q);
+  if (mathRes) return mathRes;
+
+  if (/\b(what\s+time|current\s+time|what\s+date|today'?s\s+date|what\s+day\s+is\s+it)\b/i.test(lower)) {
+    const now = new Date();
+    return `Right now it is **${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}** on **${now.toLocaleDateString([], { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}**.`;
+  }
+  if (/\b(flip\s+a?\s*coin|heads\s+or\s+tails)\b/i.test(lower)) {
+    return `Coin flip result: **${Math.random() < 0.5 ? 'Heads' : 'Tails'}**!`;
+  }
+  if (/\b(tell\s+me\s+a\s+joke|joke)\b/i.test(lower)) {
+    const jokes = [
+      `Why did the trader bring a ladder to the chart? Because they kept hearing about breaking resistance!`,
+      `Why don't programmers like nature? Too many bugs.`,
+      `Why did the math book look sad? Because it had too many problems.`
+    ];
+    return jokes[Math.floor(Math.random() * jokes.length)];
+  }
+
+  const wiki = await tryWikipediaLookup(q);
+  if (wiki) return wiki;
+
+  return `**GRIND-BOT Premium:** I looked for **"${q.slice(0, 80)}"**, and while the full AI model endpoint isn't responding from this host right now, Premium lets you ask anything — try a factual topic (e.g. _"What is quantum computing?"_), a math calculation, or any **GRIND** game & market question!`;
+}
+
+function generateLocalGrindBotReply(question, userHoldings = [], isPremium = false) {
   const q = String(question || '').trim();
   const cash = Number(currentUser?.cash || 0);
   const netWorth = Number(currentUser?.net_worth || cash);
@@ -6042,19 +6191,24 @@ function generateLocalGrindBotReply(question, userHoldings = []) {
   if (isGreetingOrSmallTalk(q) && !hasGrindTopic(q)) {
     const lowerG = q.toLowerCase();
     if (/^(thanks|thank\s+you|thx|ty|tack)/i.test(lowerG)) {
-      return `Anytime, **${uname}**! Let me know whenever you want me to scan the **${coins.length} active coins** or plan your next move.`;
+      return `Anytime, **${uname}**! Let me know whenever you want ${isPremium ? 'help with anything or a scan of' : 'me to scan'} the **${coins.length} active coins**.`;
     }
     if (/^(bye|goodbye|cya|see\s+ya)/i.test(lowerG)) {
       return `See you later, **${uname}**! Watch the **LIVE** feed and protect your profits.`;
     }
     if (/^(ok|okay|cool|nice|alright|got\s+it|sounds\s+good)/i.test(lowerG)) {
-      return `Ready whenever you are! Ask me how to raise your net worth, what coins to invest in, or any question about GRIND.`;
+      return isPremium
+        ? `Ready whenever you are! Since you have **Premium**, you can ask me **any question** on any topic or ask for GRIND market tactics.`
+        : `Ready whenever you are! Ask me how to raise your net worth, what coins to invest in, or any question about GRIND.`;
     }
-    return `Hey **${uname}**! I'm **GRIND-BOT** — watching **${coins.length} active coins** in the live market (your cash: **${money(cash)}**, Net Worth: **${money(netWorth)}**).\n\nI can chat a bit, and I'm ready to help with **all GRIND game & stock questions** — raising your net worth, coin picks, Daily Login, Battle Pass, or curve tactics!`;
+    return isPremium
+      ? `Hey **${uname}**! I'm **GRIND-BOT Premium** ★ — watching **${coins.length} active coins** (cash: **${money(cash)}**, Net Worth: **${money(netWorth)}**).\n\nBecause you have **Premium**, I can answer **any question** (general knowledge, math, coding, writing, or anything else) as well as all **GRIND** tactics!`
+      : `Hey **${uname}**! I'm **GRIND-BOT** — watching **${coins.length} active coins** in the live market (your cash: **${money(cash)}**, Net Worth: **${money(netWorth)}**).\n\nI can chat a bit, and I'm ready to help with **all GRIND game & stock questions** — raising your net worth, coin picks, Daily Login, Battle Pass, or curve tactics!`;
   }
 
   if (!hasGrindTopic(q)) {
-    return `I'm **GRIND-BOT** — you can say hi anytime, and I can help with **anything inside the GRIND game** (net worth, stock tactics, Battle Pass, Daily Login, Ads, creating coins, or market coins), though not outside topics.\n\nTry asking:\n• "How do I raise my net worth fast?"\n• "What coins should I invest in right now?"\n• "How does the bonding curve or Battle Pass work?"`;
+    if (isPremium) return null;
+    return `I'm **GRIND-BOT** — you can say hi anytime, and I can help with **anything inside the GRIND game** (net worth, stock tactics, Battle Pass, Daily Login, Ads, creating coins, or market coins).\n\nNon-GRIND questions require **Premium** tier!\n\nTry asking:\n• "How do I raise my net worth fast?"\n• "What coins should I invest in right now?"\n• "How does the bonding curve or Battle Pass work?"`;
   }
 
   const lower = q.toLowerCase();
@@ -6241,17 +6395,20 @@ function generateLocalGrindBotReply(question, userHoldings = []) {
 function renderGrindBotMessages() {
   const listEl = $('#grindBotMessages');
   if (!listEl) return;
+  const isPremium = getUserTier(currentUser) === 'premium';
   if (!grindBotHistory.length) {
     grindBotHistory = [
       {
         role: 'model',
-        text: `Welcome to **GRIND-BOT**! I can inspect **all ${coins.length} active coins** in the live GRIND market plus your holdings to suggest smart investments, bonding-curve entries, and exit timing.\n\nAsk me what to invest in right now!`
+        text: isPremium
+          ? `Welcome to **GRIND-BOT Premium ★**! With **Premium**, you can ask me **any question** (general knowledge, math, writing, or anything else) — plus I inspect **all ${coins.length} active coins** in GRIND to plan your moves!`
+          : `Welcome to **GRIND-BOT**! I can inspect **all ${coins.length} active coins** in the live GRIND market plus your holdings to suggest smart investments, net worth growth, and exit timing.\n\n_(PRO sticks to GRIND questions — **Premium** unlocks asking any question!)_`
       }
     ];
   }
   listEl.innerHTML = grindBotHistory.map(m => `
     <div class="grindbot-msg ${m.role === 'user' ? 'user' : 'bot'}">
-      <div class="grindbot-msg-label">${m.role === 'user' ? escapeHtml(currentUser?.username || 'You') : '⌘ GRIND-BOT'}</div>
+      <div class="grindbot-msg-label">${m.role === 'user' ? escapeHtml(currentUser?.username || 'You') : (isPremium ? '★ GRIND-BOT PREMIUM' : '⌘ GRIND-BOT')}</div>
       <div>${m.role === 'user' ? escapeHtml(m.text).replace(/\n/g, '<br>') : formatBotMessageHtml(m.text)}</div>
     </div>
   `).join('');
@@ -6260,9 +6417,23 @@ function renderGrindBotMessages() {
 
 function renderGrindBotPage() {
   if (!currentUser) return;
-  const hasPro = getUserTier(currentUser) === 'pro' || getUserTier(currentUser) === 'premium';
+  const tier = getUserTier(currentUser);
+  const hasPro = tier === 'pro' || tier === 'premium';
+  const isPremium = tier === 'premium';
   $('#grindBotLocked')?.classList.toggle('hidden', hasPro);
   $('#grindBotApp')?.classList.toggle('hidden', !hasPro);
+  const subEl = $('#grindBotSubtitle');
+  if (subEl) {
+    subEl.textContent = isPremium
+      ? '★ PREMIUM UNLOCKED · Ask Anything + Live Market Aware'
+      : 'All GRIND Questions & Tactics · Live Market Aware (Upgrade to Premium for Any Topic)';
+  }
+  const inputEl = $('#grindBotInput');
+  if (inputEl) {
+    inputEl.placeholder = isPremium
+      ? 'Ask GRIND-BOT anything — any question, GRIND tactics, or market analysis...'
+      : 'Ask GRIND-BOT about net worth, coins, Battle Pass, or tactics...';
+  }
   if (hasPro) renderGrindBotMessages();
 }
 
@@ -6288,9 +6459,17 @@ async function tryGrindBotEndpoint(url, payload, timeoutMs = 8000) {
   }
 }
 
+async function resolveLocalGrindBotFallback(question, userHoldings, isPremium) {
+  const local = generateLocalGrindBotReply(question, userHoldings, isPremium);
+  if (local !== null) return local;
+  return await generatePremiumGeneralReply(question);
+}
+
 async function sendGrindBotPrompt(text) {
   if (!currentUser || grindBotSending) return;
-  const hasPro = getUserTier(currentUser) === 'pro' || getUserTier(currentUser) === 'premium';
+  const tier = getUserTier(currentUser);
+  const hasPro = tier === 'pro' || tier === 'premium';
+  const isPremium = tier === 'premium';
   if (!hasPro) {
     toast('GRIND-BOT requires PRO or Premium tier.');
     return;
@@ -6300,7 +6479,7 @@ async function sendGrindBotPrompt(text) {
 
   const historyToSend = grindBotHistory.slice(-10);
   grindBotHistory.push({ role: 'user', text: clean });
-  grindBotHistory.push({ role: 'model', text: 'Scanning all live GRIND coins & calculating tactics...' });
+  grindBotHistory.push({ role: 'model', text: isPremium ? 'Thinking...' : 'Scanning all live GRIND coins & calculating tactics...' });
   grindBotSending = true;
   if ($('#grindBotInput')) $('#grindBotInput').value = '';
   if ($('#grindBotSendBtn')) $('#grindBotSendBtn').disabled = true;
@@ -6314,7 +6493,8 @@ async function sendGrindBotPrompt(text) {
       message: clean,
       history: historyToSend,
       marketContext,
-      isProOrHigher: true
+      isProOrHigher: true,
+      isPremium
     };
 
     const isGithubPages = (window.location.hostname || '').endsWith('github.io');
@@ -6326,7 +6506,7 @@ async function sendGrindBotPrompt(text) {
       reply = await tryGrindBotEndpoint(GRIND_BOT_REMOTE_URL, payload, 5000);
     }
     if (!reply) {
-      reply = generateLocalGrindBotReply(clean, userHoldings);
+      reply = await resolveLocalGrindBotFallback(clean, userHoldings, isPremium);
     }
 
     grindBotHistory[grindBotHistory.length - 1] = {
@@ -6336,7 +6516,7 @@ async function sendGrindBotPrompt(text) {
   } catch (err) {
     grindBotHistory[grindBotHistory.length - 1] = {
       role: 'model',
-      text: generateLocalGrindBotReply(clean, [])
+      text: await resolveLocalGrindBotFallback(clean, [], isPremium)
     };
   } finally {
     grindBotSending = false;
