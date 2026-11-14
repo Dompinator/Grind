@@ -5718,29 +5718,51 @@ All Active Market Coins (${coins.length} total):
 ${allCoinsSummary || 'No active coins yet.'}`;
 }
 
-function isOffTopicForGrindBot(question) {
+function isGreetingOrSmallTalk(question) {
+  const q = String(question || '').trim().toLowerCase().replace(/[!?.]+$/g, '');
+  if (!q) return false;
+  return /^(hi|hello|hey|yo|sup|hiya|heya|howdy|greetings|hej|tja|tjena|hallå|mors|god\s*(morgon|kväll|dag)|good\s*(morning|afternoon|evening)|what'?s\s*up|wassup|how\s+are\s+you(\s+doing)?|hur\s+mår\s+du|läget|thanks|thank\s+you|thx|ty|tack|ok|okay|cool|nice|alright|got\s+it|sounds\s+good|bye|goodbye|cya|see\s+ya|who\s+are\s+you|what\s+can\s+you\s+do|help)$/i.test(q);
+}
+
+function hasGrindTopic(question) {
   const q = String(question || '').toLowerCase();
-  const grindWords = /\b(grind|coin|coins|currency|currencies|token|ticker|stock|stocks|market|trade|trading|invest|buy|sell|hold|portfolio|net worth|cash|price|chart|curve|trending|cheapest|expensive|featured|watchlist|profit|pnl|live|pass|pro|premium|coinbase|divest|dip|pump|volume|momentum|aktie|aktier|köp|köpa|sälj|sälja|investera|valuta|marknad|tips|bästa|pengar)\b/i;
-  if (grindWords.test(q)) return false;
-  if (coins.some(c => q.includes((c.name || '').toLowerCase()) || q.includes((c.ticker || '').toLowerCase()))) {
-    return false;
+  const grindWords = /\b(grind|coin|coins|currency|currencies|token|ticker|stock|stocks|market|trade|trading|invest|investing|investment|buy|sell|hold|holding|holdings|portfolio|net worth|cash|money|price|chart|curve|trending|cheapest|expensive|featured|watchlist|profit|pnl|live|pass|pro|premium|divest|dip|pump|volume|momentum|strategy|tactic|tactics|recommend|suggest|best|should i|aktie|aktier|köp|köpa|sälj|sälja|investera|valuta|marknad|tips|bästa|pengar)\b/i;
+  if (grindWords.test(q)) return true;
+  if (coins.some(c => {
+    const nm = (c.name || '').toLowerCase();
+    const tk = (c.ticker || '').toLowerCase();
+    return (nm.length >= 3 && q.includes(nm)) || (tk && (q.includes('$' + tk) || new RegExp(`\\b${tk.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(q)));
+  })) {
+    return true;
   }
-  const offTopicWords = /\b(recipe|cook|weather|homework|essay|poem|python|javascript|java|html|css|c\+\+|translate|president|history|geography|movie|song|bitcoin|ethereum|nasdaq|nyse|s&p\s*500|tesla|apple|nvidia)\b/i;
-  if (offTopicWords.test(q)) return true;
-  // Short conversational check-ins vs clearly unrelated queries
-  if (q.split(/\s+/).length >= 5) return true;
   return false;
 }
 
 function generateLocalGrindBotReply(question, userHoldings = []) {
   const q = String(question || '').trim();
-  if (isOffTopicForGrindBot(q)) {
-    return `I'm **GRIND-BOT** — I can only help with **stock & market trading tactics inside the GRIND game**.\n\nTry asking:\n• "What coins should I invest in right now?"\n• "Show me all coins in the market"\n• "Should I sell any of my holdings?"`;
+  const cash = Number(currentUser?.cash || 0);
+  const netWorth = Number(currentUser?.net_worth || cash);
+  const uname = currentUser?.username || 'Trader';
+
+  if (isGreetingOrSmallTalk(q) && !hasGrindTopic(q)) {
+    const lowerG = q.toLowerCase();
+    if (/^(thanks|thank\s+you|thx|ty|tack)/i.test(lowerG)) {
+      return `Anytime, **${uname}**! Let me know whenever you want me to scan the **${coins.length} active coins** or plan your next move.`;
+    }
+    if (/^(bye|goodbye|cya|see\s+ya)/i.test(lowerG)) {
+      return `See you later, **${uname}**! Watch the **LIVE** feed and protect your profits.`;
+    }
+    if (/^(ok|okay|cool|nice|alright|got\s+it|sounds\s+good)/i.test(lowerG)) {
+      return `Ready whenever you are! Ask me what coins to invest in, how to size a buy, or when to take profits.`;
+    }
+    return `Hey **${uname}**! I'm **GRIND-BOT** — watching **${coins.length} active coins** in the live market (your cash: **${money(cash)}**).\n\nI can chat a bit, and I'm always ready to help with **GRIND stock & market tactics** — ask me what looks smart to invest in right now!`;
+  }
+
+  if (!hasGrindTopic(q)) {
+    return `I'm **GRIND-BOT** — you can say hi anytime, but I can **only** answer questions about **stock & market tactics inside the GRIND game**.\n\nTry asking:\n• "What coins should I invest in right now?"\n• "Show me all coins in the market"\n• "Should I sell any of my holdings?"`;
   }
 
   const lower = q.toLowerCase();
-  const cash = Number(currentUser?.cash || 0);
-  const netWorth = Number(currentUser?.net_worth || cash);
   const featSet = new Set((featuredCoinIdsCache || []).filter(Boolean).map(String));
 
   if (!coins.length) {
