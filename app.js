@@ -4373,6 +4373,8 @@ async function fetchReportsAndPending() {
         rowId: r.id,
         id: String(parsed.id),
         type: parsed.type === 'bug' ? 'bug' : 'player',
+        source: parsed.source || null,
+        category: parsed.category || null,
         targetId: parsed.target_id || null,
         targetName: parsed.target_name || null,
         title: parsed.title || null,
@@ -4532,15 +4534,19 @@ function renderReportsList() {
 
   listEl.innerHTML = filtered.map(r => {
     const isPlayer = r.type === 'player';
-    const subjectLine = isPlayer
-      ? `Reported player: <strong${r.targetId ? ` class="profile-link" data-profile="${escapeHtml(r.targetId)}"` : ''}>${escapeHtml(r.targetName || 'Unknown')}</strong>`
-      : `Bug / Exploit: <strong>${escapeHtml(r.title || 'Bug Report')}</strong>`;
+    const isBotAuto = r.source === 'grind_bot_auto';
+    const subjectLine = isBotAuto
+      ? `Auto-flagged account: <strong${r.targetId ? ` class="profile-link" data-profile="${escapeHtml(r.targetId)}"` : ''}>${escapeHtml(r.targetName || r.reporterName || 'Unknown')}</strong> · <span style="color:#fca5a5;">${escapeHtml(r.category || 'Violation')}</span>`
+      : (isPlayer
+          ? `Reported player: <strong${r.targetId ? ` class="profile-link" data-profile="${escapeHtml(r.targetId)}"` : ''}>${escapeHtml(r.targetName || 'Unknown')}</strong>`
+          : `Bug / Exploit: <strong>${escapeHtml(r.title || 'Bug Report')}</strong>`);
     return `
-      <div class="report-card">
+      <div class="report-card"${isBotAuto ? ' style="border-color:rgba(248,113,113,.55);background:linear-gradient(135deg,rgba(248,113,113,.08) 0%,var(--panel) 75%);"' : ''}>
         <div class="report-card-head">
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span class="report-tag ${isPlayer ? 'player' : 'bug'}">${isPlayer ? 'Player Report' : 'Bug / Exploit'}</span>
-            <span class="muted tiny">from <strong class="profile-link" data-profile="${escapeHtml(r.reporterId)}">${escapeHtml(r.reporterName)}${tierBadgeHtml(r.reporterProfile)}</strong></span>
+            ${isBotAuto ? `<span class="report-tag" style="background:rgba(248,113,113,.2);color:#fca5a5;border:1px solid rgba(248,113,113,.55);">⌘ GRIND-BOT AUTO</span>` : ''}
+            <span class="muted tiny">from <strong class="profile-link" data-profile="${escapeHtml(r.reporterId)}">${escapeHtml(isBotAuto ? 'GRIND-BOT (' + r.reporterName + ')' : r.reporterName)}${tierBadgeHtml(r.reporterProfile)}</strong></span>
           </div>
           <span class="muted tiny">${escapeHtml(formatRelativeTime(r.ts))}</span>
         </div>
@@ -6437,6 +6443,42 @@ function renderGrindBotPage() {
   if (hasPro) renderGrindBotMessages();
 }
 
+function detectClientGrindBotViolation(text) {
+  const s = String(text || '').toLowerCase();
+  if (/\b(child\s*porn|cp\b|csam|underage\s*sex|loli|shota)\b/i.test(s)) return 'Illegal CSAM Content';
+  if (/\b(how\s+to\s+(?:kill\s+myself|commit\s+suicide)|suicide\s+methods?|ways\s+to\s+self[\s-]?harm)\b/i.test(s)) return 'Self-Harm / Suicide';
+  if (/\b(how\s+to\s+(?:make|build)\s+(?:a\s+)?(?:bomb|explosive|pipe\s*bomb|meth|cocaine|fentanyl|ricin|poison)|how\s+to\s+(?:murder|assassinate|shoot\s+up))\b/i.test(s)) return 'Illegal Weapons / Violence / Drugs';
+  if (/\b(how\s+to\s+(?:hack|ddos|dox|phish|steal\s+accounts?|crack\s+passwords?|bypass\s+supabase|sql\s+injection|exploit\s+grind|dupe\s+cash|cheat\s+coins?)|ransomware|keylogger|carding|stolen\s+credit\s+cards?)\b/i.test(s)) return 'Hacking / Exploit / Fraud';
+  if (/\b(nigger|nigga|faggot|kike|retard|kys|kill\s+yourself)\b/i.test(s)) return 'Hate Speech / Severe Harassment';
+  return null;
+}
+
+async function submitGrindBotAutoReport(promptText, category = 'Policy Violation') {
+  if (!sb || !currentUser) return false;
+  try {
+    const payload = {
+      id: 'rep_bot_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+      type: 'player',
+      source: 'grind_bot_auto',
+      category: String(category || 'Policy Violation').slice(0, 80),
+      target_id: currentUser.id,
+      target_name: currentUser.username || 'Unknown',
+      title: `GRIND-BOT Auto-Report: ${category}`,
+      details: `[GRIND-BOT AUTO-REPORT · ${category}]\nReported Account: ${currentUser.username || 'Unknown'} (${tierLabel(currentUser)})\nFlagged Message:\n"${String(promptText || '').slice(0, 800)}"`,
+      ts: Date.now()
+    };
+    const { error } = await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: '__REPORT__:' + JSON.stringify(payload),
+      status: 'denied'
+    });
+    if (!error && isDompinator()) updateNotificationsBadge();
+    return !error;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function tryGrindBotEndpoint(url, payload, timeoutMs = 8000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -6451,7 +6493,11 @@ async function tryGrindBotEndpoint(url, payload, timeoutMs = 8000) {
     if (!contentType.includes('application/json')) return null;
     const data = await res.json();
     if (!res.ok || !data?.reply) return null;
-    return data.reply;
+    return {
+      reply: data.reply,
+      flagged: Boolean(data.flagged),
+      flagReason: data.flagReason || null
+    };
   } catch (e) {
     return null;
   } finally {
@@ -6486,6 +6532,16 @@ async function sendGrindBotPrompt(text) {
   renderGrindBotMessages();
 
   try {
+    const localViolation = detectClientGrindBotViolation(clean);
+    if (localViolation) {
+      await submitGrindBotAutoReport(clean, localViolation);
+      grindBotHistory[grindBotHistory.length - 1] = {
+        role: 'model',
+        text: `⚠️ This message violates GRIND safety rules (**${localViolation}**) and has been automatically reported to **Dompinator**.`
+      };
+      return;
+    }
+
     await loadCoins();
     const userHoldings = await fetchGrindBotUserHoldings();
     const marketContext = buildGrindBotMarketContext(userHoldings);
@@ -6498,17 +6554,19 @@ async function sendGrindBotPrompt(text) {
     };
 
     const isGithubPages = (window.location.hostname || '').endsWith('github.io');
-    let reply = null;
+    let endpointResult = null;
     if (!isGithubPages) {
-      reply = await tryGrindBotEndpoint('/api/grind-bot', payload, 9000);
+      endpointResult = await tryGrindBotEndpoint('/api/grind-bot', payload, 9000);
     }
-    if (!reply) {
-      reply = await tryGrindBotEndpoint(GRIND_BOT_REMOTE_URL, payload, 5000);
-    }
-    if (!reply) {
-      reply = await resolveLocalGrindBotFallback(clean, userHoldings, isPremium);
+    if (!endpointResult) {
+      endpointResult = await tryGrindBotEndpoint(GRIND_BOT_REMOTE_URL, payload, 5000);
     }
 
+    if (endpointResult?.flagged) {
+      await submitGrindBotAutoReport(clean, endpointResult.flagReason || 'Policy Violation');
+    }
+
+    const reply = endpointResult?.reply || await resolveLocalGrindBotFallback(clean, userHoldings, isPremium);
     grindBotHistory[grindBotHistory.length - 1] = {
       role: 'model',
       text: reply
