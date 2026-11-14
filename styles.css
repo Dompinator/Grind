@@ -413,6 +413,84 @@ label input:focus, label textarea:focus, label select:focus { outline: none; bor
 .remove-prem-btn { background: rgba(56, 189, 248, .14); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, .45); border-radius: 10px; padding: 8px 13px; font-size: 12px; font-weight: 700; cursor: pointer; transition: .15s; }
 .remove-prem-btn:hover { background: rgba(56, 189, 248, .26); color: white; }
 
+/* Notifications update checkboxes */
+.notif-update-boxes { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.notif-update-box-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #120e1c; border: 1px solid var(--line); border-radius: 10px; padding: 8px 11px; font-size: 13px; }
+.notif-update-box-left { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; color: #f5f0ff; }
+.notif-update-box-check { color: var(--purple); font-size: 15px; line-height: 1; flex-shrink: 0; }
+
+/* Featured Coins (top of Feed) */
+.featured-panel { background: linear-gradient(135deg, rgba(168, 85, 247, .12) 0%, #161222 70%); border: 1px solid rgba(192, 132, 252, .4); border-radius: 18px; padding: 18px 20px; margin-bottom: 22px; }
+.featured-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.featured-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.featured-card { position: relative; background: #120e1c; border: 1px solid rgba(192, 132, 252, .42); border-radius: 15px; padding: 15px; cursor: pointer; transition: all .18s; }
+.featured-card:hover { border-color: var(--purple); transform: translateY(-2px); box-shadow: 0 10px 24px rgba(0,0,0,.35); }
+.featured-slot-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; font-weight: 800; letter-spacing: .6px; text-transform: uppercase; color: #e9d5ff; background: rgba(192, 132, 252, .16); border: 1px solid rgba(192, 132, 252, .4); border-radius: 999px; padding: 2px 8px; margin-bottom: 10px; }
+.featured-empty-slot { border: 1px dashed var(--line); border-radius: 15px; padding: 24px 14px; text-align: center; color: var(--muted); font-size: 13px; display: flex; align-items: center; justify-content: center; background: rgba(18, 14, 28, .5); }
+.featured-slot-boxes { display: flex; flex-direction: column; gap: 10px; }
+.featured-slot-box { background: #120e1c; border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+.featured-slot-box label { margin: 0; }
+
+/* Sidebar Pass button above mini-profile & GRIND-BOT tag */
+.pass-side-btn { border: 1px solid rgba(192, 132, 252, .38); background: rgba(192, 132, 252, .1); color: #f5f0ff; margin-bottom: 12px; }
+.pass-side-btn:hover, .pass-side-btn.active { border-color: var(--purple); background: linear-gradient(110deg, rgba(192, 132, 252, .25), rgba(124, 58, 237, .28)); color: white; }
+.nav-tier-chip { margin-left: auto; font-size: 10px !important; font-weight: 800; padding: 2px 6px; border-radius: 999px; background: rgba(251, 191, 36, .16); color: #fbbf24; border: 1px solid rgba(251, 191, 36, .45); letter-spacing: .4px; }
+.nav-tier-chip.unlocked { background: rgba(52, 211, 153, .16); color: var(--green); border-color: rgba(52, 211, 153, .45); }
+
+/* Battle Pass */
+.pass-hero-card { background: linear-gradient(135deg, #271b42 0%, #161222 100%); border: 1px solid rgba(192, 132, 252, .45); border-radius: 18px; padding: 22px; margin-bottom: 18px; }
+.pass-hero-top { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.pass-time-pill { background: #120e1c; border: 1px solid var(--line); border-radius: 14px; padding: 10px 16px; text-align: right; min-width: 145px; }
+.pass-time-pill strong { display: block; font-size: 20px; font-weight: 800; margin-top: 2px; color: #e9d5ff; }
+.pass-progress-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.pass-progress-track { width: 100%; height: 11px; background: #120e1c; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.pass-progress-fill { height: 100%; background: linear-gradient(90deg, var(--purple), #34d399); border-radius: 999px; transition: width .35s ease; }
+
+.pass-livepost-card { border-color: rgba(56, 189, 248, .5); background: linear-gradient(135deg, rgba(56, 189, 248, .08) 0%, var(--panel) 70%); margin-bottom: 18px; }
+.pass-tiers-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(195px, 1fr)); gap: 12px; }
+.pass-tier-card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 15px; display: flex; flex-direction: column; gap: 8px; justify-content: space-between; transition: .15s; }
+.pass-tier-card.unlocked { border-color: rgba(192, 132, 252, .65); background: linear-gradient(180deg, rgba(192, 132, 252, .1) 0%, var(--panel) 75%); }
+.pass-tier-card.claimed { border-color: rgba(52, 211, 153, .45); opacity: .86; }
+.pass-tier-card.special { border-color: rgba(251, 191, 36, .55); }
+.pass-tier-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pass-tier-num { font-size: 11px; font-weight: 800; color: var(--purple); letter-spacing: .7px; text-transform: uppercase; }
+.pass-tier-req { font-size: 11px; color: var(--muted); font-weight: 700; }
+.pass-tier-reward { font-size: 20px; font-weight: 800; margin: 2px 0; }
+.pass-tier-desc { font-size: 12px; color: var(--muted); line-height: 1.4; min-height: 32px; }
+.pass-claim-btn { width: 100%; border-radius: 10px; padding: 9px 12px; font-weight: 700; font-size: 12px; border: 1px solid var(--line); background: #201a2d; color: var(--muted); cursor: not-allowed; transition: .15s; }
+.pass-claim-btn.ready { background: linear-gradient(110deg, #34d399, #10b981); color: #052e16; border: 0; cursor: pointer; font-weight: 800; }
+.pass-claim-btn.ready:hover { filter: brightness(1.08); }
+.pass-claim-btn.claimed { background: rgba(52, 211, 153, .12); color: var(--green); border-color: rgba(52, 211, 153, .35); }
+
+.pass-season-admin-card { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; background: linear-gradient(135deg, rgba(168, 85, 247, .14) 0%, var(--panel) 80%); border: 1px solid rgba(192, 132, 252, .45); border-radius: 18px; padding: 18px 20px; margin-bottom: 24px; }
+
+/* Coin Live Post highlight in LIVE feed */
+.live-row.live-post-highlight { border-color: rgba(56, 189, 248, .55); background: linear-gradient(135deg, rgba(56, 189, 248, .09) 0%, var(--panel) 70%); }
+.live-badge.livepost { background: rgba(56, 189, 248, .18); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, .5); }
+.live-post-msg { margin-top: 6px; background: #120e1c; border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; font-size: 13px; color: #f5f0ff; line-height: 1.45; }
+
+/* GRIND-BOT AI Chat */
+.grindbot-locked { text-align: center; padding: 42px 24px; }
+.grindbot-shell { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 18px; display: flex; flex-direction: column; gap: 14px; min-height: 540px; max-height: 74vh; }
+.grindbot-topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.grindbot-avatar { width: 38px; height: 38px; border-radius: 12px; background: linear-gradient(135deg, var(--purple), #6d28d9); display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 800; color: white; flex-shrink: 0; }
+.grindbot-prompts { display: flex; gap: 8px; flex-wrap: wrap; }
+.grindbot-chip { font-size: 12px; padding: 7px 12px; }
+.grindbot-messages { flex: 1; min-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 6px 4px; }
+.grindbot-msg { max-width: 84%; padding: 12px 15px; border-radius: 14px; font-size: 14px; line-height: 1.55; word-break: break-word; }
+.grindbot-msg.user { align-self: flex-end; background: linear-gradient(110deg, #7c3aed, #6d28d9); color: white; border-bottom-right-radius: 4px; }
+.grindbot-msg.bot { align-self: flex-start; background: #120e1c; border: 1px solid var(--line); color: #f5f0ff; border-bottom-left-radius: 4px; }
+.grindbot-msg-label { font-size: 10px; font-weight: 800; letter-spacing: .7px; text-transform: uppercase; color: var(--purple); margin-bottom: 4px; }
+.grindbot-composer { display: flex; gap: 10px; align-items: center; padding-top: 10px; border-top: 1px solid var(--line); }
+.grindbot-composer input { flex: 1; background: #120e1c; border: 1px solid var(--line); border-radius: 12px; padding: 13px 15px; color: white; font-size: 14px; }
+.grindbot-composer input:focus { outline: none; border-color: var(--purple); }
+
+@media (max-width: 850px) {
+  .featured-grid { grid-template-columns: 1fr; }
+  .nav-tier-chip { display: none !important; }
+  .grindbot-msg { max-width: 94%; }
+}
+
 
 
 

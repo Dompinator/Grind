@@ -41,6 +41,36 @@ let watchlistIds = new Set();
 let dailyStateCache = null;
 let lastCoinsDateKey = '';
 let tradeInFlight = false;
+let featuredCoinIdsCache = [];
+let passTickerInterval = null;
+let lastPassRemoteSyncAt = 0;
+let passState = { season: 1, seconds: 0, claimedTiers: new Set(), livePostUsed: false };
+let grindBotHistory = [];
+let grindBotSending = false;
+
+const PASS_STEP_SECONDS = 300; // 5 minutes between every reward
+const PASS_REWARDS = [
+  { tier: 1, minutes: 5, type: 'cash', amount: 5, title: '$5', desc: 'Instant $5.00 cash bonus' },
+  { tier: 2, minutes: 10, type: 'cash', amount: 7, title: '$7', desc: 'Instant $7.00 cash bonus' },
+  { tier: 3, minutes: 15, type: 'cash', amount: 10, title: '$10', desc: 'Instant $10.00 cash bonus' },
+  { tier: 4, minutes: 20, type: 'cash', amount: 12, title: '$12', desc: 'Instant $12.00 cash bonus' },
+  { tier: 5, minutes: 25, type: 'cash', amount: 15, title: '$15', desc: 'Instant $15.00 cash bonus' },
+  { tier: 6, minutes: 30, type: 'cash', amount: 20, title: '$20', desc: 'Instant $20.00 cash bonus' },
+  { tier: 7, minutes: 35, type: 'cash', amount: 25, title: '$25', desc: 'Instant $25.00 cash bonus' },
+  { tier: 8, minutes: 40, type: 'cash', amount: 30, title: '$30', desc: 'Instant $30.00 cash bonus' },
+  { tier: 9, minutes: 45, type: 'cash', amount: 35, title: '$35', desc: 'Instant $35.00 cash bonus' },
+  { tier: 10, minutes: 50, type: 'coin_live_post', title: 'Coin Live Post', desc: 'Pick any coin & post a custom shoutout for everyone in LIVE' },
+  { tier: 11, minutes: 55, type: 'cash', amount: 40, title: '$40', desc: 'Instant $40.00 cash bonus' },
+  { tier: 12, minutes: 60, type: 'cash', amount: 45, title: '$45', desc: 'Instant $45.00 cash bonus' },
+  { tier: 13, minutes: 65, type: 'cash', amount: 50, title: '$50', desc: 'Instant $50.00 cash bonus' },
+  { tier: 14, minutes: 70, type: 'cash', amount: 50, title: '$50', desc: 'Instant $50.00 cash bonus' },
+  { tier: 15, minutes: 75, type: 'cash', amount: 50, title: '$50', desc: 'Instant $50.00 cash bonus' },
+  { tier: 16, minutes: 80, type: 'cash', amount: 50, title: '$50', desc: 'Instant $50.00 cash bonus' },
+  { tier: 17, minutes: 85, type: 'cash', amount: 50, title: '$50', desc: 'Instant $50.00 cash bonus' },
+  { tier: 18, minutes: 90, type: 'cash', amount: 55, title: '$55', desc: 'Instant $55.00 cash bonus' },
+  { tier: 19, minutes: 95, type: 'cash', amount: 60, title: '$60', desc: 'Instant $60.00 cash bonus' },
+  { tier: 20, minutes: 100, type: 'pro', title: 'Free PRO upgrade', desc: 'Unlock Gold Crown PRO tier, 2 coins max, 2X daily & GRIND-BOT' }
+];
 
 const DAILY_REWARDS = [5, 5, 10, 12, 13, 15, 'PRO'];
 const GOLD_CROWN_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 18h18v2H3v-2zm0-2L1 6l5.5 4.5L12 4l5.5 6.5L23 6l-2 10H3z"/></svg>`;
@@ -1019,13 +1049,24 @@ function updateUIProfile() {
   $('#navNotifications')?.classList.remove('hidden');
   $('#navAdmin')?.classList.toggle('hidden', !isDompinator());
   $('#deleteOwnAccountSection')?.classList.toggle('hidden', isDompinator());
+  const gbTag = $('#navGrindBotTag');
+  if (gbTag) {
+    const hasPro = getUserTier(currentUser) === 'pro' || getUserTier(currentUser) === 'premium';
+    gbTag.textContent = hasPro ? 'READY' : 'PRO+';
+    gbTag.classList.toggle('unlocked', hasPro);
+  }
   updatePremiumSection();
   updateNotificationsBadge();
+  updatePassNavBadge();
+  if (currentPage === 'grindbot') renderGrindBotPage();
 }
 
 function enterApp() {
   $('#authView').classList.add('hidden');
   $('#appView').classList.remove('hidden');
+  loadPassState().then(() => {
+    if (currentPage === 'pass') renderPassPage();
+  });
   showPage('feed');
   startRealtime();
   loadCoins();
@@ -1035,30 +1076,44 @@ function enterApp() {
 
 function startTimeTracking() {
   sessionStart = Date.now();
+  lastPassRemoteSyncAt = Date.now();
   if (timeInterval) clearInterval(timeInterval);
+  if (passTickerInterval) clearInterval(passTickerInterval);
   timeInterval = setInterval(async () => {
     if (!currentUser || !sb) return;
     const add = 30; // seconds
     const newTime = (currentUser.time_played || 0) + add;
     currentUser.time_played = newTime;
     await sb.from('profiles').update({ time_played: newTime }).eq('id', currentUser.id);
+    incrementPassTime(add);
   }, 30000);
+  passTickerInterval = setInterval(() => {
+    if (!currentUser || currentUser.is_banned) return;
+    if (currentPage === 'pass') updatePassLiveClock();
+  }, 1000);
   window.addEventListener('beforeunload', saveTimeOnExit);
 }
 
 async function saveTimeOnExit() {
   if (!currentUser || !sessionStart || !sb) return;
-  const extra = Math.floor((Date.now() - sessionStart) / 1000);
+  const now = Date.now();
+  const extra = Math.floor((now - sessionStart) / 1000);
   if (extra > 5) {
     await sb.from('profiles').update({ time_played: (currentUser.time_played || 0) + extra }).eq('id', currentUser.id);
+    await incrementPassTime(extra, true);
+    sessionStart = now;
+  } else {
+    await syncPassTimeToRemote(true);
   }
 }
 
 $('#logoutBtn')?.addEventListener('click', async () => {
   await saveTimeOnExit();
   if (timeInterval) clearInterval(timeInterval);
+  if (passTickerInterval) clearInterval(passTickerInterval);
   if (sb) await sb.auth.signOut();
   currentUser = null;
+  grindBotHistory = [];
   if (realtimeChannel && sb) sb.removeChannel(realtimeChannel);
   $('#appView').classList.add('hidden');
   $('#tosModal')?.classList.add('hidden');
@@ -1066,6 +1121,7 @@ $('#logoutBtn')?.addEventListener('click', async () => {
   $('#warnModal')?.classList.add('hidden');
   $('#dailyModal')?.classList.add('hidden');
   $('#profileModal')?.classList.add('hidden');
+  $('#featuredEditModal')?.classList.add('hidden');
   $('#authView').classList.remove('hidden');
   setAuthMode('login');
 });
@@ -1087,6 +1143,8 @@ function showPage(page) {
     money: 'Your money',
     global: 'Global leaderboards',
     ads: 'Ads',
+    grindbot: 'GRIND-BOT',
+    pass: `Season ${passState.season || 1} Pass`,
     account: 'Account settings',
     report: 'Report player or bug',
     notifications: 'Notifications',
@@ -1099,6 +1157,8 @@ function showPage(page) {
   if (page === 'money') renderMoney();
   if (page === 'global') renderLeaderboard();
   if (page === 'ads' && !(wasAds && adLocked)) startAdsPage();
+  if (page === 'grindbot') renderGrindBotPage();
+  if (page === 'pass') loadPassState().then(() => renderPassPage());
   if (page === 'account') updatePremiumSection();
   if (page === 'report') loadReportPage();
   if (page === 'notifications') loadRequests();
@@ -1175,9 +1235,169 @@ async function loadProUserIds() {
 }
 
 // ---------- Coins & Feed ----------
+async function fetchFeaturedCoins() {
+  if (!sb) return [];
+  try {
+    const srvResetTs = adminModStateCache.serverResetTs || 0;
+    let q = sb.from('premium_requests')
+      .select('reason, created_at, profiles(username)')
+      .like('reason', '__FEATURED_COINS__:%')
+      .order('created_at', { ascending: false })
+      .limit(20);
+    if (srvResetTs > 0) {
+      q = q.gt('created_at', new Date(srvResetTs).toISOString());
+    }
+    const { data } = await q;
+    const latest = (data || []).find(r => (r.profiles?.username || '').toLowerCase() === 'dompinator');
+    if (latest?.reason) {
+      const parsed = JSON.parse(String(latest.reason).slice('__FEATURED_COINS__:'.length));
+      if (Array.isArray(parsed?.coinIds)) {
+        featuredCoinIdsCache = parsed.coinIds.map(x => (x ? String(x) : '')).slice(0, 3);
+        return featuredCoinIdsCache;
+      }
+    }
+    featuredCoinIdsCache = [];
+  } catch (e) {}
+  return featuredCoinIdsCache;
+}
+
+function renderFeaturedSection() {
+  const sec = $('#featuredSection');
+  const grid = $('#featuredGrid');
+  const editBtn = $('#editFeaturedBtn');
+  if (!sec || !grid) return;
+
+  const isAdmin = isDompinator();
+  if (editBtn) editBtn.classList.toggle('hidden', !isAdmin);
+
+  const coinMap = new Map(coins.map(c => [String(c.id), c]));
+  const slots = [0, 1, 2].map(idx => {
+    const cid = featuredCoinIdsCache[idx] ? String(featuredCoinIdsCache[idx]) : '';
+    return cid ? (coinMap.get(cid) || null) : null;
+  });
+  const activeFeatured = slots.filter(Boolean);
+
+  if (!isAdmin && activeFeatured.length === 0) {
+    sec.classList.add('hidden');
+    grid.innerHTML = '';
+    return;
+  }
+
+  sec.classList.remove('hidden');
+  grid.innerHTML = slots.map((c, idx) => {
+    if (!c) {
+      return isAdmin
+        ? `<div class="featured-empty-slot">Slot ${idx + 1} empty — Click Edit Featured</div>`
+        : '';
+    }
+    const creator = c.profiles;
+    const creatorName = creator?.username || 'Community';
+    const creatorObj = creator ? { ...creator, id: c.creator_id } : { id: c.creator_id };
+    const chg = formatChangePct(c.change_pct);
+    return `
+      <article class="featured-card" data-feat-coin="${escapeHtml(c.id)}">
+        <div class="featured-slot-badge">★ Featured #${idx + 1}</div>
+        <div class="coin-top" style="margin-bottom:8px;">
+          <div class="coin-logo">${c.image_url ? `<img src="${escapeHtml(c.image_url)}">` : escapeHtml((c.ticker || '?')[0])}</div>
+          <div style="flex:1;min-width:0;">
+            <div class="coin-name">${escapeHtml(c.name)}</div>
+            <div class="coin-ticker">$${escapeHtml(c.ticker)}</div>
+          </div>
+        </div>
+        <div class="coin-price" style="font-size:21px;">${priceFmt(c.price)}</div>
+        <div class="coin-change ${chg.cls}">${chg.text}</div>
+        ${c.creator_id ? `
+          <button type="button" class="creator-chip" data-feat-profile="${escapeHtml(c.creator_id)}">
+            <span class="creator-mini-av">${creator?.avatar_url ? `<img src="${escapeHtml(creator.avatar_url)}">` : escapeHtml(creatorName[0].toUpperCase())}</span>
+            <span>${escapeHtml(creatorName)}${tierBadgeHtml(creatorObj)}</span>
+          </button>
+        ` : ''}
+      </article>
+    `;
+  }).join('');
+
+  $$('#featuredGrid [data-feat-coin]').forEach(el => {
+    el.addEventListener('click', () => openCoin(el.dataset.featCoin));
+  });
+  $$('#featuredGrid [data-feat-profile]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openProfileModal(btn.dataset.featProfile);
+    });
+  });
+}
+
+function openFeaturedEditModal() {
+  if (!isDompinator()) return;
+  const msgEl = $('#featuredEditMessage');
+  if (msgEl) msgEl.textContent = '';
+
+  const opts = ['<option value="">— None (Empty slot) —</option>']
+    .concat(coins.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)} ($${escapeHtml(c.ticker)}) — ${priceFmt(c.price)}</option>`))
+    .join('');
+
+  [1, 2, 3].forEach((n, idx) => {
+    const sel = $(`#featuredSlot${n}`);
+    if (!sel) return;
+    sel.innerHTML = opts;
+    const curVal = featuredCoinIdsCache[idx] ? String(featuredCoinIdsCache[idx]) : '';
+    if (curVal && coins.some(c => String(c.id) === curVal)) {
+      sel.value = curVal;
+    } else {
+      sel.value = '';
+    }
+  });
+  $('#featuredEditModal')?.classList.remove('hidden');
+}
+
+function closeFeaturedEditModal() {
+  $('#featuredEditModal')?.classList.add('hidden');
+}
+
+$('#editFeaturedBtn')?.addEventListener('click', openFeaturedEditModal);
+$('#closeFeaturedEditBtn')?.addEventListener('click', closeFeaturedEditModal);
+$('#cancelFeaturedEditBtn')?.addEventListener('click', closeFeaturedEditModal);
+$('#featuredEditModal')?.addEventListener('click', e => {
+  if (e.target === $('#featuredEditModal')) closeFeaturedEditModal();
+});
+
+$('#saveFeaturedBtn')?.addEventListener('click', async () => {
+  if (!isDompinator() || !sb || !currentUser) return;
+  const btn = $('#saveFeaturedBtn');
+  const msgEl = $('#featuredEditMessage');
+  if (msgEl) msgEl.textContent = '';
+  const coinIds = [
+    $('#featuredSlot1')?.value || '',
+    $('#featuredSlot2')?.value || '',
+    $('#featuredSlot3')?.value || ''
+  ];
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+  }
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__FEATURED_COINS__:' + JSON.stringify({ coinIds, ts: Date.now() }),
+    status: 'denied'
+  });
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = 'Save Featured';
+  }
+  if (error) {
+    if (msgEl) msgEl.textContent = error.message;
+    return;
+  }
+  featuredCoinIdsCache = coinIds;
+  closeFeaturedEditModal();
+  renderFeaturedSection();
+  toast('Featured coins updated for everyone!');
+});
+
 async function loadCoins() {
   if (!sb) return;
   await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
+  await fetchFeaturedCoins();
   const srvResetTs = adminModStateCache.serverResetTs || 0;
   let res = await sb
     .from('coins')
@@ -1277,6 +1497,7 @@ function renderFeed() {
     loadCoins();
     return;
   }
+  renderFeaturedSection();
   let list = [...coins];
   if (feedMode === 'watchlist') {
     list = list.filter(c => watchlistIds.has(String(c.id)));
@@ -3653,6 +3874,58 @@ async function loadLiveFeed() {
     });
   });
 
+  let postRows = [];
+  try {
+    let lpQ = sb.from('premium_requests')
+      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .like('reason', '__LIVE_POST__:%')
+      .order('created_at', { ascending: false })
+      .limit(40);
+    if (srvResetTs > 0) {
+      lpQ = lpQ.gt('created_at', new Date(srvResetTs).toISOString());
+    }
+    const { data: lpData } = await lpQ;
+    postRows = lpData || [];
+  } catch (e) {}
+
+  postRows.forEach(r => {
+    try {
+      const parsed = JSON.parse(String(r.reason || '').slice('__LIVE_POST__:'.length));
+      if (!parsed || !parsed.coin_id || !parsed.message) return;
+      const cid = String(parsed.coin_id);
+      const uid = String(r.user_id || '');
+      if (delCoins.has(cid) || (uid && delUsers.has(uid))) return;
+      const ts = Number(parsed.ts) || (r.created_at ? new Date(r.created_at).getTime() : Date.now());
+      if (srvResetTs > 0 && ts <= srvResetTs) return;
+      const pKey = 'livepost_' + (parsed.id || r.id || ts);
+      if (seenKeys.has(pKey)) return;
+      seenKeys.add(pKey);
+      const cObj = coinMap.get(cid) || {
+        id: cid,
+        name: parsed.coin_name || 'Coin',
+        ticker: parsed.coin_ticker || 'COIN',
+        image_url: parsed.coin_image || null,
+        price: 1
+      };
+      const pObj = r.profiles || profMap.get(uid) || { id: uid, username: 'Trader' };
+      const isSelf = currentUser && uid === String(currentUser.id);
+      const isMyCoin = currentUser && String(cObj.creator_id || '') === String(currentUser.id);
+      events.push({
+        kind: 'livepost',
+        ts,
+        userId: uid,
+        profile: pObj,
+        coin: cObj,
+        message: String(parsed.message),
+        season: Number(parsed.season || 1),
+        price: Number(cObj.price || 1),
+        isPersonal: Boolean(isSelf || isMyCoin),
+        isSelf: Boolean(isSelf),
+        isMyCoin: Boolean(isMyCoin)
+      });
+    } catch (e) {}
+  });
+
   events.sort((a, b) => b.ts - a.ts);
   liveEventsCache = events;
   if (currentPage === 'live') renderLiveFeed();
@@ -3705,7 +3978,13 @@ function renderLiveFeed() {
     let badgeHtml = '';
     let actionHtml = '';
     let rightLabel = '';
-    if (ev.kind === 'coin') {
+    let extraMsgHtml = '';
+    if (ev.kind === 'livepost') {
+      badgeHtml = `<span class="live-badge livepost">COIN LIVE POST</span>`;
+      actionHtml = `shouted out ${coinTag}`;
+      rightLabel = `Now ${priceFmt(ev.price || 1)}`;
+      extraMsgHtml = `<div class="live-post-msg">${escapeHtml(ev.message)}</div>`;
+    } else if (ev.kind === 'coin') {
       badgeHtml = `<span class="live-badge coin">NEW COIN</span>`;
       actionHtml = `launched ${coinTag}`;
       rightLabel = `Start ${priceFmt(ev.price || 1)}`;
@@ -3722,7 +4001,7 @@ function renderLiveFeed() {
       ? (ev.isSelf ? `<span class="live-personal-tag">YOU</span>` : (ev.isMyCoin ? `<span class="live-personal-tag">YOUR COIN</span>` : ''))
       : '';
     return `
-      <div class="live-row">
+      <div class="live-row ${ev.kind === 'livepost' ? 'live-post-highlight' : ''}">
         <div class="live-row-left">
           <div class="avatar profile-link" data-profile="${escapeHtml(ev.userId)}" style="cursor:pointer;">${av}</div>
           <div class="live-row-main">
@@ -3732,6 +4011,7 @@ function renderLiveFeed() {
               <strong class="profile-link" data-profile="${escapeHtml(ev.userId)}">${escapeHtml(uname)}${tierBadgeHtml(profObj)}</strong>
               <span class="muted">${actionHtml}</span>
             </div>
+            ${extraMsgHtml}
           </div>
         </div>
         <div class="live-row-right">
@@ -3935,7 +4215,7 @@ async function fetchUserNotifications() {
 
   const items = [];
 
-  // 1. Update notifications
+  // 1. Update notifications (including checkboxes from Dompinator updates!)
   (updatesList || []).forEach(u => {
     const ts = Number(u.ts || 0);
     items.push({
@@ -3944,6 +4224,7 @@ async function fetchUserNotifications() {
       ts,
       title: u.title || 'Update Notification',
       body: u.body || '',
+      boxes: Array.isArray(u.boxes) ? u.boxes : [],
       isUpdate: true
     });
   });
@@ -4163,7 +4444,22 @@ function renderUserNotifsList() {
       tagCls = 'update';
       tagText = 'Update';
       headHtml = `<strong>${formatUpdateTextWithTos(it.title, false)}</strong>`;
-      bodyHtml = `<div class="report-details-box">${formatUpdateTextWithTos(it.body, true)}</div>`;
+      const boxes = Array.isArray(it.boxes) ? it.boxes : [];
+      const boxesHtml = boxes.length
+        ? `<div class="notif-update-boxes">${boxes.map(b => `
+            <div class="notif-update-box-row">
+              <div class="notif-update-box-left">
+                <span class="notif-update-box-check">☑</span>
+                <span>${formatUpdateTextWithTos(b.text || '', false)}</span>
+              </div>
+              <span class="check-tag ${b.required ? 'req' : 'opt'}">${b.required ? 'Required' : 'Optional'}</span>
+            </div>
+          `).join('')}</div>`
+        : '';
+      bodyHtml = `
+        ${it.body ? `<div class="report-details-box">${formatUpdateTextWithTos(it.body, true)}</div>` : ''}
+        ${boxesHtml}
+      `;
     } else if (it.category === 'warning') {
       tagCls = 'warning';
       tagText = 'Warning';
@@ -4634,10 +4930,48 @@ $('#confirmServerResetBtn')?.addEventListener('click', async () => {
 });
 
 function loadAdminPage() {
+  if ($('#adminCurrentSeasonNum')) {
+    $('#adminCurrentSeasonNum').textContent = String(passState.season || 1);
+  }
   renderUpdateCheckboxesBuilder();
   loadAdminUpdatesList();
   loadAdminAccounts();
 }
+
+$('#adminNextSeasonBtn')?.addEventListener('click', async () => {
+  if (!isDompinator() || !currentUser || !sb) return;
+  const btn = $('#adminNextSeasonBtn');
+  if (!btn) return;
+  const nextSeason = Number(passState.season || 1) + 1;
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.textContent = `Confirm Season ${nextSeason}?`;
+    setTimeout(() => {
+      if (btn.isConnected && btn.dataset.armed === '1') {
+        btn.dataset.armed = '0';
+        btn.textContent = 'Start Next Season';
+      }
+    }, 3500);
+    return;
+  }
+  btn.dataset.armed = '0';
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PASS_SEASON__:' + JSON.stringify({ season: nextSeason, ts: Date.now() }),
+    status: 'denied'
+  });
+  btn.disabled = false;
+  btn.textContent = 'Start Next Season';
+  if (error) {
+    toast('Error starting next season: ' + error.message);
+    return;
+  }
+  await loadPassState();
+  if ($('#adminCurrentSeasonNum')) $('#adminCurrentSeasonNum').textContent = String(passState.season);
+  toast(`Season ${passState.season} started! Pass Play Time reset (Leaderboard untouched).`);
+});
 
 async function loadAdminAccounts() {
   if (!sb || !isDompinator()) return;
@@ -4932,6 +5266,9 @@ function startRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, () => {
       if (currentUser) loadProfile();
       if (selectedCoin && currentPage === 'coin') loadCoinComments(selectedCoin);
+      if (currentPage === 'feed') fetchFeaturedCoins().then(() => renderFeaturedSection());
+      if (currentPage === 'live') loadLiveFeed();
+      if (currentPage === 'pass') loadPassState().then(() => renderPassPage());
       if (currentPage === 'notifications') loadRequests();
       else if (currentUser) updateNotificationsBadge();
       if (isDompinator() && currentPage === 'admin') loadAdminPage();
@@ -4940,6 +5277,500 @@ function startRealtime() {
 }
 
 $('#backToFeed')?.addEventListener('click', () => showPage('feed'));
+
+// ============================================================
+// ---------- BATTLE PASS (SEASON 1 · 20 LEVELS · 5m STEP) ----
+// ============================================================
+async function fetchActivePassSeason() {
+  if (!sb) return 1;
+  try {
+    const { data } = await sb.from('premium_requests')
+      .select('reason, created_at, profiles(username)')
+      .like('reason', '__PASS_SEASON__:%')
+      .order('created_at', { ascending: false })
+      .limit(20);
+    const valid = (data || []).find(r => (r.profiles?.username || '').toLowerCase() === 'dompinator');
+    if (valid?.reason) {
+      const parsed = JSON.parse(String(valid.reason).slice('__PASS_SEASON__:'.length));
+      const num = Number(parsed?.season || 1);
+      if (num >= 1) return num;
+    }
+  } catch (e) {}
+  return 1;
+}
+
+function getEffectivePassSeconds() {
+  const base = Number(passState.seconds || 0);
+  const unsynced = sessionStart ? Math.max(0, Math.floor((Date.now() - lastPassRemoteSyncAt) / 1000)) : 0;
+  return base + Math.min(unsynced, 35);
+}
+
+function formatPassClock(totalSecs) {
+  const s = Math.max(0, Math.floor(totalSecs || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const pad = n => String(n).padStart(2, '0');
+  if (h > 0) return `${h}h ${m}m ${pad(sec)}s`;
+  return `${m}m ${pad(sec)}s`;
+}
+
+function updatePassNavBadge() {
+  const badge = $('#navPassBadge');
+  if (!badge) return;
+  if (!currentUser) {
+    badge.classList.add('hidden');
+    return;
+  }
+  const secs = getEffectivePassSeconds();
+  const unclaimed = PASS_REWARDS.filter(r =>
+    secs >= r.tier * PASS_STEP_SECONDS && !passState.claimedTiers.has(r.tier)
+  ).length;
+  if (unclaimed > 0) {
+    badge.textContent = String(unclaimed);
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+}
+
+async function syncPassTimeToRemote(force = false) {
+  if (!sb || !currentUser) return;
+  const season = passState.season || 1;
+  const key = `grind_pass_sec_s${season}_${currentUser.id}`;
+  try { localStorage.setItem(key, String(passState.seconds)); } catch (e) {}
+  const now = Date.now();
+  if (!force && now - lastPassRemoteSyncAt < 55000) return;
+  lastPassRemoteSyncAt = now;
+  try {
+    await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: `__PASS_TIME__:${season}:${passState.seconds}:${now}`,
+      status: 'denied'
+    });
+  } catch (e) {}
+}
+
+async function incrementPassTime(addSecs, forceSync = false) {
+  if (!currentUser || addSecs <= 0) return;
+  passState.seconds = Math.max(0, Number(passState.seconds || 0) + Number(addSecs));
+  lastPassRemoteSyncAt = Date.now();
+  const key = `grind_pass_sec_s${passState.season || 1}_${currentUser.id}`;
+  try { localStorage.setItem(key, String(passState.seconds)); } catch (e) {}
+  await syncPassTimeToRemote(forceSync);
+  updatePassNavBadge();
+  if (currentPage === 'pass') renderPassPage();
+}
+
+async function loadPassState() {
+  if (!currentUser || !sb) return;
+  const uid = currentUser.id;
+  const season = await fetchActivePassSeason();
+  const localKeySec = `grind_pass_sec_s${season}_${uid}`;
+  const localKeyClaims = `grind_pass_claims_s${season}_${uid}`;
+
+  let maxSecs = Number(localStorage.getItem(localKeySec) || 0) || 0;
+  const claimed = new Set();
+  try {
+    const arr = JSON.parse(localStorage.getItem(localKeyClaims) || '[]');
+    if (Array.isArray(arr)) arr.forEach(t => claimed.add(Number(t)));
+  } catch (e) {}
+  let livePostUsed = localStorage.getItem(`grind_pass_livepost_s${season}_${uid}`) === '1';
+
+  try {
+    const [{ data: timeRows }, { data: claimRows }, { data: postRows }] = await Promise.all([
+      sb.from('premium_requests')
+        .select('reason')
+        .eq('user_id', uid)
+        .like('reason', `__PASS_TIME__:${season}:%`)
+        .order('created_at', { ascending: false })
+        .limit(5),
+      sb.from('premium_requests')
+        .select('reason')
+        .eq('user_id', uid)
+        .like('reason', `__PASS_CLAIM__:${season}:%`)
+        .limit(40),
+      sb.from('premium_requests')
+        .select('reason')
+        .eq('user_id', uid)
+        .like('reason', '__LIVE_POST__:%')
+        .limit(30)
+    ]);
+
+    (timeRows || []).forEach(r => {
+      const parts = String(r.reason || '').split(':');
+      const sVal = Number(parts[2] || 0);
+      if (sVal > maxSecs) maxSecs = sVal;
+    });
+    (claimRows || []).forEach(r => {
+      const parts = String(r.reason || '').split(':');
+      const tVal = Number(parts[2] || 0);
+      if (tVal >= 1 && tVal <= 20) claimed.add(tVal);
+    });
+    (postRows || []).forEach(r => {
+      try {
+        const parsed = JSON.parse(String(r.reason).slice('__LIVE_POST__:'.length));
+        if (Number(parsed?.season || 1) === season) livePostUsed = true;
+      } catch (e) {}
+    });
+  } catch (e) {}
+
+  passState = { season, seconds: maxSecs, claimedTiers: claimed, livePostUsed };
+  try {
+    localStorage.setItem(localKeySec, String(maxSecs));
+    localStorage.setItem(localKeyClaims, JSON.stringify([...claimed]));
+    if (livePostUsed) localStorage.setItem(`grind_pass_livepost_s${season}_${uid}`, '1');
+  } catch (e) {}
+  updatePassNavBadge();
+}
+
+function updatePassLiveClock() {
+  if (!currentUser) return;
+  const secs = getEffectivePassSeconds();
+  const clockEl = $('#passPlayTimeValue');
+  if (clockEl) clockEl.textContent = formatPassClock(secs);
+  const maxSecs = PASS_REWARDS.length * PASS_STEP_SECONDS;
+  const unlockedLv = Math.min(PASS_REWARDS.length, Math.floor(secs / PASS_STEP_SECONDS));
+  const nextEl = $('#passNextLevelText');
+  const lvlEl = $('#passLevelText');
+  const fillEl = $('#passProgressFill');
+  if (lvlEl) lvlEl.textContent = `Level ${unlockedLv} / ${PASS_REWARDS.length}`;
+  if (fillEl) fillEl.style.width = `${Math.min(100, (secs / maxSecs) * 100).toFixed(1)}%`;
+  if (nextEl) {
+    if (unlockedLv >= PASS_REWARDS.length) {
+      nextEl.textContent = `Season ${passState.season} complete!`;
+    } else {
+      const nextTierSecs = (unlockedLv + 1) * PASS_STEP_SECONDS;
+      const remain = Math.max(0, nextTierSecs - secs);
+      const rm = Math.floor(remain / 60);
+      const rs = remain % 60;
+      nextEl.textContent = `Level ${unlockedLv + 1} unlocks in ${rm}m ${String(rs).padStart(2, '0')}s`;
+    }
+  }
+}
+
+function renderPassPage() {
+  if (!currentUser) return;
+  const season = passState.season || 1;
+  if ($('#passSeasonEyebrow')) $('#passSeasonEyebrow').textContent = `SEASON ${season} BATTLE PASS`;
+  if ($('#passSeasonTitleNum')) $('#passSeasonTitleNum').textContent = String(season);
+  if ($('#pageTitle') && currentPage === 'pass') $('#pageTitle').textContent = `Season ${season} Pass`;
+
+  updatePassLiveClock();
+  const secs = getEffectivePassSeconds();
+
+  // Tier 10 Coin Live Post Composer
+  const livePostCard = $('#passLivePostCard');
+  if (livePostCard) {
+    const hasTier10Claimed = passState.claimedTiers.has(10);
+    livePostCard.classList.toggle('hidden', !hasTier10Claimed);
+    if (hasTier10Claimed) {
+      const sel = $('#passLivePostCoin');
+      const sendBtn = $('#sendPassLivePostBtn');
+      const statusEl = $('#passLivePostStatus');
+      const subEl = $('#passLivePostSubtitle');
+      if (sel) {
+        const prev = sel.value;
+        sel.innerHTML = `<option value="">Select a coin...</option>` + coins.map(c =>
+          `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)} ($${escapeHtml(c.ticker)}) — ${priceFmt(c.price)}</option>`
+        ).join('');
+        if (prev && coins.some(c => String(c.id) === String(prev))) sel.value = prev;
+      }
+      if (passState.livePostUsed) {
+        if (sendBtn) sendBtn.disabled = true;
+        if (sendBtn) sendBtn.textContent = 'Posted to LIVE ✓';
+        if (statusEl) statusEl.textContent = `Season ${season} Coin Live Post used`;
+        if (subEl) subEl.textContent = `You already broadcast your Season ${season} Coin Live Post in LIVE.`;
+      } else {
+        if (sendBtn) sendBtn.disabled = false;
+        if (sendBtn) sendBtn.textContent = 'Post Coin to LIVE';
+        if (statusEl) statusEl.textContent = '1 Coin Live Post available';
+        if (subEl) subEl.textContent = 'Pick a coin and write a message for everyone to see in the LIVE Activity feed.';
+      }
+    }
+  }
+
+  const grid = $('#passTiersGrid');
+  if (!grid) return;
+  grid.innerHTML = PASS_REWARDS.map(r => {
+    const reqSecs = r.tier * PASS_STEP_SECONDS;
+    const isUnlocked = secs >= reqSecs;
+    const isClaimed = passState.claimedTiers.has(r.tier);
+    const isSpecial = r.type !== 'cash';
+    const cardCls = [
+      'pass-tier-card',
+      isClaimed ? 'claimed' : (isUnlocked ? 'unlocked' : ''),
+      isSpecial ? 'special' : ''
+    ].filter(Boolean).join(' ');
+
+    let btnText = `Locked (${r.minutes}m)`;
+    let btnCls = 'pass-claim-btn';
+    let disabledAttr = 'disabled';
+    if (isClaimed) {
+      btnText = 'Claimed ✓';
+      btnCls = 'pass-claim-btn claimed';
+    } else if (isUnlocked) {
+      btnText = r.type === 'pro' ? 'Claim Free PRO' : (r.type === 'coin_live_post' ? 'Unlock Live Post' : `Claim ${r.title}`);
+      btnCls = 'pass-claim-btn ready';
+      disabledAttr = '';
+    }
+
+    return `
+      <div class="${cardCls}">
+        <div>
+          <div class="pass-tier-top">
+            <span class="pass-tier-num">Level ${r.tier}</span>
+            <span class="pass-tier-req">${r.minutes}m</span>
+          </div>
+          <div class="pass-tier-reward">${escapeHtml(r.title)}</div>
+          <div class="pass-tier-desc">${escapeHtml(r.desc)}</div>
+        </div>
+        <button type="button" class="${btnCls}" data-pass-claim="${r.tier}" ${disabledAttr}>${escapeHtml(btnText)}</button>
+      </div>
+    `;
+  }).join('');
+
+  $$('#passTiersGrid [data-pass-claim]').forEach(btn => {
+    btn.addEventListener('click', () => claimPassReward(Number(btn.dataset.passClaim)));
+  });
+}
+
+async function claimPassReward(tier) {
+  if (!currentUser || !sb) return;
+  const reward = PASS_REWARDS.find(r => r.tier === tier);
+  if (!reward) return;
+  const secs = getEffectivePassSeconds();
+  if (secs < reward.tier * PASS_STEP_SECONDS || passState.claimedTiers.has(tier)) return;
+
+  const btn = $(`#passTiersGrid [data-pass-claim="${tier}"]`);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Claiming...';
+  }
+
+  const season = passState.season || 1;
+  if (reward.type === 'cash') {
+    const newCash = Number(currentUser.cash || 0) + Number(reward.amount);
+    const { error } = await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
+    if (error) {
+      toast('Pass reward error: ' + error.message);
+      renderPassPage();
+      return;
+    }
+    currentUser.cash = newCash;
+    await updateNetWorth();
+    toast(`Pass Level ${tier} claimed: +${money(reward.amount)}!`);
+  } else if (reward.type === 'pro') {
+    if (!currentUser.is_pro) {
+      const { error } = await sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__PRO_TIER__',
+        status: 'approved'
+      });
+      if (error) {
+        toast('Error unlocking PRO: ' + error.message);
+        renderPassPage();
+        return;
+      }
+    }
+    localStorage.setItem('grind_pro_' + currentUser.id, '1');
+    currentUser.is_pro = true;
+    proUserIds.add(currentUser.id);
+    toast('Pass Level 20 claimed! Free PRO tier unlocked!');
+  } else if (reward.type === 'coin_live_post') {
+    toast('Level 10 Coin Live Post unlocked! Choose your coin & message above.');
+  }
+
+  passState.claimedTiers.add(tier);
+  try {
+    localStorage.setItem(`grind_pass_claims_s${season}_${currentUser.id}`, JSON.stringify([...passState.claimedTiers]));
+  } catch (e) {}
+
+  await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: `__PASS_CLAIM__:${season}:${tier}`,
+    status: 'denied'
+  });
+
+  await syncPassTimeToRemote(true);
+  updateUIProfile();
+  renderPassPage();
+}
+
+$('#sendPassLivePostBtn')?.addEventListener('click', async () => {
+  if (!currentUser || !sb || !passState.claimedTiers.has(10) || passState.livePostUsed) return;
+  const coinId = $('#passLivePostCoin')?.value || '';
+  const message = ($('#passLivePostMsg')?.value || '').trim();
+  if (!coinId) return toast('Choose a coin first.');
+  if (!message) return toast('Write a message to show in LIVE.');
+
+  const coinObj = coins.find(c => String(c.id) === String(coinId));
+  if (!coinObj) return toast('Selected coin not found.');
+
+  const btn = $('#sendPassLivePostBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Posting...';
+  }
+
+  const season = passState.season || 1;
+  const payload = {
+    id: 'lp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    season,
+    coin_id: String(coinObj.id),
+    coin_name: coinObj.name,
+    coin_ticker: coinObj.ticker,
+    coin_image: coinObj.image_url || null,
+    message,
+    ts: Date.now()
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__LIVE_POST__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+  if (error) {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Post Coin to LIVE';
+    }
+    toast('Error posting to LIVE: ' + error.message);
+    return;
+  }
+
+  passState.livePostUsed = true;
+  try { localStorage.setItem(`grind_pass_livepost_s${season}_${currentUser.id}`, '1'); } catch (e) {}
+  if ($('#passLivePostMsg')) $('#passLivePostMsg').value = '';
+  toast('Coin Live Post is now live for everyone!');
+  renderPassPage();
+});
+
+// ============================================================
+// ---------- GRIND-BOT (PRO+ AI STOCK TACTICS) ---------------
+// ============================================================
+function formatBotMessageHtml(rawText) {
+  let html = escapeHtml(rawText || '');
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\n/g, '<br>');
+  return html;
+}
+
+function buildGrindBotMarketContext() {
+  const tier = tierLabel(currentUser);
+  const cashStr = money(currentUser?.cash || 0);
+  const nwStr = money(currentUser?.net_worth || currentUser?.cash || 0);
+  const trending = [...coins]
+    .sort((a, b) => (b.recent_buys_24h || 0) - (a.recent_buys_24h || 0))
+    .slice(0, 5)
+    .map(c => `${c.name} ($${c.ticker}): price=${priceFmt(c.price)}, today=${Number(c.change_pct || 0).toFixed(2)}%, 24h_buys=${c.recent_buys_24h || 0}`)
+    .join('; ');
+  const cheapest = [...coins]
+    .sort((a, b) => Number(a.price) - Number(b.price))
+    .slice(0, 4)
+    .map(c => `$${c.ticker}@${priceFmt(c.price)}`)
+    .join(', ');
+  return `Trader: ${currentUser?.username || 'Trader'} | Tier: ${tier} | Cash: ${cashStr} | Net Worth: ${nwStr} | Active Coins: ${coins.length} | Top Trending: ${trending || 'none yet'} | Cheapest: ${cheapest || 'none yet'}`;
+}
+
+function renderGrindBotMessages() {
+  const listEl = $('#grindBotMessages');
+  if (!listEl) return;
+  if (!grindBotHistory.length) {
+    grindBotHistory = [
+      {
+        role: 'model',
+        text: `Welcome to **GRIND-BOT**! I specialize strictly in **GRIND stock & market tactics** — curve sizing, spotting momentum, partial selling (1/4, 1/2, 3/4, All), and growing your Net Worth.\n\nAsk me anything about trading strategy inside GRIND!`
+      }
+    ];
+  }
+  listEl.innerHTML = grindBotHistory.map(m => `
+    <div class="grindbot-msg ${m.role === 'user' ? 'user' : 'bot'}">
+      <div class="grindbot-msg-label">${m.role === 'user' ? escapeHtml(currentUser?.username || 'You') : '⌘ GRIND-BOT'}</div>
+      <div>${m.role === 'user' ? escapeHtml(m.text).replace(/\n/g, '<br>') : formatBotMessageHtml(m.text)}</div>
+    </div>
+  `).join('');
+  listEl.scrollTop = listEl.scrollHeight;
+}
+
+function renderGrindBotPage() {
+  if (!currentUser) return;
+  const hasPro = getUserTier(currentUser) === 'pro' || getUserTier(currentUser) === 'premium';
+  $('#grindBotLocked')?.classList.toggle('hidden', hasPro);
+  $('#grindBotApp')?.classList.toggle('hidden', !hasPro);
+  if (hasPro) renderGrindBotMessages();
+}
+
+async function sendGrindBotPrompt(text) {
+  if (!currentUser || grindBotSending) return;
+  const hasPro = getUserTier(currentUser) === 'pro' || getUserTier(currentUser) === 'premium';
+  if (!hasPro) {
+    toast('GRIND-BOT requires PRO or Premium tier.');
+    return;
+  }
+  const clean = String(text || '').trim();
+  if (!clean) return;
+
+  const historyToSend = grindBotHistory.slice(-10);
+  grindBotHistory.push({ role: 'user', text: clean });
+  grindBotHistory.push({ role: 'model', text: 'Analyzing GRIND market tactics...' });
+  grindBotSending = true;
+  if ($('#grindBotInput')) $('#grindBotInput').value = '';
+  if ($('#grindBotSendBtn')) $('#grindBotSendBtn').disabled = true;
+  renderGrindBotMessages();
+
+  try {
+    const res = await fetch('/api/grind-bot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: clean,
+        history: historyToSend,
+        marketContext: buildGrindBotMarketContext(),
+        isProOrHigher: true
+      })
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error('GRIND-BOT backend endpoint is unavailable on static hosting.');
+    }
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to reach GRIND-BOT.');
+    }
+    grindBotHistory[grindBotHistory.length - 1] = {
+      role: 'model',
+      text: data.reply || 'Ask me about GRIND trading tactics!'
+    };
+  } catch (err) {
+    grindBotHistory[grindBotHistory.length - 1] = {
+      role: 'model',
+      text: `Unable to reach GRIND-BOT right now: ${err?.message || 'Connection error'}.`
+    };
+  } finally {
+    grindBotSending = false;
+    if ($('#grindBotSendBtn')) $('#grindBotSendBtn').disabled = false;
+    renderGrindBotMessages();
+  }
+}
+
+$('#grindBotForm')?.addEventListener('submit', e => {
+  e.preventDefault();
+  sendGrindBotPrompt($('#grindBotInput')?.value || '');
+});
+
+$$('#grindBotQuickPrompts [data-gb-prompt]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    sendGrindBotPrompt(btn.dataset.gbPrompt || '');
+  });
+});
+
+$('#grindBotClearBtn')?.addEventListener('click', () => {
+  grindBotHistory = [];
+  renderGrindBotMessages();
+});
+
+$('#grindBotOpenDailyBtn')?.addEventListener('click', () => checkDailyLogin(true));
 
 // ---------- Init ----------
 (async () => {

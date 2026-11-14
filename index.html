@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=25">
+  <link rel="stylesheet" href="styles.css?v=26">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -40,12 +40,14 @@
         <button class="nav-btn" data-page="money"><span>▣</span> Money</button>
         <button class="nav-btn" data-page="global"><span>⊕</span> Global</button>
         <button class="nav-btn" data-page="ads"><span>▷</span> Ads</button>
+        <button class="nav-btn" id="navGrindBot" data-page="grindbot"><span>⌘</span> GRIND-BOT <span id="navGrindBotTag" class="nav-tier-chip">PRO+</span></button>
         <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
         <button class="nav-btn" data-page="report"><span>△</span> Report</button>
         <button class="nav-btn" id="navNotifications" data-page="notifications"><span>✦</span> Notifications <span id="navNotificationsBadge" class="nav-count-badge hidden">0</span></button>
         <button class="nav-btn hidden" id="navAdmin" data-page="admin"><span>❖</span> Admin</button>
       </nav>
       <div class="sidebar-bottom">
+        <button class="nav-btn pass-side-btn" id="navPassBtn" data-page="pass"><span>★</span> Pass <span id="navPassBadge" class="nav-count-badge hidden">0</span></button>
         <div class="mini-profile">
           <div class="avatar" id="sideAvatar">G</div>
           <div>
@@ -78,6 +80,17 @@
             </div>
             <div class="hero-orb"><span>G</span></div>
           </div>
+          <div id="featuredSection" class="featured-panel hidden">
+            <div class="featured-head">
+              <div>
+                <div class="eyebrow purple-text">★ FEATURED</div>
+                <h3 style="margin:3px 0 0;font-size:18px;">Featured Coins</h3>
+              </div>
+              <button type="button" id="editFeaturedBtn" class="edit-coin-btn hidden">✎ Edit Featured (3)</button>
+            </div>
+            <div id="featuredGrid" class="featured-grid"></div>
+          </div>
+
           <div class="feed-toolbar">
             <div class="feed-tabs">
               <button class="feed-tab" data-feed="cheap">Cheapest</button>
@@ -367,6 +380,15 @@
             <button type="button" class="danger-reset-btn" id="openServerResetBtn">Reset Servers</button>
           </div>
 
+          <div class="pass-season-admin-card">
+            <div>
+              <div class="eyebrow purple-text">PASS SEASON CONTROL</div>
+              <h3 style="margin:4px 0;">Season <span id="adminCurrentSeasonNum">1</span> · Pass Play Time</h3>
+              <p class="muted tiny" style="margin:0;">Start the next season to reset everyone's Pass Play Time to 0m. Does NOT reset the Global Leaderboard!</p>
+            </div>
+            <button type="button" class="primary-btn" id="adminNextSeasonBtn">Start Next Season</button>
+          </div>
+
           <div class="section-head">
             <div>
               <div class="eyebrow purple-text">ADMIN</div>
@@ -428,6 +450,101 @@
             <input id="adminAccountSearch" class="feed-search" type="search" placeholder="Search username...">
           </div>
           <div id="adminAccountsList" class="leaderboard-list"></div>
+        </section>
+
+        <!-- PASS (Battle Pass) -->
+        <section id="page-pass" class="page hidden">
+          <div class="pass-hero-card">
+            <div class="pass-hero-top">
+              <div>
+                <div class="eyebrow purple-text" id="passSeasonEyebrow">SEASON 1 BATTLE PASS</div>
+                <h3 style="margin:4px 0;">Season <span id="passSeasonTitleNum">1</span> Pass</h3>
+                <p class="muted tiny" style="margin:0;">Unlock 20 rewards every 5 minutes of active Play Time. Pass Play Time resets each new season — Leaderboard Time Played stays untouched.</p>
+              </div>
+              <div class="pass-time-pill">
+                <span class="muted tiny">PASS PLAY TIME</span>
+                <strong id="passPlayTimeValue">0m 00s</strong>
+              </div>
+            </div>
+            <div class="pass-progress-meta">
+              <span id="passNextLevelText" class="tiny muted">Next reward at 5m</span>
+              <span id="passLevelText" class="tiny">Level 0 / 20</span>
+            </div>
+            <div class="pass-progress-track">
+              <div id="passProgressFill" class="pass-progress-fill" style="width:0%"></div>
+            </div>
+          </div>
+
+          <div id="passLivePostCard" class="form-card pass-livepost-card hidden">
+            <div class="eyebrow purple-text">TIER 10 REWARD · COIN LIVE POST</div>
+            <h4 style="margin:6px 0 4px;">Broadcast a Coin to Everyone in LIVE</h4>
+            <p class="muted tiny" id="passLivePostSubtitle" style="margin:0 0 14px;">Pick a coin and write a message for everyone in the Live Activity feed.</p>
+            <div class="form-grid">
+              <label>Choose Coin
+                <select id="passLivePostCoin">
+                  <option value="">Select a coin...</option>
+                </select>
+              </label>
+              <label>Message in LIVE
+                <input id="passLivePostMsg" maxlength="160" placeholder="e.g. Check out this coin right now!">
+              </label>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:10px;align-items:center;">
+              <span id="passLivePostStatus" class="tiny muted"></span>
+              <button type="button" class="primary-btn" id="sendPassLivePostBtn">Post Coin to LIVE</button>
+            </div>
+          </div>
+
+          <div id="passTiersGrid" class="pass-tiers-grid"></div>
+        </section>
+
+        <!-- GRIND-BOT (PRO+ AI Stock Tactics Chatbot) -->
+        <section id="page-grindbot" class="page hidden">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow purple-text">⌘ AI TACTICAL ADVISOR</div>
+              <h3>GRIND-BOT</h3>
+              <p class="muted">Stock &amp; market tactics advisor exclusively for the GRIND game. Requires PRO or Premium tier.</p>
+            </div>
+          </div>
+
+          <div id="grindBotLocked" class="form-card grindbot-locked hidden">
+            <div class="empty-icon">⌘</div>
+            <h3>PRO or Premium Required</h3>
+            <p class="muted" style="max-width:460px;margin:8px auto 18px;">GRIND-BOT analyzes live GRIND bonding-curve tactics, entry timing, and portfolio moves exclusively for PRO and Premium traders.</p>
+            <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+              <button type="button" class="primary-btn" data-goto="pass">Earn Free PRO in Pass (Lv 20)</button>
+              <button type="button" class="zoom-btn" id="grindBotOpenDailyBtn" style="padding:12px 18px;">Daily Login (Day 7 PRO)</button>
+              <button type="button" class="zoom-btn" data-goto="account" style="padding:12px 18px;">Request Premium</button>
+            </div>
+          </div>
+
+          <div id="grindBotApp" class="grindbot-shell hidden">
+            <div class="grindbot-topbar">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <div class="grindbot-avatar">⌘</div>
+                <div>
+                  <strong>GRIND-BOT</strong>
+                  <div class="muted tiny">GRIND Market Tactics Only · Live Market Aware</div>
+                </div>
+              </div>
+              <button type="button" class="zoom-btn" id="grindBotClearBtn">New Chat</button>
+            </div>
+
+            <div class="grindbot-prompts" id="grindBotQuickPrompts">
+              <button type="button" class="feed-tab grindbot-chip" data-gb-prompt="Analyze the current GRIND market and suggest my best tactical move right now.">Analyze current market</button>
+              <button type="button" class="feed-tab grindbot-chip" data-gb-prompt="How should I grow $15 starting cash safely using GRIND's bonding curve?">Grow $15 cash safely</button>
+              <button type="button" class="feed-tab grindbot-chip" data-gb-prompt="When is the best time to sell 1/4, 1/2, or All of a rising coin?">When to scale out &amp; sell</button>
+              <button type="button" class="feed-tab grindbot-chip" data-gb-prompt="How do I spot good early Trending or Newest coins before other traders buy?">Spot early momentum</button>
+            </div>
+
+            <div id="grindBotMessages" class="grindbot-messages"></div>
+
+            <form id="grindBotForm" class="grindbot-composer">
+              <input id="grindBotInput" maxlength="1500" autocomplete="off" placeholder="Ask GRIND-BOT about stock &amp; market tactics in GRIND...">
+              <button type="submit" class="primary-btn" id="grindBotSendBtn">Send</button>
+            </form>
+          </div>
         </section>
 
         <!-- COIN DETAIL -->
@@ -597,7 +714,43 @@
     </div>
   </div>
 
+  <!-- FEATURED COINS MODAL (Dompinator only: 3 selectable boxes) -->
+  <div id="featuredEditModal" class="modal-backdrop hidden" style="z-index:104;" role="dialog" aria-modal="true">
+    <div class="modal-card profile-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow purple-text">ADMIN · FEATURED</div>
+          <h3>Choose 3 Featured Coins</h3>
+          <p class="muted tiny" style="margin:2px 0 0;">Pick up to 3 coins to feature above the market feed for all players.</p>
+        </div>
+        <button class="zoom-btn" id="closeFeaturedEditBtn" type="button">✕</button>
+      </div>
+      <div class="featured-slot-boxes">
+        <div class="featured-slot-box">
+          <label>Featured Coin 1
+            <select id="featuredSlot1"></select>
+          </label>
+        </div>
+        <div class="featured-slot-box">
+          <label>Featured Coin 2
+            <select id="featuredSlot2"></select>
+          </label>
+        </div>
+        <div class="featured-slot-box">
+          <label>Featured Coin 3
+            <select id="featuredSlot3"></select>
+          </label>
+        </div>
+      </div>
+      <p id="featuredEditMessage" class="form-message"></p>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px;">
+        <button class="zoom-btn" id="cancelFeaturedEditBtn" type="button" style="padding:10px 16px;">Cancel</button>
+        <button class="primary-btn" id="saveFeaturedBtn" type="button">Save Featured</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=25"></script>
+  <script src="app.js?v=26"></script>
 </body>
 </html>
