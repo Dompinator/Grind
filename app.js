@@ -44,7 +44,8 @@ let tradeInFlight = false;
 let featuredCoinIdsCache = [];
 let passTickerInterval = null;
 let lastPassRemoteSyncAt = 0;
-let passState = { season: 1, seconds: 0, claimedTiers: new Set(), livePostUsed: false };
+let passState = { season: 1, seconds: 0, claimedTiers: new Set(), claimedProTiers: new Set(), livePostsUsed: 0 };
+let passScrollInitDone = false;
 let grindBotHistory = [];
 let grindBotSending = false;
 
@@ -1158,7 +1159,10 @@ function showPage(page) {
   if (page === 'global') renderLeaderboard();
   if (page === 'ads' && !(wasAds && adLocked)) startAdsPage();
   if (page === 'grindbot') renderGrindBotPage();
-  if (page === 'pass') loadPassState().then(() => renderPassPage());
+  if (page === 'pass') {
+    passScrollInitDone = false;
+    loadPassState().then(() => renderPassPage(true));
+  }
   if (page === 'account') updatePremiumSection();
   if (page === 'report') loadReportPage();
   if (page === 'notifications') loadRequests();
@@ -5315,6 +5319,42 @@ function formatPassClock(totalSecs) {
   return `${m}m ${pad(sec)}s`;
 }
 
+function hasProPassAccess() {
+  const t = getUserTier(currentUser);
+  return t === 'pro' || t === 'premium';
+}
+
+function getPassProReward(reward) {
+  if (!reward) return null;
+  if (reward.type === 'cash') {
+    const dbl = Number(reward.amount || 0) * 2;
+    return {
+      type: 'cash',
+      amount: dbl,
+      title: `$${dbl}`,
+      desc: `2X PRO Bonus: Instant $${dbl.toFixed(2)} cash`
+    };
+  }
+  if (reward.type === 'coin_live_post') {
+    return {
+      type: 'coin_live_post',
+      count: 2,
+      title: '2X Coin Live Posts',
+      desc: 'Unlock +2 extra custom coin shoutouts in LIVE'
+    };
+  }
+  return {
+    type: 'cash',
+    amount: 120,
+    title: '$120 PRO Finale',
+    desc: '2X Finale cash bonus for PRO & Premium holders'
+  };
+}
+
+function getLivePostsGrantedCount() {
+  return (passState.claimedTiers.has(10) ? 1 : 0) + (passState.claimedProTiers.has(10) ? 2 : 0);
+}
+
 function updatePassNavBadge() {
   const badge = $('#navPassBadge');
   if (!badge) return;
@@ -5323,9 +5363,14 @@ function updatePassNavBadge() {
     return;
   }
   const secs = getEffectivePassSeconds();
-  const unclaimed = PASS_REWARDS.filter(r =>
-    secs >= r.tier * PASS_STEP_SECONDS && !passState.claimedTiers.has(r.tier)
-  ).length;
+  const hasPro = hasProPassAccess();
+  let unclaimed = 0;
+  PASS_REWARDS.forEach(r => {
+    if (secs >= r.tier * PASS_STEP_SECONDS) {
+      if (!passState.claimedTiers.has(r.tier)) unclaimed += 1;
+      if (hasPro && !passState.claimedProTiers.has(r.tier)) unclaimed += 1;
+    }
+  });
   if (unclaimed > 0) {
     badge.textContent = String(unclaimed);
     badge.classList.remove('hidden');
@@ -5368,17 +5413,29 @@ async function loadPassState() {
   const season = await fetchActivePassSeason();
   const localKeySec = `grind_pass_sec_s${season}_${uid}`;
   const localKeyClaims = `grind_pass_claims_s${season}_${uid}`;
+  const localKeyProClaims = `grind_pass_pro_claims_s${season}_${uid}`;
+  const localKeyLiveCount = `grind_pass_livepost_count_s${season}_${uid}`;
 
   let maxSecs = Number(localStorage.getItem(localKeySec) || 0) || 0;
   const claimed = new Set();
+  const claimedPro = new Set();
   try {
     const arr = JSON.parse(localStorage.getItem(localKeyClaims) || '[]');
     if (Array.isArray(arr)) arr.forEach(t => claimed.add(Number(t)));
   } catch (e) {}
-  let livePostUsed = localStorage.getItem(`grind_pass_livepost_s${season}_${uid}`) === '1';
+  try {
+    const arrPro = JSON.parse(localStorage.getItem(localKeyProClaims) || '[]');
+    if (Array.isArray(arrPro)) arrPro.forEach(t => claimedPro.add(Number(t)));
+  } catch (e) {}
+
+  let localLiveCount = Number(localStorage.getItem(localKeyLiveCount) || 0) || 0;
+  if (localLiveCount === 0 && localStorage.getItem(`grind_pass_livepost_s${season}_${uid}`) === '1') {
+    localLiveCount = 1;
+  }
+  let remoteLiveCount = 0;
 
   try {
-    const [{ data: timeRows }, { data: claimRows }, { data: postRows }] = await Promise.all([
+    const [{ data: timeRows }, { data: claimRows }, { data: proClaimRows }, { data: postRows }] = await Promise.all([
       sb.from('premium_requests')
         .select('reason')
         .eq('user_id', uid)
@@ -5393,8 +5450,13 @@ async function loadPassState() {
       sb.from('premium_requests')
         .select('reason')
         .eq('user_id', uid)
+        .like('reason', `__PASS_PRO_CLAIM__:${season}:%`)
+        .limit(40),
+      sb.from('premium_requests')
+        .select('reason')
+        .eq('user_id', uid)
         .like('reason', '__LIVE_POST__:%')
-        .limit(30)
+        .limit(50)
     ]);
 
     (timeRows || []).forEach(r => {
@@ -5407,19 +5469,26 @@ async function loadPassState() {
       const tVal = Number(parts[2] || 0);
       if (tVal >= 1 && tVal <= 20) claimed.add(tVal);
     });
+    (proClaimRows || []).forEach(r => {
+      const parts = String(r.reason || '').split(':');
+      const tVal = Number(parts[2] || 0);
+      if (tVal >= 1 && tVal <= 20) claimedPro.add(tVal);
+    });
     (postRows || []).forEach(r => {
       try {
         const parsed = JSON.parse(String(r.reason).slice('__LIVE_POST__:'.length));
-        if (Number(parsed?.season || 1) === season) livePostUsed = true;
+        if (Number(parsed?.season || 1) === season) remoteLiveCount += 1;
       } catch (e) {}
     });
   } catch (e) {}
 
-  passState = { season, seconds: maxSecs, claimedTiers: claimed, livePostUsed };
+  const livePostsUsed = Math.max(localLiveCount, remoteLiveCount);
+  passState = { season, seconds: maxSecs, claimedTiers: claimed, claimedProTiers: claimedPro, livePostsUsed };
   try {
     localStorage.setItem(localKeySec, String(maxSecs));
     localStorage.setItem(localKeyClaims, JSON.stringify([...claimed]));
-    if (livePostUsed) localStorage.setItem(`grind_pass_livepost_s${season}_${uid}`, '1');
+    localStorage.setItem(localKeyProClaims, JSON.stringify([...claimedPro]));
+    localStorage.setItem(localKeyLiveCount, String(livePostsUsed));
   } catch (e) {}
   updatePassNavBadge();
 }
@@ -5449,22 +5518,46 @@ function updatePassLiveClock() {
   }
 }
 
-function renderPassPage() {
+function renderPassPage(scrollToActive = false) {
   if (!currentUser) return;
   const season = passState.season || 1;
+  const hasPro = hasProPassAccess();
   if ($('#passSeasonEyebrow')) $('#passSeasonEyebrow').textContent = `SEASON ${season} BATTLE PASS`;
   if ($('#passSeasonTitleNum')) $('#passSeasonTitleNum').textContent = String(season);
   if ($('#pageTitle') && currentPage === 'pass') $('#pageTitle').textContent = `Season ${season} Pass`;
 
+  const proPill = $('#passProTrackStatus');
+  if (proPill) {
+    proPill.className = `pass-track-pill ${hasPro ? 'active' : 'locked'}`;
+    proPill.textContent = hasPro
+      ? '★ PRO 2X TRACK ACTIVE'
+      : 'FREE TRACK ONLY · Unlock PRO for 2X bottom row';
+  }
+
   updatePassLiveClock();
   const secs = getEffectivePassSeconds();
 
-  // Tier 10 Coin Live Post Composer
+  let readyCount = 0;
+  PASS_REWARDS.forEach(r => {
+    if (secs >= r.tier * PASS_STEP_SECONDS) {
+      if (!passState.claimedTiers.has(r.tier)) readyCount += 1;
+      if (hasPro && !passState.claimedProTiers.has(r.tier)) readyCount += 1;
+    }
+  });
+  const claimAllBtn = $('#passClaimAllBtn');
+  if (claimAllBtn) {
+    claimAllBtn.classList.toggle('hidden', readyCount === 0);
+    if (readyCount > 0) claimAllBtn.textContent = `Claim All Ready (${readyCount})`;
+  }
+
+  // Tier 10 Coin Live Post Composer (Free = +1, PRO = +2)
   const livePostCard = $('#passLivePostCard');
   if (livePostCard) {
-    const hasTier10Claimed = passState.claimedTiers.has(10);
-    livePostCard.classList.toggle('hidden', !hasTier10Claimed);
-    if (hasTier10Claimed) {
+    const granted = getLivePostsGrantedCount();
+    const used = Math.min(granted, Number(passState.livePostsUsed || 0));
+    const remaining = Math.max(0, granted - used);
+    livePostCard.classList.toggle('hidden', granted === 0);
+    if (granted > 0) {
       const sel = $('#passLivePostCoin');
       const sendBtn = $('#sendPassLivePostBtn');
       const statusEl = $('#passLivePostStatus');
@@ -5476,81 +5569,162 @@ function renderPassPage() {
         ).join('');
         if (prev && coins.some(c => String(c.id) === String(prev))) sel.value = prev;
       }
-      if (passState.livePostUsed) {
-        if (sendBtn) sendBtn.disabled = true;
-        if (sendBtn) sendBtn.textContent = 'Posted to LIVE ✓';
-        if (statusEl) statusEl.textContent = `Season ${season} Coin Live Post used`;
-        if (subEl) subEl.textContent = `You already broadcast your Season ${season} Coin Live Post in LIVE.`;
+      if (remaining <= 0) {
+        if (sendBtn) {
+          sendBtn.disabled = true;
+          sendBtn.textContent = `All ${granted} Used ✓`;
+        }
+        if (statusEl) statusEl.textContent = `0 / ${granted} Coin Live Posts remaining`;
+        if (subEl) subEl.textContent = `You already broadcast all ${granted} Season ${season} Coin Live Post${granted > 1 ? 's' : ''} in LIVE.`;
       } else {
-        if (sendBtn) sendBtn.disabled = false;
-        if (sendBtn) sendBtn.textContent = 'Post Coin to LIVE';
-        if (statusEl) statusEl.textContent = '1 Coin Live Post available';
+        if (sendBtn) {
+          sendBtn.disabled = false;
+          sendBtn.textContent = 'Post Coin to LIVE';
+        }
+        if (statusEl) statusEl.textContent = `${remaining} / ${granted} Coin Live Post${remaining > 1 ? 's' : ''} remaining`;
         if (subEl) subEl.textContent = 'Pick a coin and write a message for everyone to see in the LIVE Activity feed.';
       }
     }
   }
 
-  const grid = $('#passTiersGrid');
-  if (!grid) return;
-  grid.innerHTML = PASS_REWARDS.map(r => {
-    const reqSecs = r.tier * PASS_STEP_SECONDS;
-    const isUnlocked = secs >= reqSecs;
-    const isClaimed = passState.claimedTiers.has(r.tier);
-    const isSpecial = r.type !== 'cash';
-    const cardCls = [
-      'pass-tier-card',
-      isClaimed ? 'claimed' : (isUnlocked ? 'unlocked' : ''),
-      isSpecial ? 'special' : ''
-    ].filter(Boolean).join(' ');
+  const trackEl = $('#passTiersTrack');
+  if (!trackEl) return;
 
-    let btnText = `Locked (${r.minutes}m)`;
-    let btnCls = 'pass-claim-btn';
-    let disabledAttr = 'disabled';
-    if (isClaimed) {
-      btnText = 'Claimed ✓';
-      btnCls = 'pass-claim-btn claimed';
+  trackEl.innerHTML = PASS_REWARDS.map(r => {
+    const reqSecs = r.tier * PASS_STEP_SECONDS;
+    const prevSecs = (r.tier - 1) * PASS_STEP_SECONDS;
+    const isUnlocked = secs >= reqSecs;
+    const fillPct = Math.max(0, Math.min(100, ((secs - prevSecs) / PASS_STEP_SECONDS) * 100)).toFixed(1);
+
+    // Top Row: Free Track
+    const isFreeClaimed = passState.claimedTiers.has(r.tier);
+    const freeCardCls = [
+      'pass-tier-card',
+      isFreeClaimed ? 'claimed' : (isUnlocked ? 'unlocked' : '')
+    ].filter(Boolean).join(' ');
+    let freeBtnText = `Locked (${r.minutes}m)`;
+    let freeBtnCls = 'pass-claim-btn';
+    let freeDisabled = 'disabled';
+    if (isFreeClaimed) {
+      freeBtnText = 'Claimed ✓';
+      freeBtnCls = 'pass-claim-btn claimed';
     } else if (isUnlocked) {
-      btnText = r.type === 'pro' ? 'Claim Free PRO' : (r.type === 'coin_live_post' ? 'Unlock Live Post' : `Claim ${r.title}`);
-      btnCls = 'pass-claim-btn ready';
-      disabledAttr = '';
+      freeBtnText = r.type === 'pro' ? 'Claim Free PRO' : (r.type === 'coin_live_post' ? 'Unlock Live Post' : `Claim ${r.title}`);
+      freeBtnCls = 'pass-claim-btn ready';
+      freeDisabled = '';
     }
+    const freeRewardCls = r.type === 'cash' ? 'pass-tier-reward' : 'pass-tier-reward compact';
+
+    // Bottom Row: PRO 2X Track
+    const proR = getPassProReward(r);
+    const isProClaimed = passState.claimedProTiers.has(r.tier);
+    const proCardCls = [
+      'pass-tier-card pro-card',
+      !hasPro ? 'pro-locked' : (isProClaimed ? 'claimed' : (isUnlocked ? 'unlocked' : ''))
+    ].filter(Boolean).join(' ');
+    let proBtnText = !hasPro ? 'Requires PRO' : `Locked (${r.minutes}m)`;
+    let proBtnCls = 'pass-claim-btn';
+    let proDisabled = 'disabled';
+    if (!hasPro) {
+      proBtnText = 'Requires PRO';
+    } else if (isProClaimed) {
+      proBtnText = 'Claimed 2X ✓';
+      proBtnCls = 'pass-claim-btn claimed';
+    } else if (isUnlocked) {
+      proBtnText = proR.type === 'coin_live_post' ? 'Unlock +2 Posts' : `Claim ${proR.title}`;
+      proBtnCls = 'pass-claim-btn ready pro-ready';
+      proDisabled = '';
+    }
+    const proRewardCls = proR.type === 'cash' && r.type === 'cash' ? 'pass-tier-reward' : 'pass-tier-reward compact';
 
     return `
-      <div class="${cardCls}">
-        <div>
-          <div class="pass-tier-top">
-            <span class="pass-tier-num">Level ${r.tier}</span>
-            <span class="pass-tier-req">${r.minutes}m</span>
+      <div class="pass-col" data-pass-col="${r.tier}">
+        <div class="pass-slot">
+          <div class="${freeCardCls}">
+            <div>
+              <div class="pass-tier-top">
+                <span class="pass-tier-num">FREE · LV ${r.tier}</span>
+                <span class="tiny muted">${r.minutes}m</span>
+              </div>
+              <div class="${freeRewardCls}" style="margin-top:4px;">${escapeHtml(r.title)}</div>
+              <div class="pass-tier-desc" style="margin-top:4px;">${escapeHtml(r.desc)}</div>
+            </div>
+            <button type="button" class="${freeBtnCls}" data-pass-claim="${r.tier}" data-pass-track="free" ${freeDisabled}>${escapeHtml(freeBtnText)}</button>
           </div>
-          <div class="pass-tier-reward">${escapeHtml(r.title)}</div>
-          <div class="pass-tier-desc">${escapeHtml(r.desc)}</div>
         </div>
-        <button type="button" class="${btnCls}" data-pass-claim="${r.tier}" ${disabledAttr}>${escapeHtml(btnText)}</button>
+
+        <div class="pass-spine-cell">
+          <div class="pass-spine-line"><div class="pass-spine-line-fill" style="width:${fillPct}%"></div></div>
+          <div class="pass-spine-node ${isUnlocked ? 'reached' : ''}">${r.tier}</div>
+          <span class="pass-spine-time">${r.minutes}m</span>
+        </div>
+
+        <div class="pass-slot">
+          <div class="${proCardCls}">
+            <div>
+              <div class="pass-tier-top">
+                <span class="pass-tier-num" style="color:#fcd34d;">PRO · LV ${r.tier}</span>
+                <span class="pass-pro-x2">2X</span>
+              </div>
+              <div class="${proRewardCls}" style="margin-top:4px;color:#fef3c7;">${escapeHtml(proR.title)}</div>
+              <div class="pass-tier-desc" style="margin-top:4px;">${escapeHtml(proR.desc)}</div>
+            </div>
+            <button type="button" class="${proBtnCls}" data-pass-claim="${r.tier}" data-pass-track="pro" ${proDisabled}>${escapeHtml(proBtnText)}</button>
+          </div>
+        </div>
       </div>
     `;
   }).join('');
 
-  $$('#passTiersGrid [data-pass-claim]').forEach(btn => {
-    btn.addEventListener('click', () => claimPassReward(Number(btn.dataset.passClaim)));
+  $$('#passTiersTrack [data-pass-claim]').forEach(btn => {
+    btn.addEventListener('click', () => claimPassReward(Number(btn.dataset.passClaim), btn.dataset.passTrack || 'free'));
   });
+
+  if (scrollToActive && !passScrollInitDone) {
+    passScrollInitDone = true;
+    const scroller = $('#passColumnsScroll');
+    if (scroller) {
+      const unlockedLv = Math.min(PASS_REWARDS.length, Math.floor(secs / PASS_STEP_SECONDS));
+      const targetTier = Math.max(1, Math.min(PASS_REWARDS.length, unlockedLv));
+      const targetCol = scroller.querySelector(`[data-pass-col="${targetTier}"]`);
+      if (targetCol) {
+        requestAnimationFrame(() => {
+          scroller.scrollLeft = Math.max(0, targetCol.offsetLeft - scroller.clientWidth / 3);
+        });
+      }
+    }
+  }
 }
 
-async function claimPassReward(tier) {
+async function claimPassReward(tier, track = 'free') {
   if (!currentUser || !sb) return;
   const reward = PASS_REWARDS.find(r => r.tier === tier);
   if (!reward) return;
+  const isProTrack = track === 'pro';
   const secs = getEffectivePassSeconds();
-  if (secs < reward.tier * PASS_STEP_SECONDS || passState.claimedTiers.has(tier)) return;
+  if (secs < reward.tier * PASS_STEP_SECONDS) return;
 
-  const btn = $(`#passTiersGrid [data-pass-claim="${tier}"]`);
+  if (isProTrack) {
+    if (!hasProPassAccess()) {
+      toast('PRO or Premium tier is required for the bottom 2X PRO track!');
+      return;
+    }
+    if (passState.claimedProTiers.has(tier)) return;
+  } else {
+    if (passState.claimedTiers.has(tier)) return;
+  }
+
+  const btn = $(`#passTiersTrack [data-pass-claim="${tier}"][data-pass-track="${track}"]`);
   if (btn) {
     btn.disabled = true;
     btn.textContent = 'Claiming...';
   }
 
   const season = passState.season || 1;
-  if (reward.type === 'cash') {
-    const newCash = Number(currentUser.cash || 0) + Number(reward.amount);
+  const activeReward = isProTrack ? getPassProReward(reward) : reward;
+
+  if (activeReward.type === 'cash') {
+    const newCash = Number(currentUser.cash || 0) + Number(activeReward.amount);
     const { error } = await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
     if (error) {
       toast('Pass reward error: ' + error.message);
@@ -5559,8 +5733,8 @@ async function claimPassReward(tier) {
     }
     currentUser.cash = newCash;
     await updateNetWorth();
-    toast(`Pass Level ${tier} claimed: +${money(reward.amount)}!`);
-  } else if (reward.type === 'pro') {
+    toast(`${isProTrack ? 'PRO 2X ' : ''}Pass Level ${tier} claimed: +${money(activeReward.amount)}!`);
+  } else if (activeReward.type === 'pro') {
     if (!currentUser.is_pro) {
       const { error } = await sb.from('premium_requests').insert({
         user_id: currentUser.id,
@@ -5576,29 +5750,148 @@ async function claimPassReward(tier) {
     localStorage.setItem('grind_pro_' + currentUser.id, '1');
     currentUser.is_pro = true;
     proUserIds.add(currentUser.id);
-    toast('Pass Level 20 claimed! Free PRO tier unlocked!');
-  } else if (reward.type === 'coin_live_post') {
-    toast('Level 10 Coin Live Post unlocked! Choose your coin & message above.');
+    toast('Pass Level 20 claimed! Free PRO tier + bottom 2X PRO track unlocked!');
+  } else if (activeReward.type === 'coin_live_post') {
+    toast(isProTrack
+      ? 'PRO 2X Level 10 claimed! +2 extra Coin Live Posts unlocked above.'
+      : 'Level 10 Coin Live Post unlocked! Choose your coin & message above.');
   }
 
-  passState.claimedTiers.add(tier);
-  try {
-    localStorage.setItem(`grind_pass_claims_s${season}_${currentUser.id}`, JSON.stringify([...passState.claimedTiers]));
-  } catch (e) {}
-
-  await sb.from('premium_requests').insert({
-    user_id: currentUser.id,
-    reason: `__PASS_CLAIM__:${season}:${tier}`,
-    status: 'denied'
-  });
+  if (isProTrack) {
+    passState.claimedProTiers.add(tier);
+    try {
+      localStorage.setItem(`grind_pass_pro_claims_s${season}_${currentUser.id}`, JSON.stringify([...passState.claimedProTiers]));
+    } catch (e) {}
+    await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: `__PASS_PRO_CLAIM__:${season}:${tier}`,
+      status: 'denied'
+    });
+  } else {
+    passState.claimedTiers.add(tier);
+    try {
+      localStorage.setItem(`grind_pass_claims_s${season}_${currentUser.id}`, JSON.stringify([...passState.claimedTiers]));
+    } catch (e) {}
+    await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: `__PASS_CLAIM__:${season}:${tier}`,
+      status: 'denied'
+    });
+  }
 
   await syncPassTimeToRemote(true);
+  updatePassNavBadge();
   updateUIProfile();
   renderPassPage();
 }
 
+async function claimAllReadyPassRewards() {
+  if (!currentUser || !sb) return;
+  const secs = getEffectivePassSeconds();
+  const season = passState.season || 1;
+  let hasPro = hasProPassAccess();
+  let totalCash = 0;
+  let unlockedProNow = false;
+  let unlockedLivePosts = 0;
+  const newFreeTiers = [];
+  const newProTiers = [];
+
+  // Pass 1: Collect Free track first (Level 20 grants PRO for Pass 2)
+  PASS_REWARDS.forEach(r => {
+    if (secs >= r.tier * PASS_STEP_SECONDS && !passState.claimedTiers.has(r.tier)) {
+      newFreeTiers.push(r.tier);
+      if (r.type === 'cash') totalCash += Number(r.amount || 0);
+      else if (r.type === 'coin_live_post') unlockedLivePosts += 1;
+      else if (r.type === 'pro') {
+        unlockedProNow = true;
+        hasPro = true;
+      }
+    }
+  });
+
+  // Pass 2: Collect PRO 2X track if eligible
+  if (hasPro) {
+    PASS_REWARDS.forEach(r => {
+      if (secs >= r.tier * PASS_STEP_SECONDS && !passState.claimedProTiers.has(r.tier)) {
+        newProTiers.push(r.tier);
+        const proR = getPassProReward(r);
+        if (proR.type === 'cash') totalCash += Number(proR.amount || 0);
+        else if (proR.type === 'coin_live_post') unlockedLivePosts += 2;
+      }
+    });
+  }
+
+  if (!newFreeTiers.length && !newProTiers.length) return;
+
+  const btn = $('#passClaimAllBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Claiming all...';
+  }
+
+  if (totalCash > 0) {
+    const newCash = Number(currentUser.cash || 0) + totalCash;
+    const { error } = await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
+    if (error) {
+      toast('Error claiming pass rewards: ' + error.message);
+      if (btn) btn.disabled = false;
+      renderPassPage();
+      return;
+    }
+    currentUser.cash = newCash;
+  }
+
+  if (unlockedProNow && !currentUser.is_pro) {
+    await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: '__PRO_TIER__',
+      status: 'approved'
+    });
+    localStorage.setItem('grind_pro_' + currentUser.id, '1');
+    currentUser.is_pro = true;
+    proUserIds.add(currentUser.id);
+  }
+
+  const inserts = [
+    ...newFreeTiers.map(t => ({ user_id: currentUser.id, reason: `__PASS_CLAIM__:${season}:${t}`, status: 'denied' })),
+    ...newProTiers.map(t => ({ user_id: currentUser.id, reason: `__PASS_PRO_CLAIM__:${season}:${t}`, status: 'denied' }))
+  ];
+  if (inserts.length) {
+    await sb.from('premium_requests').insert(inserts);
+  }
+
+  newFreeTiers.forEach(t => passState.claimedTiers.add(t));
+  newProTiers.forEach(t => passState.claimedProTiers.add(t));
+  try {
+    localStorage.setItem(`grind_pass_claims_s${season}_${currentUser.id}`, JSON.stringify([...passState.claimedTiers]));
+    localStorage.setItem(`grind_pass_pro_claims_s${season}_${currentUser.id}`, JSON.stringify([...passState.claimedProTiers]));
+  } catch (e) {}
+
+  if (totalCash > 0) await updateNetWorth();
+  await syncPassTimeToRemote(true);
+  updatePassNavBadge();
+  updateUIProfile();
+  if (btn) btn.disabled = false;
+  renderPassPage();
+
+  const parts = [];
+  if (totalCash > 0) parts.push(`+${money(totalCash)} cash`);
+  if (unlockedLivePosts > 0) parts.push(`+${unlockedLivePosts} Coin Live Post${unlockedLivePosts > 1 ? 's' : ''}`);
+  if (unlockedProNow) parts.push('Free PRO tier');
+  toast(`Claimed ${newFreeTiers.length + newProTiers.length} Pass rewards: ${parts.join(', ')}!`);
+}
+
+$('#passClaimAllBtn')?.addEventListener('click', claimAllReadyPassRewards);
+$('#passScrollLeftBtn')?.addEventListener('click', () => {
+  $('#passColumnsScroll')?.scrollBy({ left: -360, behavior: 'smooth' });
+});
+$('#passScrollRightBtn')?.addEventListener('click', () => {
+  $('#passColumnsScroll')?.scrollBy({ left: 360, behavior: 'smooth' });
+});
+
 $('#sendPassLivePostBtn')?.addEventListener('click', async () => {
-  if (!currentUser || !sb || !passState.claimedTiers.has(10) || passState.livePostUsed) return;
+  const granted = getLivePostsGrantedCount();
+  if (!currentUser || !sb || granted <= 0 || Number(passState.livePostsUsed || 0) >= granted) return;
   const coinId = $('#passLivePostCoin')?.value || '';
   const message = ($('#passLivePostMsg')?.value || '').trim();
   if (!coinId) return toast('Choose a coin first.');
@@ -5639,8 +5932,8 @@ $('#sendPassLivePostBtn')?.addEventListener('click', async () => {
     return;
   }
 
-  passState.livePostUsed = true;
-  try { localStorage.setItem(`grind_pass_livepost_s${season}_${currentUser.id}`, '1'); } catch (e) {}
+  passState.livePostsUsed = Number(passState.livePostsUsed || 0) + 1;
+  try { localStorage.setItem(`grind_pass_livepost_count_s${season}_${currentUser.id}`, String(passState.livePostsUsed)); } catch (e) {}
   if ($('#passLivePostMsg')) $('#passLivePostMsg').value = '';
   toast('Coin Live Post is now live for everyone!');
   renderPassPage();
@@ -5726,7 +6019,7 @@ function isGreetingOrSmallTalk(question) {
 
 function hasGrindTopic(question) {
   const q = String(question || '').toLowerCase();
-  const grindWords = /\b(grind|coin|coins|currency|currencies|token|ticker|stock|stocks|market|trade|trading|invest|investing|investment|buy|sell|hold|holding|holdings|portfolio|net worth|cash|money|price|chart|curve|trending|cheapest|expensive|featured|watchlist|profit|pnl|live|pass|pro|premium|divest|dip|pump|volume|momentum|strategy|tactic|tactics|recommend|suggest|best|should i|aktie|aktier|köp|köpa|sälj|sälja|investera|valuta|marknad|tips|bästa|pengar)\b/i;
+  const grindWords = /\b(grind|grind[\s-]?bot|coin|coins|currency|currencies|token|ticker|stock|stocks|market|trade|trading|invest|investing|investment|buy|sell|hold|holding|holdings|portfolio|net[\s-]?worth|cash|money|balance|wealth|rich|richer|higher|increase|grow|growth|boost|earn|gain|gains|profit|profits|pnl|price|chart|curve|bonding|trending|cheapest|expensive|featured|watchlist|live|live[\s-]?post|pass|battle[\s-]?pass|season|play[\s-]?time|pro|premium|member|creator|create|tier|level|reward|rewards|daily|login|streak|ad|ads|leaderboard|rank|ranking|divest|dip|pump|volume|momentum|strategy|tactic|tactics|recommend|suggest|best|should i|game|play|shares?|value|how do i make|make money|get rich|aktie|aktier|köp|köpa|sälj|sälja|investera|valuta|marknad|tips|bästa|pengar|tjäna|rik)\b/i;
   if (grindWords.test(q)) return true;
   if (coins.some(c => {
     const nm = (c.name || '').toLowerCase();
@@ -5753,20 +6046,30 @@ function generateLocalGrindBotReply(question, userHoldings = []) {
       return `See you later, **${uname}**! Watch the **LIVE** feed and protect your profits.`;
     }
     if (/^(ok|okay|cool|nice|alright|got\s+it|sounds\s+good)/i.test(lowerG)) {
-      return `Ready whenever you are! Ask me what coins to invest in, how to size a buy, or when to take profits.`;
+      return `Ready whenever you are! Ask me how to raise your net worth, what coins to invest in, or any question about GRIND.`;
     }
-    return `Hey **${uname}**! I'm **GRIND-BOT** — watching **${coins.length} active coins** in the live market (your cash: **${money(cash)}**).\n\nI can chat a bit, and I'm always ready to help with **GRIND stock & market tactics** — ask me what looks smart to invest in right now!`;
+    return `Hey **${uname}**! I'm **GRIND-BOT** — watching **${coins.length} active coins** in the live market (your cash: **${money(cash)}**, Net Worth: **${money(netWorth)}**).\n\nI can chat a bit, and I'm ready to help with **all GRIND game & stock questions** — raising your net worth, coin picks, Daily Login, Battle Pass, or curve tactics!`;
   }
 
   if (!hasGrindTopic(q)) {
-    return `I'm **GRIND-BOT** — you can say hi anytime, but I can **only** answer questions about **stock & market tactics inside the GRIND game**.\n\nTry asking:\n• "What coins should I invest in right now?"\n• "Show me all coins in the market"\n• "Should I sell any of my holdings?"`;
+    return `I'm **GRIND-BOT** — you can say hi anytime, and I can help with **anything inside the GRIND game** (net worth, stock tactics, Battle Pass, Daily Login, Ads, creating coins, or market coins), though not outside topics.\n\nTry asking:\n• "How do I raise my net worth fast?"\n• "What coins should I invest in right now?"\n• "How does the bonding curve or Battle Pass work?"`;
   }
 
   const lower = q.toLowerCase();
   const featSet = new Set((featuredCoinIdsCache || []).filter(Boolean).map(String));
 
+  // Game mechanics & overall GRIND help (Pass, Daily, Ads, Curve, Create, Tiers, Leaderboard)
+  if (/\b(battle\s*pass|pass|season|play[\s-]?time|2x track|live[\s-]?post)\b/i.test(lower) && !/\b(invest|buy|net[\s-]?worth|coin|pick)\b/i.test(lower)) {
+    const lv = Math.min(20, Math.floor(getEffectivePassSeconds() / PASS_STEP_SECONDS));
+    return `**Season ${passState.season || 1} Battle Pass Guide (Your Level: ${lv}/20):**\n• Every **5 minutes** of Pass Play Time unlocks 1 level (up to Level 20 at 100m).\n• **Top Row (Free Track):** Cash bonuses ($5–$60), **Coin Live Post** at Level 10, and **Free PRO upgrade** at Level 20.\n• **Bottom Row (PRO Track — 2X):** PRO & Premium players get **double** every cash tier ($10–$120), **+2 Coin Live Posts** at Level 10, and a **$120 PRO Finale** bonus at Level 20.\n• Season resets only reset **Pass Play Time** — your **Time Played Leaderboard** stays untouched!`;
+  }
+
+  if (/\b(daily|streak|ads?|watch ad|bonding curve|curve|how does.*game work|how to play)\b/i.test(lower) && !/\b(net[\s-]?worth|invest|buy|best coin)\b/i.test(lower)) {
+    return `**GRIND Core Mechanics Guide:**\n• **Bonding Curve (CURVE_K = 0.30):** Coins start at **$1.00**. Every buy adds \`+$0.30 × $amount\` to the price; sells reverse the exact curve. You profit when other traders buy *after* you.\n• **Daily Login & Ads:** Check **Daily Login** every day for cash streaks (**2X cash** for PRO/Premium, plus PRO on Day 7), and watch **Ads** for **$1.00** per video.\n• **Tiers:** **Member** (1 coin), **PRO** (2 coins, 2X Daily, 2X Pass track, GRIND-BOT), **Premium** (3 coins, Blue Star, all PRO perks).`;
+  }
+
   if (!coins.length) {
-    return `There are **0 active coins** in the GRIND market right now.\n\n**Best tactic right now:**\n• You have **${money(cash)}** cash ready.\n• Launch a coin in **Create** ($1.00 start) — it adds directly to your portfolio value and attracts the first wave of buyers on the LIVE feed.`;
+    return `There are **0 active coins** in the GRIND market right now.\n\n**Best way to grow your Net Worth (${money(netWorth)}) right now:**\n• You have **${money(cash)}** cash ready.\n• Launch a coin in **Create** ($1.00 start) — it adds directly to your portfolio value and attracts the first wave of buyers on the LIVE feed.\n• Claim **Battle Pass (2X PRO)**, **Daily Login**, and **$1.00 Ads** while building capital.`;
   }
 
   // Score every active coin using live curve & demand data
@@ -5911,6 +6214,23 @@ function generateLocalGrindBotReply(question, userHoldings = []) {
   if (coldCoins.length) {
     const warnNames = coldCoins.slice(0, 2).map(c => `$${c.coin.ticker} (${priceFmt(c.price)})`).join(', ');
     sections.push(`**Caution:** Avoid heavy buys into high-price coins with 0 buys in 24h (e.g. ${warnNames}) until fresh buyers appear in **LIVE**.`);
+  }
+
+  // Dedicated Net Worth / Growth Playbook if user asks how to raise net-worth or get richer
+  if (/\b(net[\s-]?worth|higher|increase|grow|growth|boost|get rich|richer|wealth|make money|earn cash|earn more|rank up|leaderboard)\b/i.test(lower)) {
+    const lv = Math.min(20, Math.floor(getEffectivePassSeconds() / PASS_STEP_SECONDS));
+    const hasPro = hasProPassAccess();
+    const myCreatedCount = coins.filter(c => currentUser && String(c.creator_id) === String(currentUser.id)).length;
+    const nwTips = [
+      `• **1. Claim Free + PRO 2X Battle Pass Rewards (Currently Lv ${lv}/20):** Every 5m of Play Time unlocks cash up to $60 Free + **$120 PRO 2X** per tier — pure zero-risk Net Worth growth.`,
+      `• **2. Never Miss Daily Login & Ads:** Daily Login gives **2X cash** for PRO/Premium (up to +$30 on Day 7), and each **Ad** pays an instant **$1.00** risk-free.`,
+      `• **3. Ride Early Inflows, Scale Out in Quarters:** Enter low-price or high-24h-buy coins early, then sell **1/4** or **1/2** after surges so other traders' buys lock into your Net Worth.`,
+      myCreatedCount === 0
+        ? `• **4. Launch Your Own Coin & Promote It:** Use **Create** to launch a coin and use your Level 10 **Coin Live Post** in **LIVE** to attract early buyers!`
+        : `• **4. Promote Your Created Coin(s):** Use a Level 10 **Coin Live Post** (you get **3 total** with PRO!) and keep an eye on **LIVE** for incoming buyers.`,
+      !hasPro ? `• **5. Unlock PRO:** Reach Pass Lv 20 or Daily Day 7 to double Daily & Pass rewards.` : `• **5. Leverage Your PRO Status:** Remember you get **2X** on both Daily Login and the bottom Battle Pass track — claim them as soon as they unlock!`
+    ];
+    sections.splice(1, 0, `**How to Raise Your Net Worth Faster (Current: ${money(netWorth)}):**\n${nwTips.join('\n')}`);
   }
 
   return sections.join('\n\n');

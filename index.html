@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=28">
+  <link rel="stylesheet" href="styles.css?v=29">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -452,18 +452,24 @@
           <div id="adminAccountsList" class="leaderboard-list"></div>
         </section>
 
-        <!-- PASS (Battle Pass) -->
+        <!-- PASS (Battle Pass: Top Free Track + Bottom PRO 2X Track) -->
         <section id="page-pass" class="page hidden">
           <div class="pass-hero-card">
             <div class="pass-hero-top">
               <div>
                 <div class="eyebrow purple-text" id="passSeasonEyebrow">SEASON 1 BATTLE PASS</div>
-                <h3 style="margin:4px 0;">Season <span id="passSeasonTitleNum">1</span> Pass</h3>
-                <p class="muted tiny" style="margin:0;">Unlock 20 rewards every 5 minutes of active Play Time. Pass Play Time resets each new season — Leaderboard Time Played stays untouched.</p>
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0;">
+                  <h3 style="margin:0;">Season <span id="passSeasonTitleNum">1</span> Pass</h3>
+                  <span id="passProTrackStatus" class="pass-track-pill locked">FREE TRACK ONLY</span>
+                </div>
+                <p class="muted tiny" style="margin:0;">Unlock 20 levels every 5 minutes of Play Time. Top track is Free; bottom PRO track gives 2X every reward! Pass Play Time resets each new season (Leaderboard untouched).</p>
               </div>
-              <div class="pass-time-pill">
-                <span class="muted tiny">PASS PLAY TIME</span>
-                <strong id="passPlayTimeValue">0m 00s</strong>
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <button type="button" class="primary-btn hidden" id="passClaimAllBtn">Claim All Ready</button>
+                <div class="pass-time-pill">
+                  <span class="muted tiny">PASS PLAY TIME</span>
+                  <strong id="passPlayTimeValue">0m 00s</strong>
+                </div>
               </div>
             </div>
             <div class="pass-progress-meta">
@@ -495,7 +501,32 @@
             </div>
           </div>
 
-          <div id="passTiersGrid" class="pass-tiers-grid"></div>
+          <div class="pass-board-controls">
+            <span class="muted tiny">Top Track: <strong>Free</strong> · Bottom Track: <strong style="color:#fbbf24;">PRO (2X)</strong></span>
+            <div style="display:flex;gap:6px;">
+              <button type="button" class="zoom-btn" id="passScrollLeftBtn" title="Scroll left">◀ Prev</button>
+              <button type="button" class="zoom-btn" id="passScrollRightBtn" title="Scroll right">Next ▶</button>
+            </div>
+          </div>
+
+          <div class="pass-board-shell">
+            <div class="pass-track-labels">
+              <div class="pass-track-label free">
+                <span class="pass-track-tag free">FREE</span>
+                <small class="muted tiny">All Players</small>
+              </div>
+              <div class="pass-track-label spine">
+                <span class="tiny muted">LEVEL</span>
+              </div>
+              <div class="pass-track-label pro">
+                <span class="pass-track-tag pro">PRO · 2X</span>
+                <small class="tiny" style="color:#fcd34d;">PRO / Premium</small>
+              </div>
+            </div>
+            <div id="passColumnsScroll" class="pass-columns-scroll">
+              <div id="passTiersTrack" class="pass-columns-track"></div>
+            </div>
+          </div>
         </section>
 
         <!-- GRIND-BOT (PRO+ AI Stock Tactics Chatbot) -->
@@ -504,14 +535,14 @@
             <div>
               <div class="eyebrow purple-text">⌘ AI TACTICAL ADVISOR</div>
               <h3>GRIND-BOT</h3>
-              <p class="muted">Stock &amp; market tactics advisor exclusively for the GRIND game. Requires PRO or Premium tier.</p>
+              <p class="muted">All GRIND game help, net worth growth &amp; stock tactics. Requires PRO or Premium tier.</p>
             </div>
           </div>
 
           <div id="grindBotLocked" class="form-card grindbot-locked hidden">
             <div class="empty-icon">⌘</div>
             <h3>PRO or Premium Required</h3>
-            <p class="muted" style="max-width:460px;margin:8px auto 18px;">GRIND-BOT analyzes live GRIND bonding-curve tactics, entry timing, and portfolio moves exclusively for PRO and Premium traders.</p>
+            <p class="muted" style="max-width:460px;margin:8px auto 18px;">GRIND-BOT analyzes live GRIND bonding-curve tactics, net worth growth, and portfolio moves exclusively for PRO and Premium traders.</p>
             <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
               <button type="button" class="primary-btn" data-goto="pass">Earn Free PRO in Pass (Lv 20)</button>
               <button type="button" class="zoom-btn" id="grindBotOpenDailyBtn" style="padding:12px 18px;">Daily Login (Day 7 PRO)</button>
@@ -525,23 +556,23 @@
                 <div class="grindbot-avatar">⌘</div>
                 <div>
                   <strong>GRIND-BOT</strong>
-                  <div class="muted tiny">GRIND Market Tactics Only · Live Market Aware</div>
+                  <div class="muted tiny">All GRIND Questions &amp; Tactics · Live Market Aware</div>
                 </div>
               </div>
               <button type="button" class="zoom-btn" id="grindBotClearBtn">New Chat</button>
             </div>
 
             <div class="grindbot-prompts" id="grindBotQuickPrompts">
+              <button type="button" class="feed-tab grindbot-chip" data-gb-prompt="How do I raise my net-worth faster in GRIND?">Raise my net worth</button>
               <button type="button" class="feed-tab grindbot-chip" data-gb-prompt="Analyze the current GRIND market and suggest my best tactical move right now.">Analyze current market</button>
-              <button type="button" class="feed-tab grindbot-chip" data-gb-prompt="How should I grow $15 starting cash safely using GRIND's bonding curve?">Grow $15 cash safely</button>
               <button type="button" class="feed-tab grindbot-chip" data-gb-prompt="When is the best time to sell 1/4, 1/2, or All of a rising coin?">When to scale out &amp; sell</button>
-              <button type="button" class="feed-tab grindbot-chip" data-gb-prompt="How do I spot good early Trending or Newest coins before other traders buy?">Spot early momentum</button>
+              <button type="button" class="feed-tab grindbot-chip" data-gb-prompt="How do the Season Battle Pass, PRO 2X track, and Daily Login work?">How Pass &amp; Daily work</button>
             </div>
 
             <div id="grindBotMessages" class="grindbot-messages"></div>
 
             <form id="grindBotForm" class="grindbot-composer">
-              <input id="grindBotInput" maxlength="1500" autocomplete="off" placeholder="Ask GRIND-BOT about stock &amp; market tactics in GRIND...">
+              <input id="grindBotInput" maxlength="1500" autocomplete="off" placeholder="Ask GRIND-BOT about net worth, coins, Battle Pass, or tactics...">
               <button type="submit" class="primary-btn" id="grindBotSendBtn">Send</button>
             </form>
           </div>
@@ -751,6 +782,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=28"></script>
+  <script src="app.js?v=29"></script>
 </body>
 </html>
