@@ -5649,6 +5649,8 @@ $('#sendPassLivePostBtn')?.addEventListener('click', async () => {
 // ============================================================
 // ---------- GRIND-BOT (PRO+ AI STOCK TACTICS) ---------------
 // ============================================================
+const GRIND_BOT_REMOTE_URL = 'https://ais-pre-6t6kqxwlmllmygnc6gzkjm-935946932105.europe-west2.run.app/api/grind-bot';
+
 function formatBotMessageHtml(rawText) {
   let html = escapeHtml(rawText || '');
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
@@ -5656,21 +5658,240 @@ function formatBotMessageHtml(rawText) {
   return html;
 }
 
-function buildGrindBotMarketContext() {
+async function fetchGrindBotUserHoldings() {
+  if (!sb || !currentUser) return [];
+  try {
+    const srvResetTs = adminModStateCache.serverResetTs || 0;
+    const delCoins = adminModStateCache.deletedCoinIds || new Set();
+    const { data } = await sb
+      .from('holdings')
+      .select('coin_id, shares, coins(id, name, ticker, price, created_at)')
+      .eq('user_id', currentUser.id)
+      .gt('shares', 0);
+    return (data || [])
+      .filter(h => !delCoins.has(String(h.coin_id)) && (!srvResetTs || (h.coins?.created_at && new Date(h.coins.created_at).getTime() > srvResetTs)))
+      .map(h => {
+        const c = coins.find(x => String(x.id) === String(h.coin_id)) || h.coins;
+        const price = Number(c?.price || 1);
+        const shares = Number(h.shares || 0);
+        return {
+          coinId: String(h.coin_id),
+          name: c?.name || 'Coin',
+          ticker: c?.ticker || 'COIN',
+          price,
+          shares,
+          value: calcHoldingsValue(price, shares),
+          recentBuys: c?.recent_buys_24h || 0,
+          changePct: Number(c?.change_pct || 0)
+        };
+      });
+  } catch (e) {
+    return [];
+  }
+}
+
+function buildGrindBotMarketContext(userHoldings = []) {
   const tier = tierLabel(currentUser);
   const cashStr = money(currentUser?.cash || 0);
   const nwStr = money(currentUser?.net_worth || currentUser?.cash || 0);
-  const trending = [...coins]
-    .sort((a, b) => (b.recent_buys_24h || 0) - (a.recent_buys_24h || 0))
-    .slice(0, 5)
-    .map(c => `${c.name} ($${c.ticker}): price=${priceFmt(c.price)}, today=${Number(c.change_pct || 0).toFixed(2)}%, 24h_buys=${c.recent_buys_24h || 0}`)
-    .join('; ');
-  const cheapest = [...coins]
-    .sort((a, b) => Number(a.price) - Number(b.price))
-    .slice(0, 4)
-    .map(c => `$${c.ticker}@${priceFmt(c.price)}`)
-    .join(', ');
-  return `Trader: ${currentUser?.username || 'Trader'} | Tier: ${tier} | Cash: ${cashStr} | Net Worth: ${nwStr} | Active Coins: ${coins.length} | Top Trending: ${trending || 'none yet'} | Cheapest: ${cheapest || 'none yet'}`;
+  const featSet = new Set((featuredCoinIdsCache || []).filter(Boolean).map(String));
+
+  const allCoinsSummary = [...coins]
+    .sort((a, b) => (b.recent_buys_24h || 0) - (a.recent_buys_24h || 0) || Number(b.buy_volume || 0) - Number(a.buy_volume || 0))
+    .map(c => {
+      const tags = [];
+      if (featSet.has(String(c.id))) tags.push('FEATURED');
+      if (watchlistIds.has(String(c.id))) tags.push('WATCHLIST');
+      if (currentUser && String(c.creator_id) === String(currentUser.id)) tags.push('YOUR_COIN');
+      const tagStr = tags.length ? ` [${tags.join(',')}]` : '';
+      return `${c.name} ($${c.ticker}): price=${priceFmt(c.price)}, today=${Number(c.change_pct || 0).toFixed(2)}%, 24h_buys=${c.recent_buys_24h || 0}, total_buys=${c.total_buys || 0}, vol=${money(c.buy_volume || 0)}${tagStr}`;
+    })
+    .join('\n');
+
+  const holdingsSummary = userHoldings.length
+    ? userHoldings.map(h => `${h.name} ($${h.ticker}): shares=${h.shares.toFixed(4)}, value=${money(h.value)}, price=${priceFmt(h.price)}`).join('; ')
+    : 'None';
+
+  return `Trader: ${currentUser?.username || 'Trader'} | Tier: ${tier} | Available Cash: ${cashStr} | Net Worth: ${nwStr}
+Your Current Holdings: ${holdingsSummary}
+All Active Market Coins (${coins.length} total):
+${allCoinsSummary || 'No active coins yet.'}`;
+}
+
+function isOffTopicForGrindBot(question) {
+  const q = String(question || '').toLowerCase();
+  const grindWords = /\b(grind|coin|coins|currency|currencies|token|ticker|stock|stocks|market|trade|trading|invest|buy|sell|hold|portfolio|net worth|cash|price|chart|curve|trending|cheapest|expensive|featured|watchlist|profit|pnl|live|pass|pro|premium|coinbase|divest|dip|pump|volume|momentum|aktie|aktier|köp|köpa|sälj|sälja|investera|valuta|marknad|tips|bästa|pengar)\b/i;
+  if (grindWords.test(q)) return false;
+  if (coins.some(c => q.includes((c.name || '').toLowerCase()) || q.includes((c.ticker || '').toLowerCase()))) {
+    return false;
+  }
+  const offTopicWords = /\b(recipe|cook|weather|homework|essay|poem|python|javascript|java|html|css|c\+\+|translate|president|history|geography|movie|song|bitcoin|ethereum|nasdaq|nyse|s&p\s*500|tesla|apple|nvidia)\b/i;
+  if (offTopicWords.test(q)) return true;
+  // Short conversational check-ins vs clearly unrelated queries
+  if (q.split(/\s+/).length >= 5) return true;
+  return false;
+}
+
+function generateLocalGrindBotReply(question, userHoldings = []) {
+  const q = String(question || '').trim();
+  if (isOffTopicForGrindBot(q)) {
+    return `I'm **GRIND-BOT** — I can only help with **stock & market trading tactics inside the GRIND game**.\n\nTry asking:\n• "What coins should I invest in right now?"\n• "Show me all coins in the market"\n• "Should I sell any of my holdings?"`;
+  }
+
+  const lower = q.toLowerCase();
+  const cash = Number(currentUser?.cash || 0);
+  const netWorth = Number(currentUser?.net_worth || cash);
+  const featSet = new Set((featuredCoinIdsCache || []).filter(Boolean).map(String));
+
+  if (!coins.length) {
+    return `There are **0 active coins** in the GRIND market right now.\n\n**Best tactic right now:**\n• You have **${money(cash)}** cash ready.\n• Launch a coin in **Create** ($1.00 start) — it adds directly to your portfolio value and attracts the first wave of buyers on the LIVE feed.`;
+  }
+
+  // Score every active coin using live curve & demand data
+  const scored = coins.map(c => {
+    const price = Math.max(Number(c.price || 1), 0.01);
+    const buys24 = Number(c.recent_buys_24h || 0);
+    const totalBuys = Number(c.total_buys || 0);
+    const vol = Number(c.buy_volume || 0);
+    const pct = Number(c.change_pct || 0);
+    const isFeatured = featSet.has(String(c.id));
+    const curveLeverage = 3.0 / price; // +% move per $10 inflow on CURVE_K=0.30
+    const momentumScore = buys24 * 12 + Math.min(vol, 500) * 0.25 + (isFeatured ? 14 : 0) + (pct > 0 ? Math.min(pct, 40) * 0.2 : 0);
+    const earlyValueScore = (price <= 3.5 ? 25 : Math.max(0, 18 - price)) + buys24 * 6 + totalBuys * 1.5 + (isFeatured ? 10 : 0);
+    return {
+      coin: c,
+      price,
+      buys24,
+      totalBuys,
+      vol,
+      pct,
+      isFeatured,
+      curveLeverage,
+      momentumScore,
+      earlyValueScore
+    };
+  });
+
+  // 1. Check if user asked about a specific coin in the market
+  const matchedCoin = coins.find(c => {
+    const nm = (c.name || '').toLowerCase();
+    const tk = (c.ticker || '').toLowerCase();
+    return (tk && (lower.includes('$' + tk) || new RegExp(`\\b${tk.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(q)))
+      || (nm.length >= 3 && lower.includes(nm));
+  });
+
+  if (matchedCoin) {
+    const s = scored.find(x => String(x.coin.id) === String(matchedCoin.id));
+    const held = userHoldings.find(h => String(h.coinId) === String(matchedCoin.id));
+    const sampleBuy = Math.min(Math.max(5, Math.floor(cash * 0.35 * 100) / 100), Math.max(cash, 5));
+    const sim = calcCurveBuy(s.price, sampleBuy);
+    const impactPct = ((sim.newPrice - s.price) / s.price) * 100;
+
+    let verdict = '**Wait / Small Probe Only** — low recent demand right now. Because GRIND uses a CURVE_K=0.30 bonding curve, you only profit if other traders buy in after you.';
+    if (s.buys24 >= 2 && s.price <= 5) {
+      verdict = `**Strong Tactical Buy** — active 24h demand (${s.buys24} buys) at a low curve price (${priceFmt(s.price)}), giving strong upside per dollar of inflow.`;
+    } else if (s.buys24 >= 2) {
+      verdict = `**Momentum Ride (Scale Carefully)** — active 24h demand (${s.buys24} buys), though higher curve price (${priceFmt(s.price)}) means slower % moves; plan partial sells (1/4 or 1/2).`;
+    } else if (s.isFeatured) {
+      verdict = `**Featured Spotlight Play** — currently Featured on the Feed, which brings extra eyeballs and potential inflows.`;
+    }
+
+    const lines = [
+      `**Market Breakdown: ${matchedCoin.name} ($${matchedCoin.ticker})**`,
+      `• **Price:** ${priceFmt(s.price)} (${s.pct >= 0 ? '+' : ''}${s.pct.toFixed(2)}% today) · **24h Buys:** ${s.buys24} · **Buy Volume:** ${money(s.vol)}${s.isFeatured ? ' · **★ Featured**' : ''}`,
+      held ? `• **Your Position:** ${held.shares.toFixed(4)} $${matchedCoin.ticker} worth **${money(held.value)}**` : `• **Your Position:** None held`,
+      `• **Curve Simulation:** Putting **${money(sampleBuy)}** moves the price to **${priceFmt(sim.newPrice)}** (+${impactPct.toFixed(1)}%) and mints **${sim.shares.toFixed(4)} shares**.`,
+      `• **GRIND-BOT Verdict:** ${verdict}`
+    ];
+    return lines.join('\n');
+  }
+
+  // 2. Portfolio / Sell / Scaling out questions
+  if (/\b(1\/4|1\/2|3\/4|scale out|when.*sell|best time to sell)\b/i.test(lower)) {
+    const holdingLines = userHoldings.length
+      ? `\n\n**Your Live Positions Right Now:**\n` + userHoldings.map(h =>
+          `• **${h.name} ($${h.ticker})** (${money(h.value)} @ ${priceFmt(h.price)}, ${h.recentBuys} buys/24h): ${h.recentBuys >= 2 ? 'Keep **1/2**, trim **1/4** if spiking' : 'Consider **1/2** or **All** if volume stays quiet'}`
+        ).join('\n')
+      : '';
+    return `**GRIND Partial Selling Tactics (1/4 vs 1/2 vs 3/4 vs All):**\n• **Sell 1/4:** Use on early green waves when 24h buys are still rising — locks in profit while letting 75% ride the curve.\n• **Sell 1/2:** Best when a coin doubles or slows down after a big surge — secures your original cash so your remaining shares are risk-free.\n• **Sell 3/4 or All:** Exit fast when **LIVE** activity stalls (` + '`0 recent buys`' + `) or large holders begin dumping.${holdingLines}`;
+  }
+
+  if (/\b(holding|holdings|portfolio|my coins|should i sell|sälj|sälja)\b/i.test(lower)) {
+    if (!userHoldings.length) {
+      return `You don't hold any other coins yet (**${money(cash)}** cash available).\n\nSince you have 0 open positions, look at active 24h movers and invest **25%–40%** of your cash rather than going all-in on a single coin.`;
+    }
+    const lines = [`**Your Holdings Tactical Review** (Cash: ${money(cash)} · Net Worth: ${money(netWorth)}):`];
+    userHoldings.forEach(h => {
+      let action = 'Hold & monitor LIVE activity';
+      if (h.recentBuys >= 2 && h.changePct > 10) {
+        action = 'Strong momentum — consider taking **1/4** or **1/2** profit on spikes while keeping core shares';
+      } else if (h.recentBuys === 0 && h.value >= 3) {
+        action = 'Quiet 24h volume — watch closely; rotate **1/2** or **All** if volume stays dead while other coins trend';
+      }
+      lines.push(`• **${h.name} ($${h.ticker})** — Value **${money(h.value)}** @ ${priceFmt(h.price)} (${h.recentBuys} buys/24h): ${action}`);
+    });
+    return lines.join('\n');
+  }
+
+  // 3. List all coins in the market if asked specifically
+  const wantsFullList = /\b(all coins|all currencies|every coin|list|see all|hela marknaden|alla coins)\b/i.test(lower);
+  const byMomentum = [...scored].sort((a, b) => b.momentumScore - a.momentumScore || b.vol - a.vol);
+  const byEarly = [...scored]
+    .filter(x => x.price <= 4.0)
+    .sort((a, b) => b.earlyValueScore - a.earlyValueScore || a.price - b.price);
+
+  const topMomentum = byMomentum[0];
+  const topEarly = byEarly.find(x => !topMomentum || String(x.coin.id) !== String(topMomentum.coin.id)) || byMomentum[1];
+  const featuredList = scored.filter(x => x.isFeatured);
+  const coldCoins = scored.filter(x => x.buys24 === 0 && x.price > 4.0).sort((a, b) => b.price - a.price);
+
+  const header = `**Live GRIND Market Scan (${coins.length} Active Coins · Your Cash: ${money(cash)})**`;
+  const sections = [header];
+
+  if (wantsFullList) {
+    const marketLines = [...scored]
+      .sort((a, b) => b.buys24 - a.buys24 || b.price - a.price)
+      .slice(0, 25)
+      .map(s => `• **${s.coin.name} ($${s.coin.ticker})** — ${priceFmt(s.price)} (${s.pct >= 0 ? '+' : ''}${s.pct.toFixed(1)}% today, ${s.buys24} buys/24h, vol ${money(s.vol)})${s.isFeatured ? ' ★' : ''}`);
+    sections.push(marketLines.join('\n') + (coins.length > 25 ? `\n_(Showing top 25 of ${coins.length} coins)_` : ''));
+  }
+
+  // Smart Investment Recommendations
+  const picks = [];
+  if (topMomentum) {
+    picks.push(`1. **Top Momentum Play — ${topMomentum.coin.name} ($${topMomentum.coin.ticker})** @ **${priceFmt(topMomentum.price)}**\n   • **Why:** ${topMomentum.buys24} buys in the last 24h (${money(topMomentum.vol)} volume, ${topMomentum.pct >= 0 ? '+' : ''}${topMomentum.pct.toFixed(1)}% today)${topMomentum.isFeatured ? ' + currently **Featured**' : ''}. High buyer traffic makes follow-on inflows more likely.`);
+  }
+  if (topEarly) {
+    picks.push(`2. **Best Low-Price Curve Entry — ${topEarly.coin.name} ($${topEarly.coin.ticker})** @ **${priceFmt(topEarly.price)}**\n   • **Why:** At ${priceFmt(topEarly.price)}, every $10 of new buys adds +$3.00 to price (~+${Math.round((3 / topEarly.price) * 100)}% curve jump), giving much higher % leverage than expensive coins.`);
+  }
+  if (featuredList.length) {
+    const fNames = featuredList.map(f => `**$${f.coin.ticker}** (${priceFmt(f.price)})`).join(', ');
+    picks.push(`3. **Featured Spotlight:** ${fNames} — Featured coins sit at the top of everyone's Feed, often pulling extra impulse buys.`);
+  }
+  if (picks.length) {
+    sections.push(`**Smartest Investments Right Now:**\n${picks.join('\n')}`);
+  }
+
+  // Tailored Cash Sizing Plan
+  if (cash >= 2) {
+    const leg1 = Math.round(cash * 0.40 * 100) / 100;
+    const leg2 = Math.round(cash * 0.30 * 100) / 100;
+    const reserve = Math.max(0, Math.round((cash - leg1 - leg2) * 100) / 100);
+    if (topMomentum && topEarly) {
+      sections.push(`**Suggested Cash Split for your ${money(cash)}:**\n• **${money(leg1)}** into **$${topMomentum.coin.ticker}** (momentum leader)\n• **${money(leg2)}** into **$${topEarly.coin.ticker}** (low-price curve leverage)\n• Keep **${money(reserve)}** in cash to snipe brand-new launches on the LIVE feed`);
+    } else if (topMomentum) {
+      sections.push(`**Suggested Cash Split for your ${money(cash)}:**\n• Put **${money(leg1)}** into **$${topMomentum.coin.ticker}** and keep **${money(cash - leg1)}** cash ready for new launches.`);
+    }
+  } else {
+    sections.push(`**Cash Builder Note:** With **${money(cash)}** cash, grab **Season Pass** rewards (every 5m), **Daily Login**, or **Ads ($1.00)** to build buying power before taking bigger swings.`);
+  }
+
+  if (coldCoins.length) {
+    const warnNames = coldCoins.slice(0, 2).map(c => `$${c.coin.ticker} (${priceFmt(c.price)})`).join(', ');
+    sections.push(`**Caution:** Avoid heavy buys into high-price coins with 0 buys in 24h (e.g. ${warnNames}) until fresh buyers appear in **LIVE**.`);
+  }
+
+  return sections.join('\n\n');
 }
 
 function renderGrindBotMessages() {
@@ -5680,7 +5901,7 @@ function renderGrindBotMessages() {
     grindBotHistory = [
       {
         role: 'model',
-        text: `Welcome to **GRIND-BOT**! I specialize strictly in **GRIND stock & market tactics** — curve sizing, spotting momentum, partial selling (1/4, 1/2, 3/4, All), and growing your Net Worth.\n\nAsk me anything about trading strategy inside GRIND!`
+        text: `Welcome to **GRIND-BOT**! I can inspect **all ${coins.length} active coins** in the live GRIND market plus your holdings to suggest smart investments, bonding-curve entries, and exit timing.\n\nAsk me what to invest in right now!`
       }
     ];
   }
@@ -5701,6 +5922,28 @@ function renderGrindBotPage() {
   if (hasPro) renderGrindBotMessages();
 }
 
+async function tryGrindBotEndpoint(url, payload, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) return null;
+    const data = await res.json();
+    if (!res.ok || !data?.reply) return null;
+    return data.reply;
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function sendGrindBotPrompt(text) {
   if (!currentUser || grindBotSending) return;
   const hasPro = getUserTier(currentUser) === 'pro' || getUserTier(currentUser) === 'premium';
@@ -5713,39 +5956,43 @@ async function sendGrindBotPrompt(text) {
 
   const historyToSend = grindBotHistory.slice(-10);
   grindBotHistory.push({ role: 'user', text: clean });
-  grindBotHistory.push({ role: 'model', text: 'Analyzing GRIND market tactics...' });
+  grindBotHistory.push({ role: 'model', text: 'Scanning all live GRIND coins & calculating tactics...' });
   grindBotSending = true;
   if ($('#grindBotInput')) $('#grindBotInput').value = '';
   if ($('#grindBotSendBtn')) $('#grindBotSendBtn').disabled = true;
   renderGrindBotMessages();
 
   try {
-    const res = await fetch('/api/grind-bot', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: clean,
-        history: historyToSend,
-        marketContext: buildGrindBotMarketContext(),
-        isProOrHigher: true
-      })
-    });
-    const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      throw new Error('GRIND-BOT backend endpoint is unavailable on static hosting.');
+    await loadCoins();
+    const userHoldings = await fetchGrindBotUserHoldings();
+    const marketContext = buildGrindBotMarketContext(userHoldings);
+    const payload = {
+      message: clean,
+      history: historyToSend,
+      marketContext,
+      isProOrHigher: true
+    };
+
+    const isGithubPages = (window.location.hostname || '').endsWith('github.io');
+    let reply = null;
+    if (!isGithubPages) {
+      reply = await tryGrindBotEndpoint('/api/grind-bot', payload, 9000);
     }
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data?.error || 'Failed to reach GRIND-BOT.');
+    if (!reply) {
+      reply = await tryGrindBotEndpoint(GRIND_BOT_REMOTE_URL, payload, 5000);
     }
+    if (!reply) {
+      reply = generateLocalGrindBotReply(clean, userHoldings);
+    }
+
     grindBotHistory[grindBotHistory.length - 1] = {
       role: 'model',
-      text: data.reply || 'Ask me about GRIND trading tactics!'
+      text: reply
     };
   } catch (err) {
     grindBotHistory[grindBotHistory.length - 1] = {
       role: 'model',
-      text: `Unable to reach GRIND-BOT right now: ${err?.message || 'Connection error'}.`
+      text: generateLocalGrindBotReply(clean, [])
     };
   } finally {
     grindBotSending = false;
