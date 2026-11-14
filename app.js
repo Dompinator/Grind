@@ -1516,14 +1516,16 @@ function renderFeed() {
   if (feedMode === 'new' || feedMode === 'watchlist') list.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   if (feedMode === 'trending') {
     list.sort((a, b) => {
+      const pctA = Number(a.change_pct || 0);
+      const pctB = Number(b.change_pct || 0);
+      if (Math.abs(pctB - pctA) > 1e-6) {
+        return pctB - pctA;
+      }
       if ((b.recent_buys_24h || 0) !== (a.recent_buys_24h || 0)) {
         return (b.recent_buys_24h || 0) - (a.recent_buys_24h || 0);
       }
       if ((b.total_buys || 0) !== (a.total_buys || 0)) {
         return (b.total_buys || 0) - (a.total_buys || 0);
-      }
-      if ((b.last_buy_at || 0) !== (a.last_buy_at || 0)) {
-        return (b.last_buy_at || 0) - (a.last_buy_at || 0);
       }
       return (b.buy_volume || 0) - (a.buy_volume || 0);
     });
