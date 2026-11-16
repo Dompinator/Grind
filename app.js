@@ -295,15 +295,41 @@ $('#authForm')?.addEventListener('submit', async (e) => {
   const submitBtn = $('#authSubmit');
   if (mode === 'signup') {
     if (!password || password.length < 6) return authMsg('Password must be at least 6 characters.');
+    const requiresEmailOtp = /\d/.test(email);
     if (submitBtn) {
       submitBtn.disabled = true;
-      submitBtn.textContent = 'Sending code...';
+      submitBtn.textContent = requiresEmailOtp ? 'Sending code...' : 'Creating account...';
     }
     try {
-      // Prevent OTP login/overwrite on emails that already have a GRIND account
+      // Prevent duplicate/OTP overwrite on emails that already have a GRIND account
       const { data: existingProf } = await sb.from('profiles').select('id').ilike('email', email).maybeSingle();
       if (existingProf) {
         authMsg('An account with this email already exists. Please log in instead.');
+        return;
+      }
+
+      if (!requiresEmailOtp) {
+        // Emails with no numbers skip email code confirmation and create directly
+        const { data: suData, error: suErr } = await sb.auth.signUp({ email, password });
+        if (suErr) {
+          authMsg(/already registered/i.test(suErr.message || '')
+            ? 'An account with this email already exists. Please log in instead.'
+            : (suErr.message || 'Could not create account.'));
+          return;
+        }
+        if (!suData?.session) {
+          const { error: siErr } = await sb.auth.signInWithPassword({ email, password });
+          if (siErr) {
+            authMsg(siErr.message || 'Could not sign in after signup.');
+            return;
+          }
+        }
+        try {
+          if (suData?.user?.id) localStorage.setItem('grind_tos_pending_' + suData.user.id, '1');
+        } catch (err) {}
+        authMsg('');
+        await loadProfile();
+        if (!currentUser?.is_banned) enterApp();
         return;
       }
 
