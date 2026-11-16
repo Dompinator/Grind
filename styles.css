@@ -1287,6 +1287,36 @@ body[data-theme="gold-platinum"] .featured-slot-badge {
   color: var(--text);
 }
 
+/* Sell 100% Gain/Loss Preview */
+.sell-all-preview {
+  margin-top: 10px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface-deep, #120e1c);
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sell-all-preview.gain {
+  border-color: rgba(52, 211, 153, .45);
+  background: rgba(52, 211, 153, .1);
+}
+.sell-all-preview.gain .sell-all-main { color: #a7f3d0; }
+.sell-all-preview.gain .sell-all-main strong { color: var(--green); }
+.sell-all-preview.loss {
+  border-color: rgba(248, 113, 113, .45);
+  background: rgba(248, 113, 113, .1);
+}
+.sell-all-preview.loss .sell-all-main { color: #fecaca; }
+.sell-all-preview.loss .sell-all-main strong { color: var(--red); }
+.sell-all-preview.flat .sell-all-main { color: var(--text); }
+.sell-all-sub { font-size: 11px; }
+
+
 
 
 

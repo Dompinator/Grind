@@ -1911,17 +1911,57 @@ async function openCoin(id) {
   await renderCoinDetail();
 }
 
+function calcRemainingPutIn(userTrades, currentShares) {
+  if (!currentShares || currentShares <= 1e-8) return 0;
+  let trackedShares = 0;
+  let putIn = 0;
+  for (const t of userTrades) {
+    const amt = Math.max(0, Number(t.amount_usd) || 0);
+    const tShares = Math.max(0, Number(t.shares) || 0);
+    if (t.type === 'sell') {
+      if (trackedShares > 1e-8 && tShares > 0) {
+        const frac = Math.min(1, tShares / trackedShares);
+        if (frac >= 0.9999) {
+          trackedShares = 0;
+          putIn = 0;
+        } else {
+          putIn = Math.max(0, putIn * (1 - frac));
+          trackedShares = Math.max(0, trackedShares - tShares);
+          if (trackedShares <= 1e-6) {
+            trackedShares = 0;
+            putIn = 0;
+          }
+        }
+      } else {
+        putIn = Math.max(0, putIn - amt);
+      }
+    } else {
+      trackedShares += tShares;
+      putIn += amt;
+    }
+  }
+  return putIn;
+}
+
 async function renderCoinDetail() {
   if (!selectedCoin || !currentUser || !sb) return;
   const c = selectedCoin;
-  const { data: hold } = await sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', c.id).maybeSingle();
+  const srvResetTs = adminModStateCache.serverResetTs || 0;
+  const [{ data: hold }, { data: dbTrades }, { data: myCoinTradesDb }] = await Promise.all([
+    sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', c.id).maybeSingle(),
+    sb.from('trades')
+      .select('*, profiles(username, avatar_url)')
+      .eq('coin_id', c.id)
+      .order('created_at', { ascending: false })
+      .limit(100),
+    sb.from('trades')
+      .select('id, user_id, type, amount_usd, shares, price_after, created_at')
+      .eq('coin_id', c.id)
+      .eq('user_id', currentUser.id)
+      .order('created_at', { ascending: true })
+      .limit(1000)
+  ]);
   const shares = hold?.shares || 0;
-
-  const { data: dbTrades } = await sb.from('trades')
-    .select('*, profiles(username, avatar_url)')
-    .eq('coin_id', c.id)
-    .order('created_at', { ascending: false })
-    .limit(100);
 
   // Combine with any local session trades
   const tradeMap = new Map();
@@ -1929,6 +1969,46 @@ async function renderCoinDetail() {
   (c.localTrades || []).forEach(t => tradeMap.set(t.id || (t.created_at + t.shares), t));
   const trades = Array.from(tradeMap.values());
   trades.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+
+  // Build deduplicated chronological trade list for currentUser on this coin since last sells/reset
+  const myChronoTrades = (myCoinTradesDb || [])
+    .filter(t => !srvResetTs || new Date(t.created_at || 0).getTime() > srvResetTs)
+    .slice();
+  (c.localTrades || []).forEach(lt => {
+    if (lt.user_id !== currentUser.id) return;
+    const ltTs = new Date(lt.created_at || 0).getTime();
+    if (srvResetTs > 0 && ltTs <= srvResetTs) return;
+    const alreadyInDb = myChronoTrades.some(dt =>
+      dt.id === lt.id || (
+        dt.type === lt.type &&
+        Math.abs(new Date(dt.created_at || 0).getTime() - ltTs) < 15000 &&
+        Math.abs(Number(dt.amount_usd || 0) - Number(lt.amount_usd || 0)) < 0.02
+      )
+    );
+    if (!alreadyInDb) myChronoTrades.push(lt);
+  });
+  myChronoTrades.sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+
+  const sellAllProceeds = calcHoldingsValue(c.price, shares);
+  const putInSinceSell = calcRemainingPutIn(myChronoTrades, shares);
+  const sellAllDiff = sellAllProceeds - putInSinceSell;
+  let sellAllPreviewHtml = '';
+  if (shares > 1e-8) {
+    const absDiff = Math.abs(sellAllDiff);
+    const isFlat = absDiff < 0.005;
+    const isGain = sellAllDiff >= 0.005;
+    const previewCls = isFlat ? 'flat' : isGain ? 'gain' : 'loss';
+    const headline = isFlat
+      ? `You will break even (<strong>$0.00</strong>) when selling 100%`
+      : isGain
+        ? `You will gain <strong>+${money(absDiff)}</strong> when you sell 100%`
+        : `You will lose <strong>−${money(absDiff)}</strong> when you sell 100%`;
+    sellAllPreviewHtml = `
+      <div class="sell-all-preview ${previewCls}" id="sellAllPreview">
+        <span class="sell-all-main">${headline}</span>
+        <span class="sell-all-sub muted">Get ${money(sellAllProceeds)} vs ${money(putInSinceSell)} put in</span>
+      </div>`;
+  }
 
   const startOfTodayMs = getStartOfTodayDate().getTime();
   const todayTrades = trades.filter(t => new Date(t.created_at || 0).getTime() >= startOfTodayMs);
@@ -2004,7 +2084,8 @@ async function renderCoinDetail() {
             <button class="sell-btn" data-sell="1">Sell 100%</button>
           </div>
         </div>
-        <p class="muted tiny" style="margin-top:10px">You own: ${shares.toFixed(4)} shares · Sell value ${money(calcHoldingsValue(c.price, shares))} · Cash ${money(currentUser.cash)}</p>
+        <p class="muted tiny" style="margin-top:10px">You own: ${shares.toFixed(4)} shares · Sell value ${money(sellAllProceeds)} · Cash ${money(currentUser.cash)}</p>
+        ${sellAllPreviewHtml}
         <p class="form-message" id="tradeMessage"></p>
         ${isDompinator() ? `
           <button class="delete-coin-btn" id="deleteCoinBtn">🗑 Delete currency (Dompinator admin)</button>
