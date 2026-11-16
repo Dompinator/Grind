@@ -1420,6 +1420,7 @@ function enterApp() {
   startTimeTracking();
   checkDailyLogin();
   flushPendingTierPromo();
+  if (typeof refreshDirectMessages === 'function') refreshDirectMessages(false);
 }
 
 function startTimeTracking() {
@@ -1472,6 +1473,9 @@ $('#logoutBtn')?.addEventListener('click', async () => {
   $('#dailyModal')?.classList.add('hidden');
   $('#profileModal')?.classList.add('hidden');
   $('#featuredEditModal')?.classList.add('hidden');
+  $('#dmModal')?.classList.add('hidden');
+  if (typeof closeCoinWatchModal === 'function') closeCoinWatchModal(true);
+  if (typeof resetDmStateOnLogout === 'function') resetDmStateOnLogout();
   closeTierPromoOverlay(true);
   pendingTierPromo = null;
   $('#authView').classList.remove('hidden');
@@ -2215,6 +2219,7 @@ async function renderCoinDetail() {
           <span class="muted tiny">Scroll wheel or zoom buttons to view whole timeline</span>
         </div>
         <div class="chart-controls">
+          <button class="zoom-btn watch-timeline-btn" id="watchTimelineBtn" title="Watch the entire timeline & price history as a short cutscene">▶ Watch</button>
           <button class="zoom-btn" id="zoomOutBtn" title="Zoom out / See whole timeline">− Zoom Out</button>
           <span class="zoom-level-text" id="zoomLevelText">${chartZoom <= 1.0 ? 'Fit' : Math.round(chartZoom * 100) + '%'}</span>
           <button class="zoom-btn" id="zoomInBtn" title="Zoom in / Closer detail">+ Zoom In</button>
@@ -2335,9 +2340,12 @@ async function renderCoinDetail() {
   });
   $$('[data-sell]').forEach(b => b.addEventListener('click', () => sell(c, shares * Number(b.dataset.sell))));
 
-  // Zoom Button Controls
+  // Zoom & Watch Cutscene Controls
   const updateChart = () => drawChartWithBubbles(c, trades.slice().reverse());
 
+  $('#watchTimelineBtn')?.addEventListener('click', () => {
+    if (typeof openCoinWatchModal === 'function') openCoinWatchModal(c);
+  });
   $('#zoomOutBtn')?.addEventListener('click', () => {
     chartZoom = Math.max(1.0, +(chartZoom - 0.35).toFixed(2));
     updateChart();
@@ -3843,6 +3851,9 @@ async function openProfileModal(userId) {
         </div>
       ` : '<p class="muted tiny">No created currencies yet.</p>'}
     </div>
+    ${currentUser && p.id !== currentUser.id ? `
+      <button type="button" class="primary-btn dm-profile-btn" id="profileStartDmBtn">💬 Send Private DM</button>
+    ` : ''}
     ${canModerate ? `
       <div class="admin-mod-box">
         <div class="eyebrow purple-text" style="margin-bottom:8px;">DOMPINATOR ADMIN CONTROLS</div>
@@ -3860,6 +3871,11 @@ async function openProfileModal(userId) {
       </div>
     ` : ''}
   `;
+
+  $('#profileStartDmBtn')?.addEventListener('click', () => {
+    modal.classList.add('hidden');
+    if (typeof openDmModalWithUser === 'function') openDmModalWithUser(p);
+  });
 
   $$('[data-modal-coin]').forEach(el => el.addEventListener('click', () => {
     modal.classList.add('hidden');
@@ -3929,9 +3945,9 @@ async function openProfileModal(userId) {
   }
 }
 
-$('#closeProfileBtn')?.addEventListener('click', () => $('#profileModal')?.classList.add('hidden'));
+$('#closeProfileBtn')?.addEventListener('click', () => hideModalSmooth($('#profileModal')));
 $('#profileModal')?.addEventListener('click', e => {
-  if (e.target === $('#profileModal')) $('#profileModal').classList.add('hidden');
+  if (e.target === $('#profileModal')) hideModalSmooth($('#profileModal'));
 });
 
 // ---------- Daily Login Rewards ----------
@@ -4053,9 +4069,9 @@ function renderDailyModal(activeDay, claimedToday, currentStreak) {
 }
 
 $('#openDailyBtn')?.addEventListener('click', () => checkDailyLogin(true));
-$('#closeDailyBtn')?.addEventListener('click', () => $('#dailyModal')?.classList.add('hidden'));
+$('#closeDailyBtn')?.addEventListener('click', () => hideModalSmooth($('#dailyModal')));
 $('#dailyModal')?.addEventListener('click', e => {
-  if (e.target === $('#dailyModal')) $('#dailyModal').classList.add('hidden');
+  if (e.target === $('#dailyModal')) hideModalSmooth($('#dailyModal'));
 });
 
 $('#claimDailyBtn')?.addEventListener('click', async () => {
@@ -4103,6 +4119,9 @@ $('#claimDailyBtn')?.addEventListener('click', async () => {
     }
     currentUser.cash = newCash;
     await updateNetWorth();
+    if (typeof triggerRewardBurstAnimation === 'function') {
+      triggerRewardBurstAnimation(btn, `+${money(cashGain)}`, `Day ${day} Daily Reward`);
+    }
     toast(`Day ${day} reward claimed: +${money(cashGain)}!`);
   }
 
@@ -4119,7 +4138,8 @@ $('#claimDailyBtn')?.addEventListener('click', async () => {
 
   updateUIProfile();
   renderFeed();
-  $('#dailyModal')?.classList.add('hidden');
+  if (typeof hideModalSmooth === 'function') hideModalSmooth($('#dailyModal'));
+  else $('#dailyModal')?.classList.add('hidden');
 });
 
 // ---------- Ads ----------
@@ -6284,6 +6304,7 @@ function startRealtime() {
       if (currentPage === 'notifications') loadRequests();
       else if (currentUser) updateNotificationsBadge();
       if (isDompinator() && currentPage === 'admin') loadAdminPage();
+      if (currentUser && typeof refreshDirectMessages === 'function') refreshDirectMessages(true);
     })
     .subscribe();
 }
@@ -6741,6 +6762,9 @@ async function claimPassReward(tier, track = 'free') {
     }
     currentUser.cash = newCash;
     await updateNetWorth();
+    if (typeof triggerRewardBurstAnimation === 'function') {
+      triggerRewardBurstAnimation(btn, `+${money(activeReward.amount)}`, `${isProTrack ? 'PRO 2X ' : ''}Pass Level ${tier}`);
+    }
     toast(`${isProTrack ? 'PRO 2X ' : ''}Pass Level ${tier} claimed: +${money(activeReward.amount)}!`);
   } else if (activeReward.type === 'pro') {
     if (!currentUser.is_pro) {
@@ -6764,6 +6788,9 @@ async function claimPassReward(tier, track = 'free') {
     }
     toast('Pass Level 20 claimed! Free PRO tier + bottom 2X PRO track unlocked!');
   } else if (activeReward.type === 'coin_live_post') {
+    if (typeof triggerRewardBurstAnimation === 'function') {
+      triggerRewardBurstAnimation(btn, isProTrack ? '+2 Live Posts' : '+1 Live Post', `Pass Level ${tier}`);
+    }
     toast(isProTrack
       ? 'PRO 2X Level 10 claimed! +2 extra Coin Live Posts unlocked above.'
       : 'Level 10 Coin Live Post unlocked! Choose your coin & message above.');
@@ -6894,6 +6921,9 @@ async function claimAllReadyPassRewards() {
   if (totalCash > 0) parts.push(`+${money(totalCash)} cash`);
   if (unlockedLivePosts > 0) parts.push(`+${unlockedLivePosts} Coin Live Post${unlockedLivePosts > 1 ? 's' : ''}`);
   if (unlockedProNow) parts.push('Free PRO tier');
+  if (typeof triggerRewardBurstAnimation === 'function' && totalCash > 0) {
+    triggerRewardBurstAnimation(btn || $('#passClaimAllBtn'), `+${money(totalCash)}`, `${newFreeTiers.length + newProTiers.length} Pass Rewards Claimed`);
+  }
   toast(`Claimed ${newFreeTiers.length + newProTiers.length} Pass rewards: ${parts.join(', ')}!`);
 }
 
@@ -8580,4 +8610,897 @@ $('#ambientMusicToggleBtn')?.addEventListener('click', () => {
   syncPremiumAmbientMusic();
   toast(next ? 'Ambient music turned on' : 'Ambient music turned off');
 });
+
+// ============================================================
+// ---------- SMOOTH MODAL CLOSE & REWARD BURST ENGINE --------
+// ============================================================
+function hideModalSmooth(modalEl) {
+  if (!modalEl || modalEl.classList.contains('hidden')) return;
+  if (modalEl.classList.contains('modal-closing')) return;
+  modalEl.classList.add('modal-closing');
+  setTimeout(() => {
+    modalEl.classList.add('hidden');
+    modalEl.classList.remove('modal-closing');
+  }, 175);
+}
+
+function triggerRewardBurstAnimation(sourceEl, amountLabel, subtitleLabel) {
+  const layer = $('#rewardBurstLayer');
+  if (!layer) return;
+
+  playSound('buy');
+
+  let originX = window.innerWidth / 2;
+  let originY = window.innerHeight * 0.56;
+  if (sourceEl && typeof sourceEl.getBoundingClientRect === 'function') {
+    const r = sourceEl.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) {
+      originX = r.left + r.width / 2;
+      originY = r.top + r.height / 2;
+    }
+  }
+
+  let targetX = window.innerWidth - 135;
+  let targetY = 36;
+  const cashPill = $('.cash-pill');
+  if (cashPill) {
+    const cr = cashPill.getBoundingClientRect();
+    if (cr.width > 0 && cr.height > 0) {
+      targetX = cr.left + cr.width / 2;
+      targetY = cr.top + cr.height / 2;
+    }
+  }
+
+  // Radial golden shockwave at reward source
+  const ring = document.createElement('div');
+  ring.className = 'reward-shock-ring';
+  ring.style.left = `${originX}px`;
+  ring.style.top = `${originY}px`;
+  layer.appendChild(ring);
+  setTimeout(() => ring.remove(), 800);
+
+  // Radiating emerald & gold sparks
+  const sparkColors = ['#fde047', '#34d399', '#6ee7b7', '#fbbf24', '#ffffff'];
+  for (let i = 0; i < 20; i++) {
+    const sp = document.createElement('span');
+    sp.className = 'reward-spark';
+    const ang = (Math.PI * 2 * i) / 20 + (Math.random() - 0.5) * 0.25;
+    const dist = 48 + Math.random() * 92;
+    sp.style.left = `${originX}px`;
+    sp.style.top = `${originY}px`;
+    sp.style.setProperty('--rx', `${(Math.cos(ang) * dist).toFixed(1)}px`);
+    sp.style.setProperty('--ry', `${(Math.sin(ang) * dist).toFixed(1)}px`);
+    sp.style.setProperty('--rdur', `${(0.54 + Math.random() * 0.34).toFixed(2)}s`);
+    sp.style.setProperty('--rcolor', sparkColors[i % sparkColors.length]);
+    layer.appendChild(sp);
+    setTimeout(() => sp.remove(), 950);
+  }
+
+  // Arcing golden coins flying into wallet cash pill
+  const coinCount = 12;
+  for (let i = 0; i < coinCount; i++) {
+    const coinEl = document.createElement('div');
+    coinEl.className = 'reward-fly-coin';
+    coinEl.textContent = '$';
+    const sx = originX + (Math.random() - 0.5) * 38;
+    const sy = originY + (Math.random() - 0.5) * 24;
+    const ctrlX = (sx + targetX) * 0.5 + (Math.random() - 0.5) * 180;
+    const ctrlY = Math.min(sy, targetY) - (60 + Math.random() * 110);
+    const delay = i * 38;
+    const dur = 640 + Math.random() * 180;
+    coinEl.style.left = `${sx}px`;
+    coinEl.style.top = `${sy}px`;
+    coinEl.style.opacity = '0';
+    layer.appendChild(coinEl);
+
+    const animStart = performance.now() + delay;
+    const tick = now => {
+      if (now < animStart) {
+        requestAnimationFrame(tick);
+        return;
+      }
+      const raw = Math.min(1, (now - animStart) / dur);
+      const t = 1 - Math.pow(1 - raw, 2.2);
+      const inv = 1 - t;
+      const x = inv * inv * sx + 2 * inv * t * ctrlX + t * t * targetX;
+      const y = inv * inv * sy + 2 * inv * t * ctrlY + t * t * targetY;
+      const sc = raw < 0.2 ? 0.6 + raw * 2.5 : 1.1 - t * 0.45;
+      coinEl.style.left = `${x}px`;
+      coinEl.style.top = `${y}px`;
+      coinEl.style.opacity = raw > 0.88 ? String(Math.max(0, (1 - raw) / 0.12)) : '1';
+      coinEl.style.transform = `translate(-50%, -50%) scale(${sc.toFixed(3)})`;
+      if (raw < 1) {
+        requestAnimationFrame(tick);
+      } else {
+        coinEl.remove();
+        if (i === coinCount - 1 && cashPill) {
+          cashPill.classList.remove('cash-pulse');
+          void cashPill.offsetWidth;
+          cashPill.classList.add('cash-pulse');
+        }
+      }
+    };
+    requestAnimationFrame(tick);
+  }
+
+  // Luxury floating claim banner
+  const banner = document.createElement('div');
+  banner.className = 'reward-banner-pill';
+  banner.style.left = `${Math.min(window.innerWidth - 150, Math.max(150, originX))}px`;
+  banner.style.top = `${Math.max(96, originY - 38)}px`;
+  banner.innerHTML = `
+    <span>✦ ${escapeHtml(subtitleLabel || 'Reward Claimed')}</span>
+    <span class="reward-banner-amt">${escapeHtml(amountLabel || '')}</span>
+  `;
+  layer.appendChild(banner);
+  setTimeout(() => banner.remove(), 1700);
+}
+
+// ============================================================
+// ---------- COIN TIMELINE "WATCH" CUTSCENE ENGINE -----------
+// ============================================================
+const watchState = {
+  coin: null,
+  points: [],      // { price, trade, ts, tNorm }
+  rafId: null,
+  playing: false,
+  speed: 1,
+  progress: 0,     // 0..1
+  durationMs: 12000,
+  lastTickMs: 0,
+  lastEventIdx: -1,
+  shownBubbleIndices: new Set()
+};
+
+function formatTimelineMoment(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+function stopWatchLoop() {
+  if (watchState.rafId) {
+    cancelAnimationFrame(watchState.rafId);
+    watchState.rafId = null;
+  }
+  watchState.playing = false;
+  const playBtn = $('#watchPlayPauseBtn');
+  if (playBtn) playBtn.textContent = watchState.progress >= 0.999 ? '↺ Replay' : '▶ Play';
+}
+
+function closeCoinWatchModal(immediate = false) {
+  stopWatchLoop();
+  const modal = $('#coinWatchModal');
+  if (!modal) return;
+  if (immediate) modal.classList.add('hidden');
+  else hideModalSmooth(modal);
+}
+
+async function openCoinWatchModal(coin) {
+  if (!coin || !sb) return;
+  const modal = $('#coinWatchModal');
+  if (!modal) return;
+
+  stopWatchLoop();
+  watchState.coin = coin;
+  watchState.progress = 0;
+  watchState.lastEventIdx = -1;
+  watchState.shownBubbleIndices.clear();
+
+  const logoEl = $('#watchCoinLogo');
+  if (logoEl) {
+    logoEl.innerHTML = coin.image_url ? `<img src="${escapeHtml(coin.image_url)}">` : escapeHtml((coin.ticker || '?')[0]);
+  }
+  if ($('#watchCoinTitle')) $('#watchCoinTitle').textContent = `${coin.name} ($${coin.ticker})`;
+  if ($('#watchStatusEyebrow')) $('#watchStatusEyebrow').textContent = 'TIMELINE CUTSCENE';
+  if ($('#watchPriceReadout')) $('#watchPriceReadout').textContent = priceFmt(1);
+  if ($('#watchPctReadout')) {
+    $('#watchPctReadout').textContent = '+0.00% vs $1.00';
+    $('#watchPctReadout').className = 'watch-pct-readout flat';
+  }
+  if ($('#watchTimeBadge')) $('#watchTimeBadge').textContent = 'Loading history...';
+  if ($('#watchEventTicker')) $('#watchEventTicker').textContent = 'Fetching complete trade timeline...';
+  if ($('#watchBubblesLayer')) $('#watchBubblesLayer').innerHTML = '';
+
+  modal.classList.remove('hidden');
+
+  // Fetch COMPLETE chronological trade history for this coin
+  const srvResetTs = adminModStateCache.serverResetTs || 0;
+  const { data: fullTrades } = await sb
+    .from('trades')
+    .select('*, profiles(username, avatar_url)')
+    .eq('coin_id', coin.id)
+    .order('created_at', { ascending: true })
+    .limit(1000);
+
+  const tradeMap = new Map();
+  (fullTrades || []).forEach(t => {
+    const tMs = new Date(t.created_at || 0).getTime();
+    if (srvResetTs > 0 && tMs <= srvResetTs) return;
+    tradeMap.set(t.id || (t.created_at + t.shares), t);
+  });
+  (coin.localTrades || []).forEach(t => {
+    const tMs = new Date(t.created_at || 0).getTime();
+    if (srvResetTs > 0 && tMs <= srvResetTs) return;
+    tradeMap.set(t.id || (t.created_at + t.shares), t);
+  });
+
+  const sortedTrades = Array.from(tradeMap.values())
+    .sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+
+  const createdTs = coin.created_at
+    ? new Date(coin.created_at).getTime()
+    : (sortedTrades[0]?.created_at ? new Date(sortedTrades[0].created_at).getTime() - 5000 : Date.now() - 5000);
+
+  const rawPoints = [{ price: 1, trade: null, ts: createdTs }];
+  sortedTrades.forEach(t => {
+    rawPoints.push({
+      price: Number(t.price_after) || Number(coin.price) || 1,
+      trade: t,
+      ts: t.created_at ? new Date(t.created_at).getTime() : createdTs
+    });
+  });
+
+  // Always conclude cleanly on current live coin price
+  const currentPriceNum = Number(coin.price || 1);
+  if (rawPoints.length === 1) {
+    rawPoints.push({ price: currentPriceNum, trade: null, ts: Date.now(), isCurrentAnchor: true });
+  } else if (Math.abs(rawPoints[rawPoints.length - 1].price - currentPriceNum) > 1e-4) {
+    rawPoints.push({ price: currentPriceNum, trade: null, ts: Date.now(), isCurrentAnchor: true });
+  }
+
+  // Realistic compressed-time spacing between purchases/sells:
+  // Uses power compression dt^0.42 so long idle periods feel realistically spaced without stalling,
+  // while rapid back-to-back trades happen briskly!
+  const segWeights = [];
+  for (let i = 1; i < rawPoints.length; i++) {
+    const dtMs = Math.max(1200, (rawPoints[i].ts || 0) - (rawPoints[i - 1].ts || 0));
+    segWeights.push(Math.pow(dtMs, 0.42));
+  }
+  const totalWeight = segWeights.reduce((a, b) => a + b, 0) || 1;
+  let acc = 0;
+  rawPoints[0].tNorm = 0;
+  for (let i = 1; i < rawPoints.length; i++) {
+    acc += segWeights[i - 1];
+    rawPoints[i].tNorm = acc / totalWeight;
+  }
+  rawPoints[rawPoints.length - 1].tNorm = 1;
+
+  watchState.points = rawPoints;
+  watchState.durationMs = Math.min(18500, Math.max(6500, 5200 + sortedTrades.length * 420));
+  watchState.speed = 1;
+  $$('[data-watch-speed]').forEach(b => b.classList.toggle('active', b.dataset.watchSpeed === '1'));
+
+  startWatchPlayback(0);
+}
+
+function renderWatchFrame(progress) {
+  const canvas = $('#watchChartCanvas');
+  const stage = canvas?.parentElement;
+  const bubblesLayer = $('#watchBubblesLayer');
+  const pts = watchState.points;
+  const coin = watchState.coin;
+  if (!canvas || !stage || !pts.length || !coin) return;
+
+  const W = Math.max(stage.clientWidth || 640, 320);
+  const H = stage.clientHeight || 330;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  if (canvas.width !== Math.floor(W * dpr) || canvas.height !== Math.floor(H * dpr)) {
+    canvas.width = Math.floor(W * dpr);
+    canvas.height = Math.floor(H * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const p = Math.min(1, Math.max(0, progress));
+  const slider = $('#watchProgressRange');
+  if (slider) slider.value = String(Math.round(p * 1000));
+
+  // Find current segment along realistic tNorm timeline
+  let segIdx = 0;
+  for (let i = 1; i < pts.length; i++) {
+    if (p <= pts[i].tNorm || i === pts.length - 1) {
+      segIdx = i - 1;
+      break;
+    }
+  }
+  const p0 = pts[segIdx];
+  const p1 = pts[Math.min(pts.length - 1, segIdx + 1)];
+  const span = Math.max(1e-6, (p1.tNorm || 1) - (p0.tNorm || 0));
+  const localAlpha = Math.min(1, Math.max(0, (p - (p0.tNorm || 0)) / span));
+  const curPrice = p0.price + (p1.price - p0.price) * localAlpha;
+  const curTs = (p0.ts || 0) + ((p1.ts || p0.ts || 0) - (p0.ts || 0)) * localAlpha;
+
+  // Dynamic smooth Y-range around revealed points so climbs & crashes look dramatic and legible
+  const revealedCount = p >= 0.999 ? pts.length : segIdx + 1;
+  const revealedPrices = pts.slice(0, revealedCount).map(pt => pt.price);
+  revealedPrices.push(curPrice);
+  let minP = Math.min(...revealedPrices);
+  let maxP = Math.max(...revealedPrices);
+  if (maxP - minP < Math.max(0.15, maxP * 0.08)) {
+    const mid = (maxP + minP) / 2;
+    minP = Math.max(0.01, mid * 0.9);
+    maxP = mid * 1.12;
+  } else {
+    const pad = (maxP - minP) * 0.14;
+    minP = Math.max(0.001, minP - pad);
+    maxP += pad;
+  }
+
+  const PAD_X = 52;
+  const PAD_TOP = 64;
+  const PAD_BOT = 28;
+  const plotW = W - PAD_X * 2;
+  const plotH = H - PAD_TOP - PAD_BOT;
+  const xAtNorm = tn => PAD_X + tn * plotW;
+  const yAtPrice = pr => PAD_TOP + plotH - ((pr - minP) / Math.max(1e-6, maxP - minP)) * plotH;
+
+  // Background horizontal grid + price axis
+  ctx.font = '11px sans-serif';
+  ctx.fillStyle = 'rgba(190, 165, 225, 0.62)';
+  ctx.strokeStyle = 'rgba(190, 165, 225, 0.11)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = PAD_TOP + (plotH * i) / 4;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+    const val = maxP - ((maxP - minP) * i) / 4;
+    ctx.fillText('$' + val.toFixed(val < 1 ? 3 : 2), 6, y - 4);
+  }
+
+  // Build path up to current cursor
+  const curX = xAtNorm(p);
+  const curY = yAtPrice(curPrice);
+  const rawAccent = (getComputedStyle(document.body).getPropertyValue('--purple') || '').trim() || '#c084fc';
+  const accentColor = /^#[0-9a-fA-F]{6}$/.test(rawAccent) ? rawAccent : '#c084fc';
+
+  // Subtle gradient fill beneath curve
+  const fillGrad = ctx.createLinearGradient(0, PAD_TOP, 0, H - PAD_BOT);
+  fillGrad.addColorStop(0, accentColor + '44');
+  fillGrad.addColorStop(1, 'rgba(0,0,0,0)');
+
+  ctx.beginPath();
+  ctx.moveTo(xAtNorm(0), yAtPrice(pts[0].price));
+  for (let i = 1; i < revealedCount; i++) {
+    ctx.lineTo(xAtNorm(pts[i].tNorm), yAtPrice(pts[i].price));
+  }
+  ctx.lineTo(curX, curY);
+  ctx.lineTo(curX, H - PAD_BOT);
+  ctx.lineTo(xAtNorm(0), H - PAD_BOT);
+  ctx.closePath();
+  ctx.fillStyle = fillGrad;
+  ctx.fill();
+
+  // Crisp glowing curve stroke
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(xAtNorm(0), yAtPrice(pts[0].price));
+  for (let i = 1; i < revealedCount; i++) {
+    ctx.lineTo(xAtNorm(pts[i].tNorm), yAtPrice(pts[i].price));
+  }
+  ctx.lineTo(curX, curY);
+  ctx.strokeStyle = accentColor;
+  ctx.lineWidth = 3.2;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.shadowColor = accentColor;
+  ctx.shadowBlur = 12;
+  ctx.stroke();
+  ctx.restore();
+
+  // Dots for reached trades
+  for (let i = 0; i < revealedCount; i++) {
+    const pt = pts[i];
+    ctx.beginPath();
+    ctx.arc(xAtNorm(pt.tNorm), yAtPrice(pt.price), pt.trade ? 4 : 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = pt.trade ? (pt.trade.type === 'sell' ? '#f87171' : '#34d399') : '#e9d5ff';
+    ctx.fill();
+  }
+
+  // Pulsing live playhead cursor
+  ctx.beginPath();
+  ctx.arc(curX, curY, 9, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.22)';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(curX, curY, 4.8, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+
+  // Keep trader avatar bubbles synced cleanly for all reached trades
+  if (bubblesLayer) {
+    bubblesLayer.innerHTML = '';
+    const maxBubblesToShow = 28;
+    const reachedTradeIndices = [];
+    for (let i = 1; i < revealedCount; i++) {
+      if (pts[i].trade) reachedTradeIndices.push(i);
+    }
+    const visibleTradeIndices = reachedTradeIndices.slice(-maxBubblesToShow);
+    visibleTradeIndices.forEach(idx => {
+      const pt = pts[idx];
+      const t = pt.trade;
+      const isBuy = t.type !== 'sell';
+      const name = t.profiles?.username || (t.user_id === currentUser?.id ? currentUser.username : 'Someone');
+      const avatar = t.profiles?.avatar_url || (t.user_id === currentUser?.id ? currentUser.avatar_url : null);
+      const amt = Number(t.amount_usd || 0);
+      const b = document.createElement('div');
+      const isNewlyPopped = !watchState.shownBubbleIndices.has(idx);
+      if (isNewlyPopped) watchState.shownBubbleIndices.add(idx);
+      b.className = `bubble ${isBuy ? 'buy' : 'sell'} ${isNewlyPopped ? 'watch-bubble-pop' : ''}`;
+      b.style.left = `${xAtNorm(pt.tNorm)}px`;
+      b.style.top = `${Math.max(48, yAtPrice(pt.price) - 8)}px`;
+      b.innerHTML = `
+        <div class="bubble-pfp">${avatar ? `<img src="${escapeHtml(avatar)}">` : `<span>${escapeHtml(name[0].toUpperCase())}</span>`}</div>
+        <div class="bubble-amt">${isBuy ? '' : '−'}${money(amt)}</div>
+      `;
+      bubblesLayer.appendChild(b);
+    });
+  }
+
+  // Update header readout metrics
+  const priceEl = $('#watchPriceReadout');
+  const pctEl = $('#watchPctReadout');
+  const timeEl = $('#watchTimeBadge');
+  const tickerEl = $('#watchEventTicker');
+  if (priceEl) {
+    priceEl.textContent = priceFmt(curPrice);
+    priceEl.classList.toggle('pulse-up', curPrice > 1.005);
+    priceEl.classList.toggle('pulse-down', curPrice < 0.995);
+  }
+  if (pctEl) {
+    const pct = ((curPrice - 1) / 1) * 100;
+    const sign = pct >= 0 ? '+' : '';
+    pctEl.textContent = `${sign}${pct.toFixed(2)}% vs $1.00`;
+    pctEl.className = `watch-pct-readout ${pct > 0.05 ? 'up' : pct < -0.05 ? 'down' : 'flat'}`;
+  }
+  if (timeEl) {
+    timeEl.textContent = p >= 0.999 ? `Now · Current Price` : formatTimelineMoment(curTs);
+  }
+
+  const latestIdx = revealedCount - 1;
+  if (tickerEl) {
+    if (p >= 0.999) {
+      tickerEl.textContent = `Current price: ${priceFmt(coin.price)} · ${pts.filter(x => x.trade).length} total trades`;
+    } else if (latestIdx > 0 && pts[latestIdx]?.trade) {
+      const tr = pts[latestIdx].trade;
+      const actor = tr.profiles?.username || (tr.user_id === currentUser?.id ? currentUser.username : 'Trader');
+      const verb = tr.type === 'sell' ? 'sold' : 'bought';
+      tickerEl.textContent = `${actor} ${verb} ${money(tr.amount_usd || 0)} → ${priceFmt(tr.price_after || curPrice)}`;
+    } else {
+      tickerEl.textContent = `Launched $${coin.ticker} at $1.00`;
+    }
+  }
+}
+
+function startWatchPlayback(fromProgress = watchState.progress) {
+  if (watchState.rafId) {
+    cancelAnimationFrame(watchState.rafId);
+    watchState.rafId = null;
+  }
+  watchState.progress = Math.min(1, Math.max(0, fromProgress));
+  if (watchState.progress >= 0.999) {
+    watchState.progress = 0;
+    watchState.shownBubbleIndices.clear();
+  }
+  watchState.playing = true;
+  watchState.lastTickMs = performance.now();
+  const playBtn = $('#watchPlayPauseBtn');
+  if (playBtn) playBtn.textContent = '⏸ Pause';
+
+  const step = now => {
+    if (!watchState.playing) return;
+    const dt = Math.max(0, Math.min(80, now - watchState.lastTickMs));
+    watchState.lastTickMs = now;
+    watchState.progress = Math.min(1, watchState.progress + (dt * watchState.speed) / watchState.durationMs);
+    renderWatchFrame(watchState.progress);
+    if (watchState.progress >= 1) {
+      stopWatchLoop();
+      return;
+    }
+    watchState.rafId = requestAnimationFrame(step);
+  };
+  renderWatchFrame(watchState.progress);
+  watchState.rafId = requestAnimationFrame(step);
+}
+
+$('#closeWatchModalBtn')?.addEventListener('click', () => closeCoinWatchModal(false));
+$('#coinWatchModal')?.addEventListener('click', e => {
+  if (e.target === $('#coinWatchModal')) closeCoinWatchModal(false);
+});
+$('#watchPlayPauseBtn')?.addEventListener('click', () => {
+  if (watchState.playing) {
+    stopWatchLoop();
+  } else {
+    startWatchPlayback(watchState.progress >= 0.999 ? 0 : watchState.progress);
+  }
+});
+$('#watchReplayBtn')?.addEventListener('click', () => {
+  watchState.shownBubbleIndices.clear();
+  startWatchPlayback(0);
+});
+$('#watchProgressRange')?.addEventListener('input', e => {
+  const val = Number(e.target.value || 0) / 1000;
+  stopWatchLoop();
+  watchState.progress = val;
+  watchState.shownBubbleIndices.clear();
+  renderWatchFrame(val);
+});
+$$('[data-watch-speed]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const spd = Number(btn.dataset.watchSpeed || 1);
+    watchState.speed = spd;
+    $$('[data-watch-speed]').forEach(b => b.classList.toggle('active', b === btn));
+  });
+});
+
+// ============================================================
+// ---------- PRIVATE DIRECT MESSAGES (DMs) -------------------
+// ============================================================
+const dmState = {
+  profilesMap: new Map(),   // userId -> profile
+  messagesByPartner: new Map(), // partnerId -> [{ id, from, to, text, ts }]
+  activePartnerId: null,
+  searchQuery: '',
+  totalUnread: 0,
+  lastUnreadNotifiedCount: 0
+};
+
+function getDmSeenKey(myId, partnerId) {
+  return `grind_dm_seen_${myId}_${partnerId}`;
+}
+
+function getDmSeenTs(partnerId) {
+  if (!currentUser?.id || !partnerId) return 0;
+  try {
+    return Number(localStorage.getItem(getDmSeenKey(currentUser.id, partnerId)) || 0);
+  } catch (e) {
+    return 0;
+  }
+}
+
+function markDmThreadSeen(partnerId, latestTs = Date.now()) {
+  if (!currentUser?.id || !partnerId) return;
+  try {
+    const prev = getDmSeenTs(partnerId);
+    const next = Math.max(prev, Number(latestTs) || 0, Date.now());
+    localStorage.setItem(getDmSeenKey(currentUser.id, partnerId), String(next));
+  } catch (e) {}
+  updateDmUnreadBadge();
+}
+
+function updateDmUnreadBadge() {
+  const badge = $('#dmUnreadBadge');
+  if (!badge) return;
+  if (!currentUser?.id) {
+    badge.classList.add('hidden');
+    return;
+  }
+  let unread = 0;
+  const uid = String(currentUser.id);
+  dmState.messagesByPartner.forEach((msgs, partnerId) => {
+    const seen = getDmSeenTs(partnerId);
+    msgs.forEach(m => {
+      if (m.from !== uid && m.ts > seen) unread += 1;
+    });
+  });
+  dmState.totalUnread = unread;
+  if (unread > 0) {
+    badge.textContent = unread > 99 ? '99+' : String(unread);
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+}
+
+function resetDmStateOnLogout() {
+  dmState.messagesByPartner.clear();
+  dmState.activePartnerId = null;
+  dmState.searchQuery = '';
+  dmState.totalUnread = 0;
+  dmState.lastUnreadNotifiedCount = 0;
+  if ($('#dmUserSearchInput')) $('#dmUserSearchInput').value = '';
+  updateDmUnreadBadge();
+}
+
+function formatDmTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  return sameDay
+    ? d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+async function refreshDirectMessages(fromRealtime = false) {
+  if (!sb || !currentUser?.id) return;
+  const myId = String(currentUser.id);
+  await fetchAdminModerationState();
+  const delUsers = adminModStateCache.deletedUserIds || new Set();
+
+  const [profRes, dmRes] = await Promise.all([
+    sb.from('profiles').select('id, username, avatar_url, is_premium').order('username', { ascending: true }).limit(500),
+    sb.from('premium_requests')
+      .select('id, user_id, reason, created_at')
+      .like('reason', '__DM_MSG__:%')
+      .order('created_at', { ascending: true })
+      .limit(1500)
+  ]);
+
+  const profMap = new Map();
+  (profRes?.data || []).forEach(p => {
+    const pid = String(p.id);
+    if (delUsers.has(pid)) return;
+    if (adminModStateCache.bans?.get(pid)?.banned) return;
+    profMap.set(pid, p);
+  });
+  dmState.profilesMap = profMap;
+
+  const grouped = new Map();
+  (dmRes?.data || []).forEach(r => {
+    const raw = String(r.reason || '');
+    if (!raw.startsWith('__DM_MSG__:')) return;
+    try {
+      const p = JSON.parse(raw.slice('__DM_MSG__:'.length));
+      const senderId = String(r.user_id || '');
+      const toId = String(p?.to || '');
+      const text = String(p?.text || '').trim();
+      if (!senderId || !toId || !text) return;
+      if (senderId !== myId && toId !== myId) return;
+      const partnerId = senderId === myId ? toId : senderId;
+      if (!partnerId || partnerId === myId || delUsers.has(partnerId)) return;
+      const ts = Number(p.ts) || (r.created_at ? new Date(r.created_at).getTime() : Date.now());
+      if (!grouped.has(partnerId)) grouped.set(partnerId, []);
+      grouped.get(partnerId).push({
+        id: String(p.id || r.id || (ts + '_' + senderId)),
+        from: senderId,
+        to: toId,
+        text,
+        ts
+      });
+    } catch (e) {}
+  });
+
+  grouped.forEach(list => list.sort((a, b) => a.ts - b.ts));
+  dmState.messagesByPartner = grouped;
+
+  const dmModalOpen = !$('#dmModal')?.classList.contains('hidden');
+  if (dmModalOpen && dmState.activePartnerId) {
+    const thread = dmState.messagesByPartner.get(dmState.activePartnerId) || [];
+    const latest = thread.length ? thread[thread.length - 1].ts : Date.now();
+    markDmThreadSeen(dmState.activePartnerId, latest);
+  }
+
+  const prevUnread = dmState.totalUnread;
+  updateDmUnreadBadge();
+
+  if (fromRealtime && dmState.totalUnread > prevUnread) {
+    playSound('commenting');
+  }
+
+  if (dmModalOpen) {
+    renderDmSidebar();
+    if (dmState.activePartnerId) renderDmThread();
+  }
+}
+
+function getDmPartnerProfile(partnerId) {
+  return dmState.profilesMap.get(String(partnerId)) || { id: partnerId, username: 'Trader', avatar_url: null };
+}
+
+function renderDmSidebar() {
+  const listEl = $('#dmSidebarList');
+  if (!listEl || !currentUser?.id) return;
+  const myId = String(currentUser.id);
+  const q = (dmState.searchQuery || '').trim().toLowerCase();
+
+  let rowsHtml = '';
+  if (q) {
+    const matches = [];
+    dmState.profilesMap.forEach((p, pid) => {
+      if (pid === myId) return;
+      if ((p.username || '').toLowerCase().includes(q)) matches.push(p);
+    });
+    matches.sort((a, b) => (a.username || '').localeCompare(b.username || ''));
+    if (!matches.length) {
+      listEl.innerHTML = '<p class="muted tiny" style="padding:14px;text-align:center;">No matching accounts found.</p>';
+      return;
+    }
+    rowsHtml = matches.slice(0, 40).map(p => {
+      const pid = String(p.id);
+      const msgs = dmState.messagesByPartner.get(pid) || [];
+      const last = msgs[msgs.length - 1];
+      const preview = last ? (last.from === myId ? 'You: ' : '') + last.text : 'Click to start a DM';
+      const activeCls = dmState.activePartnerId === pid ? 'active' : '';
+      return `
+        <button type="button" class="dm-thread-item ${activeCls}" data-dm-partner="${escapeHtml(pid)}">
+          <div class="avatar" style="width:36px;height:36px;font-size:14px;flex-shrink:0;">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
+          <div class="dm-thread-meta">
+            <div class="dm-thread-top">
+              <span class="dm-thread-name">${escapeHtml(p.username || 'Trader')}${tierBadgeHtml(p)}</span>
+            </div>
+            <div class="dm-thread-preview">${escapeHtml(preview)}</div>
+          </div>
+        </button>`;
+    }).join('');
+  } else {
+    const threads = [];
+    dmState.messagesByPartner.forEach((msgs, partnerId) => {
+      if (!msgs.length) return;
+      const last = msgs[msgs.length - 1];
+      const seen = getDmSeenTs(partnerId);
+      const unread = msgs.filter(m => m.from !== myId && m.ts > seen).length;
+      threads.push({ partnerId, last, unread });
+    });
+    threads.sort((a, b) => b.last.ts - a.last.ts);
+
+    if (!threads.length) {
+      listEl.innerHTML = '<p class="muted tiny" style="padding:16px 12px;text-align:center;">No DMs yet.<br>Search an account above to start chatting!</p>';
+      return;
+    }
+    rowsHtml = threads.map(th => {
+      const p = getDmPartnerProfile(th.partnerId);
+      const activeCls = dmState.activePartnerId === th.partnerId ? 'active' : '';
+      const preview = (th.last.from === myId ? 'You: ' : '') + th.last.text;
+      return `
+        <button type="button" class="dm-thread-item ${activeCls}" data-dm-partner="${escapeHtml(th.partnerId)}">
+          <div class="avatar" style="width:36px;height:36px;font-size:14px;flex-shrink:0;">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
+          <div class="dm-thread-meta">
+            <div class="dm-thread-top">
+              <span class="dm-thread-name">${escapeHtml(p.username || 'Trader')}${tierBadgeHtml(p)}</span>
+              ${th.unread > 0 ? `<span class="dm-item-unread">${th.unread}</span>` : `<span class="tiny muted">${escapeHtml(formatDmTime(th.last.ts))}</span>`}
+            </div>
+            <div class="dm-thread-preview">${escapeHtml(preview)}</div>
+          </div>
+        </button>`;
+    }).join('');
+  }
+
+  listEl.innerHTML = rowsHtml;
+  $$('#dmSidebarList [data-dm-partner]').forEach(btn => {
+    btn.addEventListener('click', () => selectDmPartner(btn.dataset.dmPartner));
+  });
+}
+
+function selectDmPartner(partnerId) {
+  if (!partnerId) return;
+  dmState.activePartnerId = String(partnerId);
+  const msgs = dmState.messagesByPartner.get(dmState.activePartnerId) || [];
+  const latestTs = msgs.length ? msgs[msgs.length - 1].ts : Date.now();
+  markDmThreadSeen(dmState.activePartnerId, latestTs);
+  renderDmSidebar();
+  renderDmThread();
+  $('#dmMessageInput')?.focus();
+}
+
+function renderDmThread() {
+  const headerEl = $('#dmChatHeader');
+  const emptyEl = $('#dmEmptyState');
+  const listEl = $('#dmMessagesList');
+  const formEl = $('#dmSendForm');
+  if (!headerEl || !emptyEl || !listEl || !formEl) return;
+
+  if (!dmState.activePartnerId || !currentUser?.id) {
+    headerEl.classList.add('hidden');
+    listEl.classList.add('hidden');
+    formEl.classList.add('hidden');
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  const p = getDmPartnerProfile(dmState.activePartnerId);
+  headerEl.classList.remove('hidden');
+  listEl.classList.remove('hidden');
+  formEl.classList.remove('hidden');
+  emptyEl.classList.add('hidden');
+
+  headerEl.innerHTML = `
+    <button type="button" class="dm-chat-partner" id="dmPartnerProfileBtn">
+      <div class="avatar" style="width:34px;height:34px;font-size:13px;">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
+      <div>
+        <strong>${escapeHtml(p.username || 'Trader')}${tierBadgeHtml(p)}</strong>
+        <div class="tiny muted">Private DM · Click to view profile</div>
+      </div>
+    </button>`;
+  $('#dmPartnerProfileBtn')?.addEventListener('click', () => {
+    openProfileModal(p.id);
+  });
+
+  const myId = String(currentUser.id);
+  const msgs = dmState.messagesByPartner.get(dmState.activePartnerId) || [];
+  if (!msgs.length) {
+    listEl.innerHTML = `<div class="muted tiny" style="margin:auto;text-align:center;">Say hello to <strong>${escapeHtml(p.username || 'Trader')}</strong>! Messages are private between you two.</div>`;
+  } else {
+    listEl.innerHTML = msgs.map(m => {
+      const mine = m.from === myId;
+      return `
+        <div class="dm-msg-row ${mine ? 'mine' : 'theirs'}">
+          <div class="dm-msg-bubble">${escapeHtml(m.text)}</div>
+          <span class="dm-msg-time">${escapeHtml(formatDmTime(m.ts))}</span>
+        </div>`;
+    }).join('');
+    listEl.scrollTop = listEl.scrollHeight;
+  }
+}
+
+async function openDmModalWithUser(targetProfile = null) {
+  const modal = $('#dmModal');
+  if (!modal || !currentUser?.id) return;
+  modal.classList.remove('hidden');
+  await refreshDirectMessages(false);
+  if (targetProfile?.id && String(targetProfile.id) !== String(currentUser.id)) {
+    dmState.profilesMap.set(String(targetProfile.id), targetProfile);
+    selectDmPartner(targetProfile.id);
+  } else {
+    renderDmSidebar();
+    renderDmThread();
+  }
+}
+
+$('#openDmBtn')?.addEventListener('click', () => openDmModalWithUser(null));
+$('#closeDmModalBtn')?.addEventListener('click', () => hideModalSmooth($('#dmModal')));
+$('#dmModal')?.addEventListener('click', e => {
+  if (e.target === $('#dmModal')) hideModalSmooth($('#dmModal'));
+});
+$('#dmUserSearchInput')?.addEventListener('input', e => {
+  dmState.searchQuery = e.target.value || '';
+  renderDmSidebar();
+});
+$('#dmSendForm')?.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (!currentUser?.id || !sb || !dmState.activePartnerId) return;
+  const input = $('#dmMessageInput');
+  const sendBtn = $('#dmSendBtn');
+  const text = (input?.value || '').trim();
+  if (!text) return;
+
+  if (sendBtn) sendBtn.disabled = true;
+  const msgObj = {
+    id: 'dm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    to: String(dmState.activePartnerId),
+    text,
+    ts: Date.now()
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__DM_MSG__:' + JSON.stringify(msgObj),
+    status: 'denied'
+  });
+
+  if (sendBtn) sendBtn.disabled = false;
+  if (error) {
+    toast('Could not send DM: ' + error.message);
+    return;
+  }
+
+  if (input) input.value = '';
+  const pid = String(dmState.activePartnerId);
+  if (!dmState.messagesByPartner.has(pid)) dmState.messagesByPartner.set(pid, []);
+  dmState.messagesByPartner.get(pid).push({
+    id: msgObj.id,
+    from: String(currentUser.id),
+    to: pid,
+    text: msgObj.text,
+    ts: msgObj.ts
+  });
+  markDmThreadSeen(pid, msgObj.ts);
+  playSound('commenting');
+  renderDmSidebar();
+  renderDmThread();
+});
+
+window.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (!$('#coinWatchModal')?.classList.contains('hidden')) closeCoinWatchModal(false);
+  else if (!$('#dmModal')?.classList.contains('hidden')) hideModalSmooth($('#dmModal'));
+});
+
+
 
