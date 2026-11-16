@@ -179,15 +179,71 @@ function compressImg(file, cb) {
   r.readAsDataURL(file);
 }
 
-// ---------- Auth (robust) ----------
+// ---------- Auth (robust with Signup Email Code Verification) ----------
+let pendingSignup = null;
+let resendOtpInterval = null;
+
+function setSignupVerifyUI(active, email = '') {
+  const tabs = document.querySelector('.auth-tabs');
+  const form = $('#authForm');
+  const box = $('#signupVerifyBox');
+  if (tabs) tabs.classList.toggle('hidden', active);
+  if (form) form.classList.toggle('hidden', active);
+  if (box) box.classList.toggle('hidden', !active);
+  const disp = $('#verifyEmailDisplay');
+  if (disp) disp.textContent = email || '';
+  if (active) {
+    const inp = $('#signupOtpCode');
+    if (inp) {
+      inp.value = '';
+      setTimeout(() => inp.focus(), 50);
+    }
+  }
+}
+
+function startResendCooldown(seconds = 60) {
+  if (resendOtpInterval) {
+    clearInterval(resendOtpInterval);
+    resendOtpInterval = null;
+  }
+  const btn = $('#resendOtpBtn');
+  if (!btn) return;
+  const targetTs = Date.now() + seconds * 1000;
+  const tick = () => {
+    const rem = Math.max(0, Math.ceil((targetTs - Date.now()) / 1000));
+    if (rem > 0) {
+      btn.disabled = true;
+      btn.textContent = `Resend (${rem}s)`;
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Resend code';
+      if (resendOtpInterval) {
+        clearInterval(resendOtpInterval);
+        resendOtpInterval = null;
+      }
+    }
+  };
+  tick();
+  resendOtpInterval = setInterval(tick, 1000);
+}
+
 function setAuthMode(mode) {
+  pendingSignup = null;
+  if (resendOtpInterval) {
+    clearInterval(resendOtpInterval);
+    resendOtpInterval = null;
+  }
+  setSignupVerifyUI(false);
   document.querySelectorAll('.auth-tab').forEach(b => b.classList.toggle('active', b.dataset.auth === mode));
   const btn = document.getElementById('authSubmit');
   if (btn) btn.textContent = mode === 'signup' ? 'Create account' : 'Log in';
   const pw = document.getElementById('authPassword');
   if (pw) pw.autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
   const msg = document.getElementById('authMessage');
-  if (msg) msg.textContent = '';
+  if (msg) {
+    msg.textContent = '';
+    msg.style.color = '';
+  }
 }
 window.setAuthMode = setAuthMode;
 
@@ -236,25 +292,43 @@ $('#authForm')?.addEventListener('submit', async (e) => {
   const mode = document.querySelector('.auth-tab.active')?.dataset.auth || 'login';
   if (!email || !email.includes('@')) return authMsg('Please enter a valid email.');
 
+  const submitBtn = $('#authSubmit');
   if (mode === 'signup') {
-    const { data, error } = await sb.auth.signUp({ email, password });
-    if (error) return authMsg(error.message);
-    if (!data.user) return authMsg('Signup failed. Try again.');
-    try {
-      localStorage.setItem('grind_tos_pending_' + data.user.id, '1');
-    } catch (e) {}
-
-    // Log in (needed before we may create the profile row)
-    const { error: loginErr } = await sb.auth.signInWithPassword({ email, password });
-    if (loginErr) {
-      authMsg('Account created! Check your email to confirm, then log in.');
-      setAuthMode('login');
-      return;
+    if (!password || password.length < 6) return authMsg('Password must be at least 6 characters.');
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Sending code...';
     }
-    await loadProfile();   // creates the profile with an auto username if missing
-    if (!currentUser?.is_banned) {
-      enterApp();
-      toast('Welcome to GRIND! Set your username under Account.');
+    try {
+      // Prevent OTP login/overwrite on emails that already have a GRIND account
+      const { data: existingProf } = await sb.from('profiles').select('id').ilike('email', email).maybeSingle();
+      if (existingProf) {
+        authMsg('An account with this email already exists. Please log in instead.');
+        return;
+      }
+
+      const { error } = await sb.auth.signInWithOtp({
+        email,
+        options: { shouldCreateUser: true }
+      });
+      if (error) {
+        const emsg = /rate limit/i.test(error.message || '')
+          ? 'Too many verification emails sent right now. Please wait a minute and try again.'
+          : error.message;
+        authMsg(emsg || 'Could not send verification email.');
+        return;
+      }
+
+      pendingSignup = { email, password };
+      try { sessionStorage.setItem('grind_pending_pw', JSON.stringify({ email, password })); } catch (err) {}
+      setSignupVerifyUI(true, email);
+      startResendCooldown(60);
+      authMsg('Verification code sent! Check your email inbox (and spam).', '#34d399');
+    } finally {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Create account';
+      }
     }
   } else {
     const { error } = await sb.auth.signInWithPassword({ email, password });
@@ -264,9 +338,109 @@ $('#authForm')?.addEventListener('submit', async (e) => {
   }
 });
 
-function authMsg(s) {
+$('#signupVerifyForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!sb || !pendingSignup) return;
+  const token = ($('#signupOtpCode')?.value || '').trim().replace(/[\s-]+/g, '');
+  if (!token || token.length < 6) {
+    return authMsg('Enter the verification code sent to your email.');
+  }
+
+  const btn = $('#verifyOtpBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Verifying...';
+  }
+
+  try {
+    let { data: vData, error: vErr } = await sb.auth.verifyOtp({
+      email: pendingSignup.email,
+      token,
+      type: 'email'
+    });
+    if (vErr) {
+      const retry = await sb.auth.verifyOtp({
+        email: pendingSignup.email,
+        token,
+        type: 'signup'
+      });
+      if (!retry.error) {
+        vData = retry.data;
+        vErr = null;
+      }
+    }
+    if (vErr || !vData?.user) {
+      authMsg(vErr?.message || 'Invalid or expired verification code. Try again or resend.');
+      return;
+    }
+
+    const { error: pwErr } = await sb.auth.updateUser({ password: pendingSignup.password });
+    if (pwErr) {
+      console.warn('Password set note after OTP verify:', pwErr.message);
+    }
+
+    const uid = vData.user.id;
+    try {
+      localStorage.setItem('grind_tos_pending_' + uid, '1');
+      sessionStorage.removeItem('grind_pending_pw');
+    } catch (err) {}
+
+    pendingSignup = null;
+    if (resendOtpInterval) {
+      clearInterval(resendOtpInterval);
+      resendOtpInterval = null;
+    }
+    setSignupVerifyUI(false);
+    authMsg('');
+
+    await loadProfile();
+    if (!currentUser?.is_banned) {
+      enterApp();
+      toast('Email verified! Welcome to GRIND.');
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Verify & Create Account';
+    }
+  }
+});
+
+$('#resendOtpBtn')?.addEventListener('click', async () => {
+  if (!sb || !pendingSignup) return;
+  const btn = $('#resendOtpBtn');
+  if (btn && btn.disabled) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+  }
+  const { error } = await sb.auth.signInWithOtp({
+    email: pendingSignup.email,
+    options: { shouldCreateUser: true }
+  });
+  if (error) {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Resend code';
+    }
+    authMsg(error.message || 'Could not resend code.');
+    return;
+  }
+  startResendCooldown(60);
+  authMsg('New verification code sent to ' + pendingSignup.email, '#34d399');
+});
+
+$('#cancelVerifyBtn')?.addEventListener('click', () => {
+  try { sessionStorage.removeItem('grind_pending_pw'); } catch (e) {}
+  setAuthMode('signup');
+});
+
+function authMsg(s, color = '') {
   const el = $('#authMessage');
-  if (el) el.textContent = s;
+  if (el) {
+    el.style.color = color || '';
+    el.textContent = s;
+  }
 }
 
 async function loadProfile() {
@@ -6760,6 +6934,16 @@ $('#proUpgradeModal')?.addEventListener('click', e => {
   }
   const { data: { session } } = await sb.auth.getSession();
   if (session) {
+    try {
+      const pendingRaw = sessionStorage.getItem('grind_pending_pw');
+      if (pendingRaw) {
+        const parsed = JSON.parse(pendingRaw);
+        if (parsed?.email && parsed?.password && session.user?.email?.toLowerCase() === parsed.email.toLowerCase()) {
+          await sb.auth.updateUser({ password: parsed.password });
+          sessionStorage.removeItem('grind_pending_pw');
+        }
+      }
+    } catch (e) {}
     await loadProfile();
     if (!currentUser?.is_banned) enterApp();
   } else {

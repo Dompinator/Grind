@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=34">
+  <link rel="stylesheet" href="styles.css?v=35">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -24,6 +24,20 @@
         <label>Password<input id="authPassword" type="password" autocomplete="current-password" minlength="6" required placeholder="Password (min 6)"></label>
         <button class="primary-btn full" id="authSubmit" type="submit">Log in</button>
       </form>
+      <div id="signupVerifyBox" class="verify-box hidden">
+        <div class="eyebrow purple-text" style="margin-bottom:6px;">EMAIL VERIFICATION</div>
+        <p class="muted tiny" style="margin:0 0 14px;line-height:1.45;">Enter the confirmation code sent to <strong id="verifyEmailDisplay" style="color:#f5f0ff;"></strong> to activate your new account.</p>
+        <form id="signupVerifyForm">
+          <label>Verification Code
+            <input id="signupOtpCode" class="verify-code-input" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" required placeholder="000000">
+          </label>
+          <button class="primary-btn full" id="verifyOtpBtn" type="submit">Verify &amp; Create Account</button>
+        </form>
+        <div class="verify-actions">
+          <button type="button" class="zoom-btn" id="resendOtpBtn">Resend code</button>
+          <button type="button" class="zoom-btn" id="cancelVerifyBtn">Back</button>
+        </div>
+      </div>
       <p class="tiny muted">GRIND v0.5</p>
       <p id="authMessage" class="form-message" aria-live="polite"></p>
     </section>
@@ -828,6 +842,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=34"></script>
+  <script src="app.js?v=35"></script>
 </body>
 </html>

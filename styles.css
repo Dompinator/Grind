@@ -38,6 +38,10 @@ label { display: block; text-align: left; margin-bottom: 14px; font-size: 13px; 
 label input, label textarea, label select { width: 100%; margin-top: 7px; background: #120e1c; border: 1px solid var(--line); border-radius: 12px; padding: 13px; color: white; font-size: 15px; transition: border .15s; }
 label input:focus, label textarea:focus, label select:focus { outline: none; border-color: var(--purple); }
 .form-message { color: #fca5a5; font-size: 14px; font-weight: 600; min-height: 20px; margin-top: 12px; text-align: center; }
+.verify-box { background: #120e1c; border: 1px solid rgba(192, 132, 252, .35); border-radius: 16px; padding: 18px 16px; margin-top: 18px; }
+.verify-code-input { text-align: center; font-size: 22px !important; font-weight: 800; letter-spacing: 5px; }
+.verify-actions { display: flex; justify-content: space-between; gap: 10px; margin-top: 12px; }
+.verify-actions .zoom-btn { flex: 1; padding: 9px 12px; }
 
 /* App layout */
 .app { display: flex; min-height: 100vh; }
