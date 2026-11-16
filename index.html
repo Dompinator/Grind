@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=39">
+  <link rel="stylesheet" href="styles.css?v=40">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -851,7 +851,49 @@
     </div>
   </div>
 
+  <!-- TIER PROMOTION CROWN OVERLAY (PRO & PREMIUM) -->
+  <div id="tierPromoOverlay" class="tier-promo-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="tierPromoTitle">
+    <canvas id="tierPromoCanvas" class="tier-promo-canvas" aria-hidden="true"></canvas>
+    <div class="tier-promo-stage" id="tierPromoStage">
+      <div class="tier-promo-aurora" aria-hidden="true"></div>
+      <div class="tier-promo-ring ring-outer" aria-hidden="true"></div>
+      <div class="tier-promo-ring ring-inner" aria-hidden="true"></div>
+      <div class="tier-promo-crown-wrap">
+        <div class="tier-promo-crown-glow" aria-hidden="true"></div>
+        <div class="tier-promo-crown-svg" id="tierPromoCrownSvg"></div>
+        <div class="tier-promo-sheen" aria-hidden="true"></div>
+      </div>
+      <div class="tier-promo-copy">
+        <div class="tier-promo-kicker" id="tierPromoKicker">TIER PROMOTION</div>
+        <h2 class="tier-promo-title" id="tierPromoTitle">PROMOTED TO PRO</h2>
+        <p class="tier-promo-sub" id="tierPromoSub"></p>
+        <div class="tier-promo-perks" id="tierPromoPerks"></div>
+        <button type="button" class="tier-promo-btn" id="tierPromoCloseBtn">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- >$200 COIN BUY SMOOTH ANIMATION LAYER -->
+  <div id="coinBoostFxLayer" class="coin-boost-fx-layer" aria-hidden="true"></div>
+
+  <!-- $1000+ HUGE COIN INJECTION CELEBRATION OVERLAY -->
+  <div id="whaleBuyOverlay" class="whale-buy-overlay hidden" aria-hidden="true">
+    <div class="whale-ambient-wash"></div>
+    <canvas id="whaleBuyCanvas" class="whale-buy-canvas"></canvas>
+    <div class="whale-shockwave wave-1"></div>
+    <div class="whale-shockwave wave-2"></div>
+    <div class="whale-hero" id="whaleBuyBanner">
+      <div class="whale-rays"></div>
+      <div class="whale-emblem-card">
+        <div class="whale-emblem-sheen"></div>
+        <div class="whale-kicker">MEGA INJECTION</div>
+        <div class="whale-amount" id="whaleAmountNum">+$1,000.00</div>
+        <div class="whale-coin-row" id="whaleCoinRow"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=40"></script>
+  <script src="app.js?v=41"></script>
 </body>
 </html>

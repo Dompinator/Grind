@@ -135,6 +135,11 @@ function getUserTier(p) {
   if (p.is_pro || (p.id && proUserIds.has(p.id)) || (p.user_id && proUserIds.has(p.user_id))) return 'pro';
   return 'member';
 }
+function getTierRank(tier) {
+  if (tier === 'premium') return 2;
+  if (tier === 'pro') return 1;
+  return 0;
+}
 function tierLabel(p) {
   const t = getUserTier(p);
   if (t === 'premium') return 'Premium';
@@ -503,6 +508,7 @@ async function loadProfile() {
     }
     return loadProfile();
   }
+  const prevMemTier = currentUser && currentUser.id === user.id ? getUserTier(currentUser) : null;
   currentUser = data;
   currentUser.auth_created_at = user.created_at || data.created_at || null;
 
@@ -549,6 +555,7 @@ async function loadProfile() {
   await applyAdminActionsForCurrentUser();
   if (!currentUser?.is_banned) {
     updateUIProfile();
+    detectAndTriggerTierPromotion(prevMemTier);
   }
 }
 
@@ -1275,6 +1282,7 @@ function enterApp() {
   loadCoins();
   startTimeTracking();
   checkDailyLogin();
+  flushPendingTierPromo();
 }
 
 function startTimeTracking() {
@@ -1326,6 +1334,8 @@ $('#logoutBtn')?.addEventListener('click', async () => {
   $('#dailyModal')?.classList.add('hidden');
   $('#profileModal')?.classList.add('hidden');
   $('#featuredEditModal')?.classList.add('hidden');
+  closeTierPromoOverlay(true);
+  pendingTierPromo = null;
   $('#authView').classList.remove('hidden');
   setAuthMode('login');
 });
@@ -2904,7 +2914,12 @@ async function buy(coin, amount) {
     toast(`Bought for ${money(amount)}! Price ${priceFmt(coin.price)} (+${(impact * 100).toFixed(impact < 0.1 ? 2 : 0)}%)`);
     await loadCoins();
     selectedCoin = coins.find(x => x.id === coin.id) || coin;
-    renderCoinDetail();
+    await renderCoinDetail();
+    if (amount >= 1000) {
+      triggerWhaleCoinBuyAnimation(selectedCoin, amount, impact);
+    } else if (amount > 200) {
+      triggerMediumCoinBuyAnimation(selectedCoin, amount, impact);
+    }
   } finally {
     tradeInFlight = false;
   }
@@ -3618,6 +3633,10 @@ $('#claimDailyBtn')?.addEventListener('click', async () => {
     localStorage.setItem('grind_pro_' + currentUser.id, '1');
     currentUser.is_pro = true;
     proUserIds.add(currentUser.id);
+    if (getTierRank(getUserTier(currentUser)) <= 1) {
+      try { localStorage.setItem('grind_seen_tier_' + currentUser.id, 'pro'); } catch (e) {}
+      triggerTierPromotionAnimation('pro');
+    }
     toast('Day 7 claimed! You unlocked PRO tier!');
   } else {
     const cashGain = r === 'PRO' ? 30 : r * mult;
@@ -6284,6 +6303,10 @@ async function claimPassReward(tier, track = 'free') {
     localStorage.setItem('grind_pro_' + currentUser.id, '1');
     currentUser.is_pro = true;
     proUserIds.add(currentUser.id);
+    if (getTierRank(getUserTier(currentUser)) <= 1) {
+      try { localStorage.setItem('grind_seen_tier_' + currentUser.id, 'pro'); } catch (e) {}
+      triggerTierPromotionAnimation('pro');
+    }
     toast('Pass Level 20 claimed! Free PRO tier + bottom 2X PRO track unlocked!');
   } else if (activeReward.type === 'coin_live_post') {
     toast(isProTrack
@@ -6384,6 +6407,10 @@ async function claimAllReadyPassRewards() {
     localStorage.setItem('grind_pro_' + currentUser.id, '1');
     currentUser.is_pro = true;
     proUserIds.add(currentUser.id);
+    if (getTierRank(getUserTier(currentUser)) <= 1) {
+      try { localStorage.setItem('grind_seen_tier_' + currentUser.id, 'pro'); } catch (e) {}
+      triggerTierPromotionAnimation('pro');
+    }
   }
 
   const inserts = [
@@ -7183,6 +7210,500 @@ $('#proUpgradeLaterBtn')?.addEventListener('click', closeProUpgradeModal);
 $('#proUpgradeModal')?.addEventListener('click', e => {
   if (e.target?.id === 'proUpgradeModal') closeProUpgradeModal();
 });
+
+// ============================================================
+// ---------- SMOOTH PROMOTION & COIN BOOST ANIMATIONS --------
+// ============================================================
+let pendingTierPromo = null;
+let tierPromoRaf = null;
+let tierPromoCloseTimer = null;
+let whaleOverlayTimer = null;
+let whaleCanvasRaf = null;
+let whaleCounterRaf = null;
+
+function buildPromoCrownSvg(tier) {
+  const isPrem = tier === 'premium';
+  const gradId = isPrem ? 'promoPremCrownGrad' : 'promoProCrownGrad';
+  const rimId = isPrem ? 'promoPremRimGrad' : 'promoProRimGrad';
+  return `
+    <svg viewBox="0 0 120 94" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <defs>
+        <linearGradient id="${gradId}" x1="16" y1="10" x2="106" y2="86" gradientUnits="userSpaceOnUse">
+          ${isPrem
+            ? `<stop offset="0%" stop-color="#f8fafc"/>
+               <stop offset="32%" stop-color="#bae6fd"/>
+               <stop offset="68%" stop-color="#38bdf8"/>
+               <stop offset="100%" stop-color="#1d4ed8"/>`
+            : `<stop offset="0%" stop-color="#fffbeb"/>
+               <stop offset="32%" stop-color="#fde68a"/>
+               <stop offset="68%" stop-color="#f59e0b"/>
+               <stop offset="100%" stop-color="#b45309"/>`
+          }
+        </linearGradient>
+        <linearGradient id="${rimId}" x1="16" y1="68" x2="104" y2="84" gradientUnits="userSpaceOnUse">
+          ${isPrem
+            ? `<stop offset="0%" stop-color="#fde68a"/>
+               <stop offset="50%" stop-color="#e0f2fe"/>
+               <stop offset="100%" stop-color="#fbbf24"/>`
+            : `<stop offset="0%" stop-color="#fef3c7"/>
+               <stop offset="50%" stop-color="#fbbf24"/>
+               <stop offset="100%" stop-color="#92400e"/>`
+          }
+        </linearGradient>
+      </defs>
+      <!-- Crown Base Body -->
+      <path d="M18 68L10 27L37 46L60 15L83 46L110 27L102 68H18Z" fill="url(#${gradId})" stroke="${isPrem ? '#e0f2fe' : '#fef3c7'}" stroke-width="2" stroke-linejoin="round"/>
+      <!-- Inner Facet Shading -->
+      <path d="M60 15L83 46L102 68H60V15Z" fill="${isPrem ? 'rgba(15,23,42,0.16)' : 'rgba(120,53,15,0.16)'}"/>
+      <!-- Crown Band -->
+      <rect x="16" y="69" width="88" height="12" rx="6" fill="url(#${rimId})" stroke="${isPrem ? '#bae6fd' : '#fef08a'}" stroke-width="1.5"/>
+      <!-- Peak Orbs -->
+      <circle cx="10" cy="24" r="5" fill="${isPrem ? '#e0f2fe' : '#fef3c7'}"/>
+      <circle cx="60" cy="12" r="6.5" fill="${isPrem ? '#7dd3fc' : '#fde047'}"/>
+      <circle cx="110" cy="24" r="5" fill="${isPrem ? '#e0f2fe' : '#fef3c7'}"/>
+      <!-- Center Emblem Jewel -->
+      ${isPrem
+        ? `<path d="M60 36L64.2 44.6L73.6 46L66.8 52.6L68.4 62L60 57.5L51.6 62L53.2 52.6L46.4 46L55.8 44.6L60 36Z" fill="#ffffff" opacity="0.95"/>`
+        : `<path d="M60 38L68 49L60 60L52 49L60 38Z" fill="#fffbeb" opacity="0.92"/><path d="M60 41L65 49L60 57L55 49L60 41Z" fill="#f59e0b"/>`
+      }
+      <!-- Side Band Jewels -->
+      <circle cx="36" cy="75" r="2.8" fill="${isPrem ? '#0ea5e9' : '#b45309'}"/>
+      <circle cx="60" cy="75" r="3.4" fill="${isPrem ? '#ffffff' : '#fffbeb'}"/>
+      <circle cx="84" cy="75" r="2.8" fill="${isPrem ? '#0ea5e9' : '#b45309'}"/>
+    </svg>
+  `;
+}
+
+function startTierPromoParticles(tier) {
+  const canvas = $('#tierPromoCanvas');
+  if (!canvas) return;
+  if (tierPromoRaf) {
+    cancelAnimationFrame(tierPromoRaf);
+    tierPromoRaf = null;
+  }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const isPrem = tier === 'premium';
+  const palette = isPrem
+    ? ['#f8fafc', '#bae6fd', '#38bdf8', '#60a5fa', '#fde68a']
+    : ['#fffbeb', '#fde68a', '#fbbf24', '#f59e0b'];
+
+  const cx = w / 2;
+  const cy = h / 2 - 40;
+  const motes = Array.from({ length: 68 }, (_, i) => {
+    const burst = i < 36;
+    const angle = (Math.PI * 2 * i) / 36 + (Math.random() - 0.5) * 0.35;
+    const speed = burst ? (1.8 + Math.random() * 5.2) : (0.3 + Math.random() * 0.9);
+    return {
+      x: burst ? cx + (Math.random() - 0.5) * 30 : Math.random() * w,
+      y: burst ? cy + (Math.random() - 0.5) * 24 : h * 0.2 + Math.random() * h * 0.8,
+      vx: burst ? Math.cos(angle) * speed : (Math.random() - 0.5) * 0.35,
+      vy: burst ? Math.sin(angle) * speed - 0.9 : -(0.35 + Math.random() * 0.75),
+      r: 1.5 + Math.random() * 3.2,
+      alpha: burst ? 0.95 : 0.25 + Math.random() * 0.55,
+      color: palette[i % palette.length],
+      burst,
+      phase: Math.random() * Math.PI * 2
+    };
+  });
+
+  const draw = () => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const m of motes) {
+      m.phase += 0.04;
+      if (m.burst) {
+        m.vx *= 0.965;
+        m.vy = m.vy * 0.965 + 0.03;
+        m.alpha *= 0.985;
+        if (m.alpha < 0.04) {
+          m.burst = false;
+          m.x = Math.random() * w;
+          m.y = h + 12;
+          m.vx = (Math.random() - 0.5) * 0.35;
+          m.vy = -(0.4 + Math.random() * 0.85);
+          m.alpha = 0.25 + Math.random() * 0.5;
+        }
+      } else {
+        m.x += Math.sin(m.phase) * 0.25;
+        if (m.y < -15) {
+          m.y = h + 15;
+          m.x = Math.random() * w;
+        }
+      }
+      m.x += m.vx;
+      m.y += m.vy;
+      const glowAlpha = Math.max(0, Math.min(1, m.alpha * (0.75 + 0.25 * Math.sin(m.phase))));
+      ctx.globalAlpha = glowAlpha;
+      ctx.fillStyle = m.color;
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+    tierPromoRaf = requestAnimationFrame(draw);
+  };
+  tierPromoRaf = requestAnimationFrame(draw);
+}
+
+function closeTierPromoOverlay(immediate = false) {
+  const overlay = $('#tierPromoOverlay');
+  if (!overlay) return;
+  if (tierPromoCloseTimer) {
+    clearTimeout(tierPromoCloseTimer);
+    tierPromoCloseTimer = null;
+  }
+  const stopCanvas = () => {
+    if (tierPromoRaf) {
+      cancelAnimationFrame(tierPromoRaf);
+      tierPromoRaf = null;
+    }
+  };
+  if (immediate || overlay.classList.contains('hidden')) {
+    overlay.classList.add('hidden');
+    overlay.classList.remove('is-closing', 'is-pro', 'is-premium');
+    stopCanvas();
+    return;
+  }
+  overlay.classList.add('is-closing');
+  tierPromoCloseTimer = setTimeout(() => {
+    overlay.classList.add('hidden');
+    overlay.classList.remove('is-closing', 'is-pro', 'is-premium');
+    stopCanvas();
+    tierPromoCloseTimer = null;
+  }, 290);
+}
+
+function triggerTierPromotionAnimation(tier) {
+  if (tier !== 'pro' && tier !== 'premium') return;
+  const overlay = $('#tierPromoOverlay');
+  if (!overlay) return;
+
+  const appVisible = !$('#appView')?.classList.contains('hidden');
+  if (!appVisible) {
+    pendingTierPromo = tier;
+    return;
+  }
+  pendingTierPromo = null;
+
+  if (tierPromoCloseTimer) {
+    clearTimeout(tierPromoCloseTimer);
+    tierPromoCloseTimer = null;
+  }
+
+  const isPrem = tier === 'premium';
+  overlay.classList.remove('hidden', 'is-closing', 'is-pro', 'is-premium');
+  overlay.classList.add(isPrem ? 'is-premium' : 'is-pro');
+
+  const stage = $('#tierPromoStage');
+  if (stage) {
+    stage.style.animation = 'none';
+    void stage.offsetWidth;
+    stage.style.animation = '';
+  }
+
+  const crownWrap = $('#tierPromoCrownSvg');
+  if (crownWrap) crownWrap.innerHTML = buildPromoCrownSvg(tier);
+
+  if ($('#tierPromoKicker')) {
+    $('#tierPromoKicker').textContent = isPrem ? 'ROYAL TIER PROMOTION' : 'TIER PROMOTION';
+  }
+  if ($('#tierPromoTitle')) {
+    $('#tierPromoTitle').textContent = isPrem ? 'PROMOTED TO PREMIUM' : 'PROMOTED TO PRO';
+  }
+  if ($('#tierPromoSub')) {
+    $('#tierPromoSub').textContent = isPrem
+      ? 'You reached the highest GRIND tier. Every luxury material, perk, and AI feature is now yours.'
+      : 'Welcome to PRO. You unlocked your Gold Crown badge, double rewards, and live market tactics.';
+  }
+  if ($('#tierPromoPerks')) {
+    const perks = isPrem
+      ? ['Blue Star + Crown', '3 Coins Max', 'Sapphire & Platinum Themes', '2X Daily & Pass', 'GRIND-BOT Ask Anything']
+      : ['Gold Crown Badge', '2 Coins Max', 'Gold & Obsidian Theme', '2X Daily & Pass', 'GRIND-BOT Unlocked'];
+    $('#tierPromoPerks').innerHTML = perks.map(p => `<span class="tier-promo-perk">${escapeHtml(p)}</span>`).join('');
+  }
+  if ($('#tierPromoCloseBtn')) {
+    $('#tierPromoCloseBtn').textContent = isPrem ? 'Enter Luxury Market' : 'Start Grinding';
+  }
+
+  startTierPromoParticles(tier);
+}
+
+function flushPendingTierPromo() {
+  if (!pendingTierPromo) return;
+  const tier = pendingTierPromo;
+  pendingTierPromo = null;
+  setTimeout(() => {
+    if (currentUser && !currentUser.is_banned) {
+      triggerTierPromotionAnimation(tier);
+    }
+  }, 280);
+}
+
+function detectAndTriggerTierPromotion(prevMemTier) {
+  if (!currentUser?.id) return;
+  const uid = currentUser.id;
+  const resolvedTier = getUserTier(currentUser);
+  const key = 'grind_seen_tier_' + uid;
+  let storedTier = null;
+  try { storedTier = localStorage.getItem(key); } catch (e) {}
+
+  const baseline = prevMemTier || storedTier;
+  if (baseline && getTierRank(resolvedTier) > getTierRank(baseline)) {
+    try { localStorage.setItem(key, resolvedTier); } catch (e) {}
+    triggerTierPromotionAnimation(resolvedTier);
+  } else if (!storedTier || getTierRank(resolvedTier) !== getTierRank(storedTier)) {
+    try { localStorage.setItem(key, resolvedTier); } catch (e) {}
+  }
+}
+
+$('#tierPromoCloseBtn')?.addEventListener('click', () => closeTierPromoOverlay(false));
+$('#tierPromoOverlay')?.addEventListener('click', e => {
+  if (e.target?.id === 'tierPromoOverlay') closeTierPromoOverlay(false);
+});
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$('#tierPromoOverlay')?.classList.contains('hidden')) {
+    closeTierPromoOverlay(false);
+  }
+});
+
+function pulseCoinDetailSurface() {
+  const panel = $('#coinDetail .trade-panel');
+  if (panel) {
+    panel.classList.remove('trade-boost-glow');
+    void panel.offsetWidth;
+    panel.classList.add('trade-boost-glow');
+  }
+  const priceEl = $('#coinDetail .detail-price');
+  if (priceEl) {
+    priceEl.classList.remove('price-surge-flash');
+    void priceEl.offsetWidth;
+    priceEl.classList.add('price-surge-flash');
+  }
+}
+
+function triggerMediumCoinBuyAnimation(coin, amount, impact) {
+  const layer = $('#coinBoostFxLayer');
+  if (!layer) return;
+  pulseCoinDetailSurface();
+
+  const pill = document.createElement('div');
+  pill.className = 'coin-boost-pill';
+  const pct = (Math.max(0, Number(impact) || 0) * 100);
+  const pctTxt = pct >= 1 ? `+${pct.toFixed(1)}%` : `+${pct.toFixed(2)}%`;
+  pill.innerHTML = `
+    <div class="coin-boost-badge">▲</div>
+    <div class="coin-boost-text">
+      <strong>+${escapeHtml(money(amount))} added to $${escapeHtml(coin?.ticker || 'COIN')}</strong>
+      <span>Market surge ${escapeHtml(pctTxt)}</span>
+    </div>
+  `;
+  layer.appendChild(pill);
+
+  // Smooth radiating emerald-gold sparks around the floating pill
+  const cx = window.innerWidth / 2;
+  const cy = window.innerHeight - 108;
+  for (let i = 0; i < 16; i++) {
+    const spark = document.createElement('span');
+    spark.className = 'coin-boost-spark';
+    const angle = (-Math.PI * 0.9) + (Math.PI * 0.8 * (i / 15)) + (Math.random() - 0.5) * 0.25;
+    const dist = 54 + Math.random() * 88;
+    const sx = Math.cos(angle) * dist;
+    const sy = Math.sin(angle) * dist - 14;
+    spark.style.left = `${cx + (Math.random() - 0.5) * 110}px`;
+    spark.style.top = `${cy + (Math.random() - 0.5) * 16}px`;
+    spark.style.setProperty('--sx', `${sx.toFixed(1)}px`);
+    spark.style.setProperty('--sy', `${sy.toFixed(1)}px`);
+    spark.style.setProperty('--dur', `${(0.85 + Math.random() * 0.5).toFixed(2)}s`);
+    layer.appendChild(spark);
+    setTimeout(() => spark.remove(), 1500);
+  }
+
+  setTimeout(() => pill.remove(), 1850);
+}
+
+function triggerWhaleCoinBuyAnimation(coin, amount, impact) {
+  const overlay = $('#whaleBuyOverlay');
+  const canvas = $('#whaleBuyCanvas');
+  const amountEl = $('#whaleAmountNum');
+  const rowEl = $('#whaleCoinRow');
+  if (!overlay || !canvas || !amountEl || !rowEl) return;
+
+  pulseCoinDetailSurface();
+
+  if (whaleOverlayTimer) {
+    clearTimeout(whaleOverlayTimer);
+    whaleOverlayTimer = null;
+  }
+  if (whaleCanvasRaf) {
+    cancelAnimationFrame(whaleCanvasRaf);
+    whaleCanvasRaf = null;
+  }
+  if (whaleCounterRaf) {
+    cancelAnimationFrame(whaleCounterRaf);
+    whaleCounterRaf = null;
+  }
+
+  // Restart CSS animations cleanly by cloning animated nodes or resetting animation
+  overlay.classList.add('hidden');
+  void overlay.offsetWidth;
+  overlay.classList.remove('hidden');
+
+  const pct = Math.max(0, Number(impact) || 0) * 100;
+  const pctTxt = pct >= 1 ? `+${pct.toFixed(1)}%` : `+${pct.toFixed(2)}%`;
+  const ticker = coin?.ticker || 'COIN';
+  const chipInner = coin?.image_url
+    ? `<img src="${escapeHtml(coin.image_url)}" alt="">`
+    : escapeHtml(ticker[0] || '$');
+  rowEl.innerHTML = `
+    <span class="whale-coin-chip">${chipInner}</span>
+    <span>$${escapeHtml(ticker)}</span>
+    <span class="whale-impact-tag">${escapeHtml(pctTxt)} SURGE</span>
+  `;
+
+  // Smooth cubic ease-out rolling dollar counter ($0 -> exact amount)
+  const countStart = performance.now();
+  const countDur = 680;
+  const stepCounter = now => {
+    const t = Math.min(1, (now - countStart) / countDur);
+    const eased = 1 - Math.pow(1 - t, 3);
+    const val = amount * eased;
+    amountEl.textContent = `+${money(val)}`;
+    if (t < 1) {
+      whaleCounterRaf = requestAnimationFrame(stepCounter);
+    } else {
+      amountEl.textContent = `+${money(amount)}`;
+      whaleCounterRaf = null;
+    }
+  };
+  whaleCounterRaf = requestAnimationFrame(stepCounter);
+
+  // 60fps full-viewport particle fountain & shockwave sparks
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const cx = w / 2;
+    const cy = h / 2;
+    const colors = ['#34d399', '#6ee7b7', '#fde047', '#fbbf24', '#ffffff', '#a7f3d0'];
+    const particles = [];
+
+    // Radial explosion burst
+    for (let i = 0; i < 125; i++) {
+      const ang = (Math.PI * 2 * i) / 125 + (Math.random() - 0.5) * 0.25;
+      const spd = 3.5 + Math.random() * 14.5;
+      particles.push({
+        x: cx,
+        y: cy,
+        px: cx,
+        py: cy,
+        vx: Math.cos(ang) * spd,
+        vy: Math.sin(ang) * spd - 1.2,
+        size: 2.2 + Math.random() * 4.8,
+        color: colors[i % colors.length],
+        alpha: 1,
+        decay: 0.008 + Math.random() * 0.011,
+        gravity: 0.14,
+        drag: 0.968,
+        kind: i % 5 === 0 ? 'diamond' : 'streak'
+      });
+    }
+
+    // Bottom celebration fountain jets
+    for (let i = 0; i < 70; i++) {
+      const side = i % 2 === 0 ? 0.22 : 0.78;
+      const ox = w * side + (Math.random() - 0.5) * 90;
+      const oy = h + 10;
+      particles.push({
+        x: ox,
+        y: oy,
+        px: ox,
+        py: oy,
+        vx: (w / 2 - ox) * 0.018 + (Math.random() - 0.5) * 4.2,
+        vy: -(11 + Math.random() * 9.5),
+        size: 3 + Math.random() * 4.5,
+        color: colors[(i + 2) % colors.length],
+        alpha: 0.95,
+        decay: 0.007 + Math.random() * 0.008,
+        gravity: 0.22,
+        drag: 0.985,
+        kind: 'orb'
+      });
+    }
+
+    const startTime = performance.now();
+    const renderWhale = now => {
+      const elapsed = now - startTime;
+      ctx.clearRect(0, 0, w, h);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      let alive = false;
+      for (const p of particles) {
+        if (p.alpha <= 0.015) continue;
+        alive = true;
+        p.px = p.x;
+        p.py = p.y;
+        p.vx *= p.drag;
+        p.vy = p.vy * p.drag + p.gravity;
+        p.x += p.vx;
+        p.y += p.vy;
+        p.alpha = Math.max(0, p.alpha - p.decay);
+
+        ctx.globalAlpha = p.alpha;
+        if (p.kind === 'streak') {
+          ctx.strokeStyle = p.color;
+          ctx.lineWidth = Math.max(1.5, p.size * 0.65);
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(p.px, p.py);
+          ctx.lineTo(p.x, p.y);
+          ctx.stroke();
+        } else if (p.kind === 'diamond') {
+          ctx.fillStyle = p.color;
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(elapsed * 0.006 + p.size);
+          ctx.fillRect(-p.size, -p.size * 0.5, p.size * 2, p.size);
+          ctx.restore();
+        } else {
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+      if (alive && elapsed < 2950) {
+        whaleCanvasRaf = requestAnimationFrame(renderWhale);
+      } else {
+        ctx.clearRect(0, 0, w, h);
+        whaleCanvasRaf = null;
+      }
+    };
+    whaleCanvasRaf = requestAnimationFrame(renderWhale);
+  }
+
+  whaleOverlayTimer = setTimeout(() => {
+    overlay.classList.add('hidden');
+    if (whaleCanvasRaf) {
+      cancelAnimationFrame(whaleCanvasRaf);
+      whaleCanvasRaf = null;
+    }
+    whaleOverlayTimer = null;
+  }, 3020);
+}
 
 // ---------- Init ----------
 (async () => {
