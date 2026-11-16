@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=43">
+  <link rel="stylesheet" href="styles.css?v=44">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -274,6 +274,31 @@
                 </div>
               </div>
               <div id="themeStripsList" class="theme-strips-list"></div>
+            </div>
+            <hr style="border-color:#3a2e4a;margin:20px 0">
+            <div id="musicSettingsSection">
+              <div class="music-settings-head">
+                <div>
+                  <h4>Music Settings</h4>
+                  <p class="muted tiny" id="musicSettingsSub">Soothing ambient lounge music plays automatically when using a PREMIUM theme.</p>
+                </div>
+                <button type="button" id="ambientMusicToggleBtn" class="music-toggle-btn active" aria-pressed="true">
+                  <span class="music-toggle-dot" aria-hidden="true"></span>
+                  <span id="ambientMusicToggleLabel">Music: On</span>
+                </button>
+              </div>
+              <div class="music-settings-card" id="musicSettingsCard">
+                <div class="music-settings-info">
+                  <div class="music-eq-bars" id="musicEqBars" aria-hidden="true">
+                    <span></span><span></span><span></span><span></span>
+                  </div>
+                  <div>
+                    <strong id="musicTrackTitle">Obsidian Lounge — Soothing Ambient</strong>
+                    <p class="muted tiny" id="musicStatusDesc" style="margin:2px 0 0;">Plays automatically whenever Sapphire &amp; Obsidian or Gold &amp; Platinum is active.</p>
+                  </div>
+                </div>
+                <span class="music-state-pill" id="musicStatePill">Off</span>
+              </div>
             </div>
             <hr style="border-color:#3a2e4a;margin:20px 0">
             <div id="premiumSection">
@@ -895,6 +920,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=44"></script>
+  <script src="app.js?v=45"></script>
 </body>
 </html>
