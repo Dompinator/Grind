@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=46">
+  <link rel="stylesheet" href="styles.css?v=47">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -73,10 +73,14 @@
         <div class="version">GRIND v0.5</div>
       </div>
     </aside>
+    <div id="mobileSidebarBackdrop" class="mobile-sidebar-backdrop hidden" aria-hidden="true"></div>
 
     <section class="main-area">
       <header class="topbar">
-        <h2 id="pageTitle">Discover currencies</h2>
+        <div class="topbar-left">
+          <button type="button" id="mobileMenuBtn" class="mobile-menu-btn" aria-label="Open navigation menu" aria-expanded="false">☰</button>
+          <h2 id="pageTitle">Discover currencies</h2>
+        </div>
         <div class="top-right">
           <div class="cash-pill"><small>CASH</small> <span id="topCash">$15.00</span></div>
           <button type="button" id="openDmBtn" class="dm-topbar-btn" title="Direct Messages" aria-label="Direct Messages">
@@ -215,6 +219,14 @@
           <div class="feed-tabs" id="leaderboardTabs">
             <button class="feed-tab active" data-lb="networth">Net Worth</button>
             <button class="feed-tab" data-lb="time">Time Played</button>
+            <button class="feed-tab" data-lb="weekly">Weekly Profit</button>
+          </div>
+          <div id="lbWeeklyControls" class="lb-weekly-controls hidden">
+            <div id="lbWeeklySpotlights" class="lb-weekly-spotlights"></div>
+            <div class="feed-tabs lb-weekly-subtabs" id="lbWeeklySortTabs">
+              <button type="button" class="feed-tab active" data-lb-weekly="up">Most % Up</button>
+              <button type="button" class="feed-tab" data-lb-weekly="down">Down Most %</button>
+            </div>
           </div>
           <div id="lbMovementBanner" class="lb-movement-banner hidden"></div>
           <div id="leaderboardList" class="leaderboard-list"></div>
@@ -952,7 +964,19 @@
             <p class="muted tiny">Search any trader on the left to send a direct message.</p>
           </div>
           <div id="dmMessagesList" class="dm-messages-list hidden"></div>
+          <div id="dmCoinPicker" class="dm-coin-picker hidden" role="region" aria-label="Share a coin">
+            <div class="dm-coin-picker-head">
+              <div>
+                <strong>Share a Coin</strong>
+                <span class="muted tiny">Pick any currency to send with a Check It card</span>
+              </div>
+              <button type="button" id="dmCloseCoinPickerBtn" class="zoom-btn" aria-label="Close coin picker">✕</button>
+            </div>
+            <input id="dmCoinSearchInput" class="feed-search dm-coin-search" type="search" maxlength="40" placeholder="Search coin name or $ticker...">
+            <div id="dmCoinPickerList" class="dm-coin-picker-list"></div>
+          </div>
           <form id="dmSendForm" class="dm-composer hidden">
+            <button type="button" id="dmAttachCoinBtn" class="dm-plus-btn" title="Share a coin" aria-label="Share a coin" aria-expanded="false">＋</button>
             <input id="dmMessageInput" type="text" maxlength="500" autocomplete="off" placeholder="Write a private message...">
             <button type="submit" id="dmSendBtn" class="primary-btn">Send</button>
           </form>
@@ -1008,6 +1032,6 @@
   <div id="rewardBurstLayer" class="reward-burst-layer" aria-hidden="true"></div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=47"></script>
+  <script src="app.js?v=48"></script>
 </body>
 </html>

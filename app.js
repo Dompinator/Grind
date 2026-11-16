@@ -22,6 +22,7 @@ let customBuyActive = false;
 let customBuyValue = '';
 let feedMode = 'new';
 let lbMode = 'networth';
+let lbWeeklySort = 'up';
 let pendingCoinImage = null;
 let realtimeChannel = null;
 let sessionStart = null;
@@ -1531,6 +1532,7 @@ function showPage(page) {
   if (page === 'notifications') loadRequests();
   if (page === 'admin' && isDompinator()) loadAdminPage();
   if (typeof syncPremiumAmbientMusic === 'function') syncPremiumAmbientMusic();
+  if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
 }
 $$('.nav-btn').forEach(b => b.addEventListener('click', () => showPage(b.dataset.page)));
 $$('[data-goto]').forEach(b => b.addEventListener('click', () => showPage(b.dataset.goto)));
@@ -1547,6 +1549,13 @@ $$('.feed-tab').forEach(b => {
     b.addEventListener('click', () => {
       lbMode = b.dataset.lb;
       $$('.feed-tab[data-lb]').forEach(x => x.classList.toggle('active', x === b));
+      renderLeaderboard();
+    });
+  }
+  if (b.dataset.lbWeekly) {
+    b.addEventListener('click', () => {
+      lbWeeklySort = b.dataset.lbWeekly === 'down' ? 'down' : 'up';
+      $$('.feed-tab[data-lb-weekly]').forEach(x => x.classList.toggle('active', x === b));
       renderLeaderboard();
     });
   }
@@ -3277,9 +3286,12 @@ function drawChartWithBubbles(coin, trades) {
     zoomText.textContent = chartZoom <= 1.0 ? 'Fit' : Math.round(chartZoom * 100) + '%';
   }
 
-  const baseW = Math.max(scroll.clientWidth || 600, 320);
-  const PAD_X = 46, PAD_TOP = 64, PAD_BOT = 24;
-  const H = 300;
+  const baseW = Math.max(scroll.clientWidth || 600, 240);
+  const isNarrowChart = baseW < 430;
+  const PAD_X = isNarrowChart ? 28 : 46;
+  const PAD_TOP = isNarrowChart ? 58 : 64;
+  const PAD_BOT = 24;
+  const H = isNarrowChart ? 250 : 300;
 
   // Points: start at $1 (creation), then one point per trade (works for every coin)
   const points = [{ price: 1, trade: null }];
@@ -3555,28 +3567,239 @@ let lbHoldTimer = null;
 let lbCleanupTimer = null;
 let lbRankRaf = null;
 
+function formatSignedPct(val) {
+  const n = Number(val || 0);
+  if (!Number.isFinite(n) || Math.abs(n) < 0.005) return '0.00%';
+  const abs = Math.abs(n);
+  const decimals = abs >= 1000 ? 0 : (abs >= 100 ? 1 : 2);
+  return `${n > 0 ? '+' : '-'}${abs.toFixed(decimals)}%`;
+}
+
+function formatSignedMoney(val) {
+  const n = Number(val || 0);
+  if (!Number.isFinite(n) || Math.abs(n) < 0.005) return '$0.00';
+  return `${n > 0 ? '+' : '-'}${money(Math.abs(n))}`;
+}
+
+async function computeWeeklyProfitStats(rawProfiles) {
+  const srvResetTs = adminModStateCache.serverResetTs || 0;
+  const delCoins = adminModStateCache.deletedCoinIds || new Set();
+  const weekStartTs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  let coinsQ = sb.from('coins').select('id, creator_id, price, created_at');
+  let tradesQ = sb.from('trades')
+    .select('user_id, coin_id, type, amount_usd, shares, price_after, created_at')
+    .order('created_at', { ascending: true })
+    .limit(10000);
+  if (srvResetTs > 0) {
+    const iso = new Date(srvResetTs).toISOString();
+    coinsQ = coinsQ.gt('created_at', iso);
+    tradesQ = tradesQ.gt('created_at', iso);
+  }
+
+  const [{ data: allCoins }, { data: allTrades }, selfSoldMap] = await Promise.all([
+    coinsQ,
+    tradesQ,
+    fetchSelfSoldCoins()
+  ]);
+
+  const activeCoinMap = new Map();
+  (allCoins || []).forEach(c => {
+    const cid = String(c.id);
+    if (delCoins.has(cid)) return;
+    if (selfSoldMap && selfSoldMap.has(cid)) return;
+    activeCoinMap.set(cid, {
+      id: cid,
+      price: Number(c.price || 1),
+      createdTs: c.created_at ? new Date(c.created_at).getTime() : 0
+    });
+  });
+
+  const coinPriceBeforeWeek = new Map();
+  const sharesBeforeWeek = new Map(); // uid -> Map(cid -> shares)
+  const currSharesByUser = new Map(); // uid -> Map(cid -> shares)
+  const buys7dByUser = new Map();
+  const sells7dByUser = new Map();
+
+  const ensureUserMap = (outer, uid) => {
+    let m = outer.get(uid);
+    if (!m) {
+      m = new Map();
+      outer.set(uid, m);
+    }
+    return m;
+  };
+
+  (allTrades || []).forEach(t => {
+    const cid = String(t.coin_id || '');
+    if (!activeCoinMap.has(cid)) return;
+    const uid = String(t.user_id || '');
+    if (!uid) return;
+    const ts = t.created_at ? new Date(t.created_at).getTime() : 0;
+    const isSell = t.type === 'sell';
+    const sh = Math.max(0, Number(t.shares || 0));
+    const usd = Math.max(0, Number(t.amount_usd || 0));
+    const priceAfter = Number(t.price_after);
+
+    if (ts < weekStartTs) {
+      if (Number.isFinite(priceAfter) && priceAfter > 0) {
+        coinPriceBeforeWeek.set(cid, priceAfter);
+      }
+      const uStart = ensureUserMap(sharesBeforeWeek, uid);
+      const prevSh = uStart.get(cid) || 0;
+      uStart.set(cid, isSell ? Math.max(0, prevSh - sh) : (prevSh + sh));
+    } else {
+      if (isSell) {
+        sells7dByUser.set(uid, (sells7dByUser.get(uid) || 0) + usd);
+      } else {
+        buys7dByUser.set(uid, (buys7dByUser.get(uid) || 0) + usd);
+      }
+    }
+
+    const uCurr = ensureUserMap(currSharesByUser, uid);
+    const prevCurr = uCurr.get(cid) || 0;
+    uCurr.set(cid, isSell ? Math.max(0, prevCurr - sh) : (prevCurr + sh));
+  });
+
+  const statsMap = new Map();
+  rawProfiles.forEach(p => {
+    const pid = String(p.id);
+    const uStart = sharesBeforeWeek.get(pid);
+    const uCurr = currSharesByUser.get(pid);
+
+    let startHoldVal = 0;
+    if (uStart) {
+      uStart.forEach((sh, cid) => {
+        if (sh <= 1e-8) return;
+        const coin = activeCoinMap.get(cid);
+        if (!coin) return;
+        const pStart = coinPriceBeforeWeek.get(cid) || (coin.createdTs > 0 && coin.createdTs < weekStartTs ? 1 : coin.price);
+        startHoldVal += calcHoldingsValue(pStart, sh);
+      });
+    }
+
+    let endHoldVal = 0;
+    if (uCurr) {
+      uCurr.forEach((sh, cid) => {
+        if (sh <= 1e-8) return;
+        const coin = activeCoinMap.get(cid);
+        if (!coin) return;
+        endHoldVal += calcHoldingsValue(coin.price, sh);
+      });
+    }
+
+    const buys7d = buys7dByUser.get(pid) || 0;
+    const sells7d = sells7dByUser.get(pid) || 0;
+    const basisUsd = startHoldVal + buys7d;
+    const profitUsd = (endHoldVal + sells7d) - basisUsd;
+    const hasActivity = basisUsd > 0.01 || sells7d > 0.01;
+    const profitPct = basisUsd > 0.01 ? (profitUsd / basisUsd) * 100 : 0;
+
+    statsMap.set(pid, {
+      profitPct: Number.isFinite(profitPct) ? profitPct : 0,
+      profitUsd: Number.isFinite(profitUsd) ? profitUsd : 0,
+      basisUsd,
+      hasActivity
+    });
+  });
+
+  return statsMap;
+}
+
 async function renderLeaderboard() {
   if (!sb) return;
   const seq = ++lbRenderSeq;
   const modeAtStart = lbMode;
+  const weeklySortAtStart = lbWeeklySort;
   await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
   if (currentUser) await updateNetWorth();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
-  let query = sb.from('profiles').select('id, username, avatar_url, cash, net_worth, time_played, is_premium');
-  const { data } = await query.limit(200);
+  const { data } = await sb.from('profiles').select('id, username, avatar_url, cash, net_worth, time_played, is_premium').limit(200);
   if (seq !== lbRenderSeq || modeAtStart !== lbMode) return;
 
   let list = (data || [])
     .filter(p => !delUsers.has(String(p.id)))
     .map(getEffectiveProfileStats);
-  if (lbMode === 'networth') {
+
+  const weeklyWrap = $('#lbWeeklyControls');
+  const spotlightsEl = $('#lbWeeklySpotlights');
+  if (weeklyWrap) weeklyWrap.classList.toggle('hidden', lbMode !== 'weekly');
+
+  let bestGainerPid = null;
+  let worstLoserPid = null;
+
+  if (lbMode === 'weekly') {
+    const weeklyMap = await computeWeeklyProfitStats(list);
+    if (seq !== lbRenderSeq || modeAtStart !== lbMode || weeklySortAtStart !== lbWeeklySort) return;
+
+    list = list.map(p => {
+      const st = weeklyMap.get(String(p.id)) || { profitPct: 0, profitUsd: 0, basisUsd: 0, hasActivity: false };
+      return { ...p, weeklyProfitPct: st.profitPct, weeklyProfitUsd: st.profitUsd, weeklyHasActivity: st.hasActivity };
+    });
+
+    const activeTraders = list.filter(p => p.weeklyHasActivity);
+    const pool = activeTraders.length ? activeTraders : list;
+    if (pool.length) {
+      const sortedUp = [...pool].sort((a, b) => (b.weeklyProfitPct - a.weeklyProfitPct) || (b.weeklyProfitUsd - a.weeklyProfitUsd));
+      const sortedDown = [...pool].sort((a, b) => (a.weeklyProfitPct - b.weeklyProfitPct) || (a.weeklyProfitUsd - b.weeklyProfitUsd));
+      const best = sortedUp[0];
+      const worst = sortedDown[0];
+      if (best && best.weeklyProfitPct > 0.005) bestGainerPid = String(best.id);
+      if (worst && worst.weeklyProfitPct < -0.005) worstLoserPid = String(worst.id);
+
+      if (spotlightsEl) {
+        const upCard = best ? `
+          <button type="button" class="lb-spotlight-card up" data-profile="${escapeHtml(best.id)}">
+            <div class="lb-spotlight-label">▲ MOST % UP (7D)</div>
+            <div class="lb-spotlight-user">
+              <div class="avatar" style="width:30px;height:30px;font-size:12px;">${best.avatar_url ? `<img src="${escapeHtml(best.avatar_url)}">` : escapeHtml((best.username || '?')[0].toUpperCase())}</div>
+              <span class="lb-spotlight-name">${escapeHtml(best.username || 'Unknown')}${tierBadgeHtml(best)}</span>
+            </div>
+            <div class="lb-spotlight-stat up">${escapeHtml(formatSignedPct(best.weeklyProfitPct))} <small>${escapeHtml(formatSignedMoney(best.weeklyProfitUsd))}</small></div>
+          </button>` : '';
+        const downCard = worst ? `
+          <button type="button" class="lb-spotlight-card down" data-profile="${escapeHtml(worst.id)}">
+            <div class="lb-spotlight-label">▼ DOWN MOST % (7D)</div>
+            <div class="lb-spotlight-user">
+              <div class="avatar" style="width:30px;height:30px;font-size:12px;">${worst.avatar_url ? `<img src="${escapeHtml(worst.avatar_url)}">` : escapeHtml((worst.username || '?')[0].toUpperCase())}</div>
+              <span class="lb-spotlight-name">${escapeHtml(worst.username || 'Unknown')}${tierBadgeHtml(worst)}</span>
+            </div>
+            <div class="lb-spotlight-stat down">${escapeHtml(formatSignedPct(worst.weeklyProfitPct))} <small>${escapeHtml(formatSignedMoney(worst.weeklyProfitUsd))}</small></div>
+          </button>` : '';
+        spotlightsEl.innerHTML = upCard + downCard;
+        $$('#lbWeeklySpotlights [data-profile]').forEach(el => {
+          el.addEventListener('click', () => openProfileModal(el.dataset.profile));
+        });
+      }
+    } else if (spotlightsEl) {
+      spotlightsEl.innerHTML = '';
+    }
+
+    $$('.feed-tab[data-lb-weekly]').forEach(x => {
+      x.classList.toggle('active', x.dataset.lbWeekly === lbWeeklySort);
+    });
+
+    if (lbWeeklySort === 'down') {
+      list.sort((a, b) => {
+        if (a.weeklyHasActivity !== b.weeklyHasActivity) return a.weeklyHasActivity ? -1 : 1;
+        return (a.weeklyProfitPct - b.weeklyProfitPct) || (a.weeklyProfitUsd - b.weeklyProfitUsd);
+      });
+    } else {
+      list.sort((a, b) => {
+        if (a.weeklyHasActivity !== b.weeklyHasActivity) return a.weeklyHasActivity ? -1 : 1;
+        return (b.weeklyProfitPct - a.weeklyProfitPct) || (b.weeklyProfitUsd - a.weeklyProfitUsd);
+      });
+    }
+  } else if (lbMode === 'networth') {
     list.sort((a, b) => Number(b.net_worth || 0) - Number(a.net_worth || 0));
   } else {
     list.sort((a, b) => Number(b.time_played || 0) - Number(a.time_played || 0));
   }
   list = list.slice(0, 100);
 
-  const storageKey = `grind_lb_ranks_${currentUser?.id || 'guest'}_${lbMode}`;
+  const storageKey = lbMode === 'weekly'
+    ? `grind_lb_ranks_${currentUser?.id || 'guest'}_weekly_${lbWeeklySort}`
+    : `grind_lb_ranks_${currentUser?.id || 'guest'}_${lbMode}`;
   let prevRanks = null;
   try {
     const raw = localStorage.getItem(storageKey);
@@ -3614,6 +3837,9 @@ async function renderLeaderboard() {
 
   const listEl = $('#leaderboardList');
   const bannerEl = $('#lbMovementBanner');
+  const modeDisplayName = lbMode === 'weekly'
+    ? (lbWeeklySort === 'down' ? 'Weekly Profit (Down Most %)' : 'Weekly Profit (Most % Up)')
+    : (lbMode === 'networth' ? 'Net Worth' : 'Time Played');
 
   if (bannerEl) {
     const anyChanges = hasPrev && (climbedCount > 0 || declinedCount > 0);
@@ -3625,7 +3851,7 @@ async function renderLeaderboard() {
       } else if (myMove && myMove.delta === null) {
         parts.push(`<span class="lb-movement-pill up">You entered the Top 100 at #${myMove.currIdx + 1}!</span>`);
       } else {
-        parts.push(`<span>Since your last visit to <strong>${lbMode === 'networth' ? 'Net Worth' : 'Time Played'}</strong>:</span>`);
+        parts.push(`<span>Since your last visit to <strong>${escapeHtml(modeDisplayName)}</strong>:</span>`);
       }
       const statBits = [];
       if (climbedCount > 0) statBits.push(`<span style="color:#34d399;font-weight:700;">▲ ${climbedCount} climbed</span>`);
@@ -3656,6 +3882,29 @@ async function renderLeaderboard() {
         deltaHtml = `<span class="lb-delta same">—</span>`;
       }
     }
+
+    let subText = lbMode === 'networth' ? 'Net worth' : 'Time played';
+    let valueHtml = lbMode === 'networth' ? money(p.net_worth || 0) : formatTime(p.time_played || 0);
+    let valueCls = '';
+    let tagHtml = '';
+
+    if (lbMode === 'weekly') {
+      const pct = Number(p.weeklyProfitPct || 0);
+      const usd = Number(p.weeklyProfitUsd || 0);
+      if (p.weeklyHasActivity) {
+        const signCls = pct > 0.005 ? 'up' : (pct < -0.005 ? 'down' : 'flat');
+        valueCls = signCls;
+        subText = `7d P&L: ${formatSignedMoney(usd)}`;
+        valueHtml = escapeHtml(formatSignedPct(pct));
+      } else {
+        valueCls = 'flat';
+        subText = 'No trades this week';
+        valueHtml = '0.00%';
+      }
+      if (pid === bestGainerPid) tagHtml = '<span class="lb-weekly-tag up">▲ Most Up</span>';
+      else if (pid === worstLoserPid) tagHtml = '<span class="lb-weekly-tag down">▼ Down Most</span>';
+    }
+
     return `
       <div class="lb-row ${stateCls} ${isMe ? 'is-me' : ''}" data-lb-idx="${currIdx}" data-lb-prev="${prevIdx !== null ? prevIdx : ''}" data-lb-delta="${delta !== null ? delta : 'new'}">
         <div class="lb-rank-side">
@@ -3664,10 +3913,10 @@ async function renderLeaderboard() {
         </div>
         <div class="avatar">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
         <div class="lb-info">
-          <strong class="profile-link" data-profile="${escapeHtml(pid)}">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}</strong>
-          <div class="muted tiny">${lbMode === 'networth' ? 'Net worth' : 'Time played'}</div>
+          <strong class="profile-link" data-profile="${escapeHtml(pid)}">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}${tagHtml}</strong>
+          <div class="muted tiny">${escapeHtml(subText)}</div>
         </div>
-        <div class="lb-value">${lbMode === 'networth' ? money(p.net_worth || 0) : formatTime(p.time_played || 0)}</div>
+        <div class="lb-value ${valueCls}">${valueHtml}</div>
       </div>
     `;
   }).join('');
@@ -3675,7 +3924,6 @@ async function renderLeaderboard() {
   $('#emptyLeaderboard').classList.toggle('hidden', list.length > 0);
   $$('#leaderboardList [data-profile]').forEach(el => el.addEventListener('click', () => openProfileModal(el.dataset.profile)));
 
-  // Persist current spots so the next visit compares against this exact snapshot
   try {
     localStorage.setItem(storageKey, JSON.stringify(currRanks));
   } catch (e) {}
@@ -6303,6 +6551,7 @@ function startRealtime() {
       loadCoins();
       if (selectedCoin && currentPage === 'coin') renderCoinDetail();
       if (currentPage === 'live') loadLiveFeed();
+      if (currentPage === 'global' && lbMode === 'weekly' && Date.now() > lbAnimatingUntil) renderLeaderboard();
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, () => {
       if (currentUser) loadProfile();
@@ -9200,7 +9449,10 @@ const dmState = {
   activePartnerId: null,
   searchQuery: '',
   totalUnread: 0,
-  lastUnreadNotifiedCount: 0
+  lastUnreadNotifiedCount: 0,
+  coinPickerOpen: false,
+  coinSearchQuery: '',
+  sendingCoin: false
 };
 
 function getDmSeenKey(myId, partnerId) {
@@ -9250,13 +9502,33 @@ function updateDmUnreadBadge() {
   }
 }
 
+function setDmCoinPickerOpen(open) {
+  dmState.coinPickerOpen = Boolean(open);
+  const picker = $('#dmCoinPicker');
+  const btn = $('#dmAttachCoinBtn');
+  if (picker) picker.classList.toggle('hidden', !dmState.coinPickerOpen);
+  if (btn) {
+    btn.classList.toggle('active', dmState.coinPickerOpen);
+    btn.setAttribute('aria-expanded', dmState.coinPickerOpen ? 'true' : 'false');
+  }
+  if (dmState.coinPickerOpen) {
+    renderDmCoinPicker();
+    $('#dmCoinSearchInput')?.focus();
+  }
+}
+
 function resetDmStateOnLogout() {
   dmState.messagesByPartner.clear();
   dmState.activePartnerId = null;
   dmState.searchQuery = '';
   dmState.totalUnread = 0;
   dmState.lastUnreadNotifiedCount = 0;
+  dmState.coinPickerOpen = false;
+  dmState.coinSearchQuery = '';
+  dmState.sendingCoin = false;
   if ($('#dmUserSearchInput')) $('#dmUserSearchInput').value = '';
+  if ($('#dmCoinSearchInput')) $('#dmCoinSearchInput').value = '';
+  setDmCoinPickerOpen(false);
   updateDmUnreadBadge();
 }
 
@@ -9303,8 +9575,10 @@ async function refreshDirectMessages(fromRealtime = false) {
       const p = JSON.parse(raw.slice('__DM_MSG__:'.length));
       const senderId = String(r.user_id || '');
       const toId = String(p?.to || '');
+      const msgType = p?.type === 'coin' && p?.coinId ? 'coin' : 'text';
       const text = String(p?.text || '').trim();
-      if (!senderId || !toId || !text) return;
+      if (!senderId || !toId) return;
+      if (msgType === 'text' && !text) return;
       if (senderId !== myId && toId !== myId) return;
       const partnerId = senderId === myId ? toId : senderId;
       if (!partnerId || partnerId === myId || delUsers.has(partnerId)) return;
@@ -9314,7 +9588,13 @@ async function refreshDirectMessages(fromRealtime = false) {
         id: String(p.id || r.id || (ts + '_' + senderId)),
         from: senderId,
         to: toId,
-        text,
+        type: msgType,
+        text: text || (msgType === 'coin' ? `Shared $${p.coinTicker || 'COIN'}` : ''),
+        coinId: p.coinId ? String(p.coinId) : null,
+        coinName: p.coinName ? String(p.coinName) : '',
+        coinTicker: p.coinTicker ? String(p.coinTicker) : '',
+        coinDesc: p.coinDesc ? String(p.coinDesc) : '',
+        coinImg: p.coinImg ? String(p.coinImg) : '',
         ts
       });
     } catch (e) {}
@@ -9345,6 +9625,12 @@ async function refreshDirectMessages(fromRealtime = false) {
 
 function getDmPartnerProfile(partnerId) {
   return dmState.profilesMap.get(String(partnerId)) || { id: partnerId, username: 'Trader', avatar_url: null };
+}
+
+function updateDmMobilePane() {
+  const layout = $('#dmModal .dm-layout');
+  if (!layout) return;
+  layout.classList.toggle('is-chat-open', Boolean(dmState.activePartnerId));
 }
 
 function renderDmSidebar() {
@@ -9424,12 +9710,112 @@ function renderDmSidebar() {
 function selectDmPartner(partnerId) {
   if (!partnerId) return;
   dmState.activePartnerId = String(partnerId);
+  setDmCoinPickerOpen(false);
   const msgs = dmState.messagesByPartner.get(dmState.activePartnerId) || [];
   const latestTs = msgs.length ? msgs[msgs.length - 1].ts : Date.now();
   markDmThreadSeen(dmState.activePartnerId, latestTs);
+  updateDmMobilePane();
   renderDmSidebar();
   renderDmThread();
   $('#dmMessageInput')?.focus();
+}
+
+function renderDmCoinPicker() {
+  const listEl = $('#dmCoinPickerList');
+  if (!listEl) return;
+  const q = (dmState.coinSearchQuery || '').trim().toLowerCase();
+  const available = (coins || []).filter(c => {
+    if (!q) return true;
+    return (c.name || '').toLowerCase().includes(q)
+      || (c.ticker || '').toLowerCase().includes(q)
+      || (c.description || '').toLowerCase().includes(q);
+  });
+
+  if (!available.length) {
+    listEl.innerHTML = '<p class="muted tiny" style="padding:14px;text-align:center;">No coins match your search.</p>';
+    return;
+  }
+
+  listEl.innerHTML = available.slice(0, 40).map(c => {
+    const thumb = c.image_url
+      ? `<img src="${escapeHtml(c.image_url)}" alt="">`
+      : escapeHtml((c.ticker || c.name || 'C')[0].toUpperCase());
+    const desc = (c.description || '').trim() || 'Community coin on GRIND';
+    return `
+      <button type="button" class="dm-coin-option" data-dm-pick-coin="${escapeHtml(c.id)}">
+        <div class="coin-logo dm-coin-opt-logo">${thumb}</div>
+        <div class="dm-coin-opt-meta">
+          <div class="dm-coin-opt-top">
+            <span class="dm-coin-opt-name">${escapeHtml(c.name)} <small>$${escapeHtml(c.ticker)}</small></span>
+            <span class="dm-coin-opt-price">${escapeHtml(priceFmt(c.price))}</span>
+          </div>
+          <div class="dm-coin-opt-desc">${escapeHtml(desc)}</div>
+        </div>
+      </button>`;
+  }).join('');
+
+  $$('#dmCoinPickerList [data-dm-pick-coin]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      sendDmCoinCard(btn.dataset.dmPickCoin);
+    });
+  });
+}
+
+async function sendDmCoinCard(coinId) {
+  if (!currentUser?.id || !sb || !dmState.activePartnerId || dmState.sendingCoin) return;
+  const coin = (coins || []).find(c => String(c.id) === String(coinId));
+  if (!coin) {
+    toast('Coin could not be found.');
+    return;
+  }
+  dmState.sendingCoin = true;
+  const safeDesc = String(coin.description || '').trim().slice(0, 180);
+  const compactImg = coin.image_url && String(coin.image_url).length <= 400 ? String(coin.image_url) : '';
+  const msgObj = {
+    id: 'dm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    to: String(dmState.activePartnerId),
+    type: 'coin',
+    coinId: String(coin.id),
+    coinName: String(coin.name || 'Coin'),
+    coinTicker: String(coin.ticker || ''),
+    coinDesc: safeDesc,
+    coinImg: compactImg,
+    text: `Shared $${String(coin.ticker || '')} — ${String(coin.name || 'Coin')}`,
+    ts: Date.now()
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__DM_MSG__:' + JSON.stringify(msgObj),
+    status: 'denied'
+  });
+  dmState.sendingCoin = false;
+
+  if (error) {
+    toast('Could not share coin: ' + error.message);
+    return;
+  }
+
+  setDmCoinPickerOpen(false);
+  const pid = String(dmState.activePartnerId);
+  if (!dmState.messagesByPartner.has(pid)) dmState.messagesByPartner.set(pid, []);
+  dmState.messagesByPartner.get(pid).push({
+    id: msgObj.id,
+    from: String(currentUser.id),
+    to: pid,
+    type: 'coin',
+    text: msgObj.text,
+    coinId: msgObj.coinId,
+    coinName: msgObj.coinName,
+    coinTicker: msgObj.coinTicker,
+    coinDesc: msgObj.coinDesc,
+    coinImg: coin.image_url || compactImg,
+    ts: msgObj.ts
+  });
+  markDmThreadSeen(pid, msgObj.ts);
+  playSound('commenting');
+  renderDmSidebar();
+  renderDmThread();
 }
 
 function renderDmThread() {
@@ -9439,10 +9825,13 @@ function renderDmThread() {
   const formEl = $('#dmSendForm');
   if (!headerEl || !emptyEl || !listEl || !formEl) return;
 
+  updateDmMobilePane();
+
   if (!dmState.activePartnerId || !currentUser?.id) {
     headerEl.classList.add('hidden');
     listEl.classList.add('hidden');
     formEl.classList.add('hidden');
+    setDmCoinPickerOpen(false);
     emptyEl.classList.remove('hidden');
     return;
   }
@@ -9454,13 +9843,22 @@ function renderDmThread() {
   emptyEl.classList.add('hidden');
 
   headerEl.innerHTML = `
-    <button type="button" class="dm-chat-partner" id="dmPartnerProfileBtn">
-      <div class="avatar" style="width:34px;height:34px;font-size:13px;">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
-      <div>
-        <strong>${escapeHtml(p.username || 'Trader')}${tierBadgeHtml(p)}</strong>
-        <div class="tiny muted">Private DM · Click to view profile</div>
-      </div>
-    </button>`;
+    <div class="dm-header-left">
+      <button type="button" class="zoom-btn dm-mobile-back-btn" id="dmBackToListBtn" aria-label="Back to conversations">← Chats</button>
+      <button type="button" class="dm-chat-partner" id="dmPartnerProfileBtn">
+        <div class="avatar" style="width:34px;height:34px;font-size:13px;">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
+        <div>
+          <strong>${escapeHtml(p.username || 'Trader')}${tierBadgeHtml(p)}</strong>
+          <div class="tiny muted">Private DM · Click to view profile</div>
+        </div>
+      </button>
+    </div>`;
+  $('#dmBackToListBtn')?.addEventListener('click', () => {
+    dmState.activePartnerId = null;
+    setDmCoinPickerOpen(false);
+    renderDmSidebar();
+    renderDmThread();
+  });
   $('#dmPartnerProfileBtn')?.addEventListener('click', () => {
     openProfileModal(p.id);
   });
@@ -9468,16 +9866,60 @@ function renderDmThread() {
   const myId = String(currentUser.id);
   const msgs = dmState.messagesByPartner.get(dmState.activePartnerId) || [];
   if (!msgs.length) {
-    listEl.innerHTML = `<div class="muted tiny" style="margin:auto;text-align:center;">Say hello to <strong>${escapeHtml(p.username || 'Trader')}</strong>! Messages are private between you two.</div>`;
+    listEl.innerHTML = `<div class="muted tiny" style="margin:auto;text-align:center;">Say hello or tap <strong>＋</strong> to share a coin with <strong>${escapeHtml(p.username || 'Trader')}</strong>!</div>`;
   } else {
+    const coinById = new Map((coins || []).map(c => [String(c.id), c]));
     listEl.innerHTML = msgs.map(m => {
       const mine = m.from === myId;
+      if (m.type === 'coin' && m.coinId) {
+        const liveCoin = coinById.get(String(m.coinId));
+        const title = liveCoin?.name || m.coinName || 'Currency';
+        const ticker = liveCoin?.ticker || m.coinTicker || '';
+        const desc = ((liveCoin?.description ?? m.coinDesc) || '').trim() || 'Community currency on GRIND';
+        const imgUrl = liveCoin?.image_url || m.coinImg || '';
+        const thumbHtml = imgUrl
+          ? `<img src="${escapeHtml(imgUrl)}" alt="">`
+          : escapeHtml((ticker || title || 'C')[0].toUpperCase());
+        const priceHtml = liveCoin ? `<span class="dm-coin-live-price">${escapeHtml(priceFmt(liveCoin.price))}</span>` : '';
+        return `
+          <div class="dm-msg-row dm-msg-coin ${mine ? 'mine' : 'theirs'}">
+            <div class="dm-coin-card">
+              <div class="dm-coin-card-top">
+                <div class="coin-logo dm-coin-card-logo">${thumbHtml}</div>
+                <div class="dm-coin-card-head">
+                  <div class="dm-coin-card-title">${escapeHtml(title)} ${ticker ? `<span class="dm-coin-card-ticker">$${escapeHtml(ticker)}</span>` : ''}</div>
+                  ${priceHtml}
+                </div>
+              </div>
+              <p class="dm-coin-card-desc">${escapeHtml(desc)}</p>
+              <button type="button" class="dm-check-it-btn" data-dm-check-coin="${escapeHtml(m.coinId)}">Check It</button>
+            </div>
+            <span class="dm-msg-time">${escapeHtml(formatDmTime(m.ts))}</span>
+          </div>`;
+      }
       return `
         <div class="dm-msg-row ${mine ? 'mine' : 'theirs'}">
           <div class="dm-msg-bubble">${escapeHtml(m.text)}</div>
           <span class="dm-msg-time">${escapeHtml(formatDmTime(m.ts))}</span>
         </div>`;
     }).join('');
+    $$('#dmMessagesList [data-dm-check-coin]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const cid = btn.dataset.dmCheckCoin;
+        if (!cid) return;
+        let targetCoin = (coins || []).find(c => String(c.id) === String(cid));
+        if (!targetCoin && sb) {
+          await loadCoins();
+          targetCoin = (coins || []).find(c => String(c.id) === String(cid));
+        }
+        if (!targetCoin) {
+          toast('This coin is no longer available on the market.');
+          return;
+        }
+        hideModalSmooth($('#dmModal'));
+        openCoin(targetCoin.id);
+      });
+    });
     listEl.scrollTop = listEl.scrollHeight;
   }
 }
@@ -9486,7 +9928,11 @@ async function openDmModalWithUser(targetProfile = null) {
   const modal = $('#dmModal');
   if (!modal || !currentUser?.id) return;
   modal.classList.remove('hidden');
-  await refreshDirectMessages(false);
+  setDmCoinPickerOpen(false);
+  await Promise.all([
+    refreshDirectMessages(false),
+    (!coins || !coins.length) ? loadCoins() : Promise.resolve()
+  ]);
   if (targetProfile?.id && String(targetProfile.id) !== String(currentUser.id)) {
     dmState.profilesMap.set(String(targetProfile.id), targetProfile);
     selectDmPartner(targetProfile.id);
@@ -9505,6 +9951,15 @@ $('#dmUserSearchInput')?.addEventListener('input', e => {
   dmState.searchQuery = e.target.value || '';
   renderDmSidebar();
 });
+$('#dmAttachCoinBtn')?.addEventListener('click', async () => {
+  if (!coins || !coins.length) await loadCoins();
+  setDmCoinPickerOpen(!dmState.coinPickerOpen);
+});
+$('#dmCloseCoinPickerBtn')?.addEventListener('click', () => setDmCoinPickerOpen(false));
+$('#dmCoinSearchInput')?.addEventListener('input', e => {
+  dmState.coinSearchQuery = e.target.value || '';
+  renderDmCoinPicker();
+});
 $('#dmSendForm')?.addEventListener('submit', async e => {
   e.preventDefault();
   if (!currentUser?.id || !sb || !dmState.activePartnerId) return;
@@ -9517,6 +9972,7 @@ $('#dmSendForm')?.addEventListener('submit', async e => {
   const msgObj = {
     id: 'dm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
     to: String(dmState.activePartnerId),
+    type: 'text',
     text,
     ts: Date.now()
   };
@@ -9540,6 +9996,7 @@ $('#dmSendForm')?.addEventListener('submit', async e => {
     id: msgObj.id,
     from: String(currentUser.id),
     to: pid,
+    type: 'text',
     text: msgObj.text,
     ts: msgObj.ts
   });
@@ -9549,8 +10006,58 @@ $('#dmSendForm')?.addEventListener('submit', async e => {
   renderDmThread();
 });
 
+// ---------- Mobile & Tablet Responsive Drawer & Viewport Handlers ----------
+function openMobileSidebar() {
+  const sidebar = $('.sidebar');
+  const backdrop = $('#mobileSidebarBackdrop');
+  const btn = $('#mobileMenuBtn');
+  if (sidebar) sidebar.classList.add('mobile-open');
+  if (backdrop) backdrop.classList.remove('hidden');
+  if (btn) btn.setAttribute('aria-expanded', 'true');
+  document.body.classList.add('mobile-nav-open');
+}
+
+function closeMobileSidebar() {
+  const sidebar = $('.sidebar');
+  const backdrop = $('#mobileSidebarBackdrop');
+  const btn = $('#mobileMenuBtn');
+  if (sidebar) sidebar.classList.remove('mobile-open');
+  if (backdrop) backdrop.classList.add('hidden');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+  document.body.classList.remove('mobile-nav-open');
+}
+
+$('#mobileMenuBtn')?.addEventListener('click', () => {
+  const isOpen = $('.sidebar')?.classList.contains('mobile-open');
+  if (isOpen) closeMobileSidebar();
+  else openMobileSidebar();
+});
+$('#mobileSidebarBackdrop')?.addEventListener('click', () => closeMobileSidebar());
+
+let viewportResizeTimer = null;
+window.addEventListener('resize', () => {
+  if (window.innerWidth > 760) closeMobileSidebar();
+  clearTimeout(viewportResizeTimer);
+  viewportResizeTimer = setTimeout(() => {
+    if (currentPage === 'coin' && selectedCoin && $('#priceChart')) {
+      renderCoinDetail();
+    }
+    if (!$('#coinWatchModal')?.classList.contains('hidden')) {
+      renderWatchFrame(watchState.progress);
+    }
+  }, 160);
+});
+
 window.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
+  if ($('.sidebar')?.classList.contains('mobile-open')) {
+    closeMobileSidebar();
+    return;
+  }
+  if (dmState.coinPickerOpen) {
+    setDmCoinPickerOpen(false);
+    return;
+  }
   if (!$('#coinWatchModal')?.classList.contains('hidden')) closeCoinWatchModal(false);
   else if (!$('#dmModal')?.classList.contains('hidden')) hideModalSmooth($('#dmModal'));
 });
