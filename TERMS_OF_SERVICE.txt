@@ -28,7 +28,7 @@ Welcome to GRIND ("Grind your way through the market"). By creating an account o
 - Do not attempt to harass, scam, or disrupt other players.
 
 ## 6. MODERATION & ENFORCEMENT
-- Administrators (including Dominator) reserve the right to monitor activity and take moderation action at their discretion to protect the market and community.
+- Administrators (including Dompinator) reserve the right to monitor activity and take moderation action at their discretion to protect the market and community.
 - Violations of these Terms may result in one or more of the following:
   - Official account warnings.
   - Temporary account suspension.
