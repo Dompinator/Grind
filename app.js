@@ -4059,9 +4059,9 @@ const GRIND_THEMES = [
     name: 'Gold & Platinum',
     reqTier: 'premium',
     tierBadge: 'PREMIUM',
-    textureLabel: 'Brushed Platinum',
-    desc: 'Machined dark brushed platinum metal plate with 24k champagne gold gleam.',
-    colors: ['#0b0d12', '#212634', '#e2e8f0', '#f3c969']
+    textureLabel: 'Platinum Scales',
+    desc: 'Sculpted metallic platinum scales background with 24k champagne gold gleam.',
+    colors: ['#0a0c11', '#212634', '#e2e8f0', '#f3c969']
   }
 ];
 

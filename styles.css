@@ -663,11 +663,11 @@ label input:focus, label textarea:focus, label select:focus { outline: none; bor
 }
 .theme-strip-banner[data-preview="gold-platinum"] {
   background-image:
-    linear-gradient(105deg, rgba(12, 14, 19, .28) 0%, rgba(226, 232, 240, .14) 54%, rgba(243, 201, 105, .32) 100%),
-    url('assets/textures/gold-platinum.jpg');
+    linear-gradient(105deg, rgba(10, 12, 18, .18) 0%, rgba(226, 232, 240, .06) 56%, rgba(243, 201, 105, .24) 100%),
+    url('assets/textures/gold-platinum.jpg?v=2');
   background-size: cover;
   background-position: center;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45);
 }
 .theme-strip-swatches {
   position: relative;
@@ -862,24 +862,24 @@ body[data-theme="sapphire-obsidian"] {
 }
 
 body[data-theme="gold-platinum"] {
-  --bg: #0b0d12;
-  --panel: rgba(20, 23, 32, .68);
-  --panel2: rgba(33, 38, 52, .78);
-  --surface-deep: rgba(15, 18, 25, .72);
-  --line: rgba(226, 232, 240, .28);
+  --bg: #0a0c11;
+  --panel: rgba(16, 19, 27, .74);
+  --panel2: rgba(28, 33, 46, .82);
+  --surface-deep: rgba(12, 14, 21, .78);
+  --line: rgba(226, 232, 240, .3);
   --text: #f8fafc;
   --muted: #d1d9e6;
   --purple: #f3c969;
   --purple-dark: #eab308;
   --accent-soft: rgba(243, 201, 105, .17);
   --sidebar-grad:
-    linear-gradient(180deg, rgba(22, 26, 36, .8) 0%, rgba(11, 13, 19, .88) 100%),
-    url('assets/textures/gold-platinum.jpg') center/cover no-repeat;
-  --topbar-bg: rgba(14, 16, 23, .66);
+    linear-gradient(180deg, rgba(14, 17, 25, .78) 0%, rgba(8, 10, 15, .86) 100%),
+    url('assets/textures/gold-platinum.jpg?v=2') center/cover no-repeat;
+  --topbar-bg: rgba(11, 13, 19, .68);
   --hero-grad:
-    radial-gradient(ellipse at 85% 18%, rgba(243, 201, 105, .2), transparent 46%),
-    linear-gradient(135deg, rgba(28, 33, 46, .66) 0%, rgba(14, 17, 24, .78) 100%),
-    url('assets/textures/gold-platinum.jpg') center/cover no-repeat;
+    radial-gradient(ellipse at 85% 18%, rgba(243, 201, 105, .16), transparent 46%),
+    linear-gradient(135deg, rgba(20, 24, 34, .62) 0%, rgba(10, 13, 20, .76) 100%),
+    url('assets/textures/gold-platinum.jpg?v=2') center/cover no-repeat;
   --orb-grad:
     radial-gradient(circle at 30% 25%, rgba(255, 255, 255, .75), transparent 45%),
     linear-gradient(135deg, #ffffff 0%, #e2e8f0 32%, #f3c969 68%, #b45309 100%);
@@ -888,23 +888,23 @@ body[data-theme="gold-platinum"] {
   --btn-text: #151105;
   --btn-shadow: inset 0 1px 0 rgba(255, 255, 255, .65), 0 6px 22px rgba(243, 201, 105, .3);
   --modal-grad:
-    linear-gradient(180deg, rgba(26, 30, 42, .86) 0%, rgba(14, 17, 25, .94) 100%),
-    url('assets/textures/gold-platinum.jpg') center/cover no-repeat;
+    linear-gradient(180deg, rgba(20, 24, 35, .84) 0%, rgba(11, 13, 20, .92) 100%),
+    url('assets/textures/gold-platinum.jpg?v=2') center/cover no-repeat;
   --card-surface:
-    linear-gradient(158deg, rgba(36, 41, 56, .66) 0%, rgba(16, 19, 28, .76) 100%);
+    linear-gradient(158deg, rgba(24, 28, 40, .72) 0%, rgba(12, 15, 22, .8) 100%);
   --card-rim:
-    inset 0 1px 0 rgba(255, 255, 255, .25),
-    inset 0 -1px 0 rgba(243, 201, 105, .14),
-    0 12px 32px rgba(0, 0, 0, .46);
+    inset 0 1px 0 rgba(255, 255, 255, .26),
+    inset 0 -1px 0 rgba(243, 201, 105, .16),
+    0 12px 32px rgba(0, 0, 0, .48);
   --card-hover-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, .38),
-    inset 0 -1px 0 rgba(243, 201, 105, .24),
-    0 18px 40px rgba(0, 0, 0, .6),
-    0 0 24px rgba(243, 201, 105, .16);
+    inset 0 1px 0 rgba(255, 255, 255, .4),
+    inset 0 -1px 0 rgba(243, 201, 105, .26),
+    0 18px 40px rgba(0, 0, 0, .62),
+    0 0 24px rgba(243, 201, 105, .18);
   background:
-    radial-gradient(ellipse at 78% 12%, rgba(243, 201, 105, .1), transparent 46%),
-    linear-gradient(180deg, rgba(10, 12, 18, .32) 0%, rgba(10, 12, 18, .54) 100%),
-    url('assets/textures/gold-platinum.jpg') center/cover fixed no-repeat;
+    radial-gradient(ellipse at 78% 12%, rgba(226, 232, 240, .07), transparent 46%),
+    linear-gradient(180deg, rgba(8, 10, 15, .24) 0%, rgba(8, 10, 15, .44) 100%),
+    url('assets/textures/gold-platinum.jpg?v=2') center/cover fixed no-repeat;
 }
 
 /* Smoked Glass & Chamfered Luxury Surfaces for PRO + PREMIUM */
