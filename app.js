@@ -3932,6 +3932,7 @@ const GRIND_THEMES = [
     name: 'Default',
     reqTier: 'member',
     tierBadge: 'Default',
+    textureLabel: 'Classic Violet',
     desc: 'Classic GRIND deep violet interface.',
     colors: ['#0c0916', '#161222', '#c084fc', '#7c3aed']
   },
@@ -3940,6 +3941,7 @@ const GRIND_THEMES = [
     name: 'Gold & Obsidian',
     reqTier: 'pro',
     tierBadge: 'PRO',
+    textureLabel: 'Obsidian Matte',
     desc: 'Obsidian dark surfaces with warm brushed gold accents.',
     colors: ['#08080b', '#121218', '#fbbf24', '#d97706']
   },
@@ -3948,16 +3950,18 @@ const GRIND_THEMES = [
     name: 'Sapphire & Obsidian',
     reqTier: 'premium',
     tierBadge: 'PREMIUM',
-    desc: 'Deep obsidian slate with crisp electric sapphire glow.',
-    colors: ['#07090f', '#101624', '#38bdf8', '#2563eb']
+    textureLabel: 'Liquid-Silk Weave',
+    desc: 'Silky obsidian crystal weave with frosted sapphire highlights.',
+    colors: ['#060911', '#0e1523', '#38bdf8', '#2563eb']
   },
   {
     id: 'gold-platinum',
     name: 'Gold & Platinum',
     reqTier: 'premium',
     tierBadge: 'PREMIUM',
-    desc: 'Sleek gunmetal, champagne gold, and silver platinum trim.',
-    colors: ['#0e1015', '#171a23', '#f3c969', '#e2e8f0']
+    textureLabel: 'Brushed Metallic',
+    desc: 'Machined brushed-platinum grain with champagne gold trim.',
+    colors: ['#0c0e13', '#212634', '#e2e8f0', '#f3c969']
   }
 ];
 
@@ -4001,11 +4005,11 @@ function renderThemeSettings() {
 
   if (subEl) {
     if (tier === 'premium') {
-      subEl.textContent = 'Premium unlocked: switch freely between all 4 themes.';
+      subEl.textContent = 'Premium unlocked: switch freely between all 4 themes & textures.';
     } else if (tier === 'pro') {
-      subEl.textContent = 'PRO unlocked: Default and Gold & Obsidian are available. Upgrade to Premium for Sapphire & Platinum.';
+      subEl.textContent = 'PRO unlocked: Default and Gold & Obsidian are available. Upgrade to Premium for textured Sapphire & Platinum.';
     } else {
-      subEl.textContent = 'Member tier uses Default. Unlock Gold & Obsidian with PRO or all themes with Premium.';
+      subEl.textContent = 'Member tier uses Default. Unlock Gold & Obsidian with PRO or textured themes with Premium.';
     }
   }
 
@@ -4018,17 +4022,18 @@ function renderThemeSettings() {
       : unlocked
         ? 'Use theme'
         : `🔒 ${theme.tierBadge}`;
-    const stripBars = theme.colors.map(hex => `<span style="background:${hex};"></span>`).join('');
-    const edgeGrad = `linear-gradient(180deg, ${theme.colors[2]}, ${theme.colors[3]})`;
+    const swatchDots = theme.colors.map(hex => `<span style="background:${hex};"></span>`).join('');
 
     return `
       <button type="button"
               class="theme-strip ${isActive ? 'active' : ''} ${unlocked ? '' : 'locked'}"
               data-theme-pick="${escapeHtml(theme.id)}"
               aria-pressed="${isActive ? 'true' : 'false'}">
-        <span class="theme-strip-edge" style="background:${edgeGrad};"></span>
-        <div class="theme-strip-left">
-          <div class="theme-strip-bar" aria-hidden="true">${stripBars}</div>
+        <div class="theme-strip-banner" data-preview="${escapeHtml(theme.id)}">
+          <div class="theme-strip-swatches" aria-hidden="true">${swatchDots}</div>
+          <span class="theme-strip-tex-tag">${escapeHtml(theme.textureLabel)}</span>
+        </div>
+        <div class="theme-strip-body">
           <div class="theme-strip-meta">
             <div class="theme-strip-title">
               <span>${escapeHtml(theme.name)}</span>
@@ -4036,8 +4041,8 @@ function renderThemeSettings() {
             </div>
             <div class="theme-strip-desc">${escapeHtml(theme.desc)}</div>
           </div>
+          <span class="theme-strip-status">${statusText}</span>
         </div>
-        <span class="theme-strip-status">${statusText}</span>
       </button>
     `;
   }).join('');
