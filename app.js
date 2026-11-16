@@ -559,7 +559,7 @@ async function loadProfile() {
   }
 }
 
-let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map(), serverResetTs: 0, resetDoneMap: new Map(), deletedCoinIds: new Set(), deletedUserIds: new Set(), premiumOverrides: new Map() };
+let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map(), serverResetTs: 0, resetDoneMap: new Map(), deletedCoinIds: new Set(), deletedUserIds: new Set(), premiumOverrides: new Map(), selfSoldCoins: new Map() };
 let pendingWarnAckTs = 0;
 
 async function fetchAdminModerationState() {
@@ -570,10 +570,11 @@ async function fetchAdminModerationState() {
   const deletedCoinIds = new Set();
   const deletedUserIds = new Set();
   const premiumOverrides = new Map();
+  const selfSoldCoins = new Map();
   let serverResetTs = 0;
-  if (!sb) return { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds, deletedUserIds, premiumOverrides };
+  if (!sb) return { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds, deletedUserIds, premiumOverrides, selfSoldCoins };
   try {
-    const [{ data }, { data: srvRows }, { data: doneRows }, { data: delCoinRows }, { data: selfDelRows }] = await Promise.all([
+    const [{ data }, { data: srvRows }, { data: doneRows }, { data: delCoinRows }, { data: selfDelRows }, { data: selfSoldRows }] = await Promise.all([
       sb.from('premium_requests')
         .select('reason, created_at, profiles(username)')
         .like('reason', '__ADMIN_CMD__:%')
@@ -595,6 +596,11 @@ async function fetchAdminModerationState() {
       sb.from('premium_requests')
         .select('user_id')
         .eq('reason', '__ACCOUNT_DELETED__')
+        .limit(500),
+      sb.from('premium_requests')
+        .select('user_id, reason, created_at')
+        .like('reason', '__COIN_SELF_SELL__:%')
+        .order('created_at', { ascending: true })
         .limit(500)
     ]);
     (selfDelRows || []).forEach(row => {
@@ -611,6 +617,25 @@ async function fetchAdminModerationState() {
         const parsed = JSON.parse(String(row.reason).slice('__SERVER_RESET__:'.length));
         const ts = Number(parsed?.ts) || (row.created_at ? new Date(row.created_at).getTime() : 0);
         if (ts > serverResetTs) serverResetTs = ts;
+      } catch (e) {}
+    });
+    (selfSoldRows || []).forEach(row => {
+      try {
+        const payload = JSON.parse(String(row.reason || '').slice('__COIN_SELF_SELL__:'.length));
+        const coinId = String(payload?.coinId || '').trim();
+        const creatorId = String(payload?.creatorId || '').trim();
+        const ts = Number(payload?.ts) || (row.created_at ? new Date(row.created_at).getTime() : 0);
+        if (!coinId || !creatorId || creatorId !== String(row.user_id)) return;
+        if (serverResetTs > 0 && ts <= serverResetTs) return;
+        deletedCoinIds.add(coinId);
+        selfSoldCoins.set(coinId, {
+          coinId,
+          creatorId,
+          coinName: String(payload?.coinName || ''),
+          ticker: String(payload?.ticker || 'COIN'),
+          priceAtDelete: Math.max(0.01, Number(payload?.priceAtDelete) || 1),
+          ts
+        });
       } catch (e) {}
     });
     (doneRows || []).forEach(row => {
@@ -654,7 +679,7 @@ async function fetchAdminModerationState() {
       } catch (e) {}
     });
   } catch (e) {}
-  adminModStateCache = { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds, deletedUserIds, premiumOverrides };
+  adminModStateCache = { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds, deletedUserIds, premiumOverrides, selfSoldCoins };
   return adminModStateCache;
 }
 
@@ -830,8 +855,119 @@ async function applyAdminActionsForCurrentUser() {
     }
   }
 
-  // 4. Check Active Update Notifications
+  // 4. Auto-sell 100% of any holdings on coins deleted by their creator
+  await processSelfSoldCoinRefunds();
+
+  // 5. Check Active Update Notifications
   await checkPendingUpdateNotifications();
+}
+
+let selfCoinRefundInFlight = false;
+async function processSelfSoldCoinRefunds() {
+  if (!sb || !currentUser?.id || selfCoinRefundInFlight) return;
+  const selfSold = adminModStateCache.selfSoldCoins;
+  if (!selfSold || selfSold.size === 0) return;
+
+  selfCoinRefundInFlight = true;
+  try {
+    const uid = String(currentUser.id);
+    const pendingEntries = [];
+    for (const [coinId, info] of selfSold.entries()) {
+      const localDone = localStorage.getItem(`grind_coin_refund_${coinId}_${uid}`) === '1';
+      if (!localDone) pendingEntries.push(info);
+    }
+    if (!pendingEntries.length) return;
+
+    const pendingIds = pendingEntries.map(e => String(e.coinId));
+    const [{ data: doneRows }, { data: holds }, { data: coinOwners }] = await Promise.all([
+      sb.from('premium_requests')
+        .select('reason')
+        .eq('user_id', uid)
+        .like('reason', '__COIN_REFUND_DONE__:%')
+        .limit(500),
+      sb.from('holdings')
+        .select('coin_id, shares')
+        .eq('user_id', uid)
+        .gt('shares', 0),
+      sb.from('coins')
+        .select('id, creator_id')
+        .in('id', pendingIds)
+    ]);
+
+    const realCreatorMap = new Map();
+    (coinOwners || []).forEach(co => realCreatorMap.set(String(co.id), String(co.creator_id || '')));
+
+    const doneRemote = new Set(
+      (doneRows || []).map(r => String(r.reason || '').slice('__COIN_REFUND_DONE__:'.length).trim()).filter(Boolean)
+    );
+    const holdMap = new Map();
+    (holds || []).forEach(h => holdMap.set(String(h.coin_id), Number(h.shares || 0)));
+
+    let totalRefunded = 0;
+    const refundedTickers = [];
+
+    for (const info of pendingEntries) {
+      const cid = String(info.coinId);
+      const realCreator = realCreatorMap.get(cid);
+      if (realCreator && realCreator !== String(info.creatorId)) continue;
+      if (doneRemote.has(cid)) {
+        try { localStorage.setItem(`grind_coin_refund_${cid}_${uid}`, '1'); } catch (e) {}
+        continue;
+      }
+
+      const shares = holdMap.get(cid) || 0;
+      if (shares > 1e-8) {
+        const proceeds = calcHoldingsValue(info.priceAtDelete, shares);
+        totalRefunded += proceeds;
+        refundedTickers.push(`$${info.ticker} (+${money(proceeds)})`);
+        try {
+          await sb.from('holdings').update({ shares: 0 }).eq('user_id', uid).eq('coin_id', cid);
+          await sb.from('holdings').delete().eq('user_id', uid).eq('coin_id', cid);
+        } catch (e) {}
+        try {
+          await sb.from('trades').insert({
+            coin_id: cid,
+            user_id: uid,
+            type: 'sell',
+            amount_usd: proceeds,
+            shares,
+            price_after: info.priceAtDelete
+          });
+        } catch (e) {}
+        try {
+          await sb.from('premium_requests').insert({
+            user_id: uid,
+            reason: '__COIN_REFUND_DONE__:' + cid,
+            status: 'denied'
+          });
+        } catch (e) {}
+      }
+      try { localStorage.setItem(`grind_coin_refund_${cid}_${uid}`, '1'); } catch (e) {}
+    }
+
+    if (totalRefunded > 0) {
+      const newCash = Math.round((Number(currentUser.cash || 0) + totalRefunded) * 100) / 100;
+      currentUser.cash = newCash;
+      try {
+        await sb.from('profiles').update({ cash: newCash }).eq('id', uid);
+      } catch (e) {}
+      updateUIProfile();
+      await updateNetWorth();
+      playSound('sell');
+      toast(`Creator deleted coin — auto-sold 100%: ${refundedTickers.join(', ')}`);
+      if (selectedCoin && selfSold.has(String(selectedCoin.id)) && currentPage === 'coin') {
+        selectedCoin = null;
+        await loadCoins();
+        showPage('feed');
+      } else {
+        await loadCoins();
+        if (currentPage === 'money') renderMoney();
+        if (currentPage === 'feed') renderFeed();
+      }
+    }
+  } finally {
+    selfCoinRefundInFlight = false;
+  }
 }
 
 let activeUpdateQueue = [];
@@ -1633,8 +1769,14 @@ async function loadCoins() {
   if (!res.error) {
     const delCoins = adminModStateCache.deletedCoinIds || new Set();
     const delUsers = adminModStateCache.deletedUserIds || new Set();
+    const selfSoldCoins = adminModStateCache.selfSoldCoins || new Map();
     const list = (res.data || []).filter(c => {
-      if (delCoins.has(String(c.id))) return false;
+      const selfSold = selfSoldCoins.get(String(c.id));
+      if (selfSold && String(selfSold.creatorId) !== String(c.creator_id)) {
+        // Ignore invalid tombstone not authored by coin creator
+      } else if (delCoins.has(String(c.id))) {
+        return false;
+      }
       if (c.creator_id && delUsers.has(String(c.creator_id))) return false;
       if (!srvResetTs) return true;
       const cts = c.created_at ? new Date(c.created_at).getTime() : 0;
@@ -1896,6 +2038,7 @@ $('#createForm')?.addEventListener('submit', async (e) => {
     $('#createForm').reset();
     $('#coinPreview').textContent = '＋';
     if (msgEl) msgEl.textContent = 'Currency created!';
+    playSound('upload');
     toast('Your coin is live!');
     await loadCoins();
     await updateNetWorth();
@@ -2097,6 +2240,16 @@ async function renderCoinDetail() {
         <p class="muted tiny" style="margin-top:10px">You own: ${shares.toFixed(4)} shares · Sell value ${money(sellAllProceeds)} · Cash ${money(currentUser.cash)}</p>
         ${sellAllPreviewHtml}
         <p class="form-message" id="tradeMessage"></p>
+        ${isCoinCreator ? `
+          <div class="creator-sell-coin-wrap">
+            ${Number(c.price || 0) < 5 ? `
+              <button type="button" class="creator-sell-coin-btn" id="sellOwnCoinBtn">💰 Sell &amp; Delete My Coin (${money(c.price)})</button>
+              <span class="muted tiny">Worth under $5.00 · Auto-sells 100% of everyone's shares on delete</span>
+            ` : `
+              <button type="button" class="creator-sell-coin-btn locked" disabled title="Only coins worth under $5.00 can be sold by their creator">🔒 Sell Own Coin locked (${money(c.price)} · must be under $5.00)</button>
+            `}
+          </div>
+        ` : ''}
         ${isDompinator() ? `
           <button class="delete-coin-btn" id="deleteCoinBtn">🗑 Delete currency (Dompinator admin)</button>
         ` : ''}
@@ -2207,6 +2360,118 @@ async function renderCoinDetail() {
       updateChart();
     }
   }, { passive: false });
+
+  // Creator Sell & Delete Own Coin Handler (only when worth < $5.00)
+  if (isCoinCreator) {
+    $('#sellOwnCoinBtn')?.addEventListener('click', async () => {
+      const btn = $('#sellOwnCoinBtn');
+      if (!btn || btn.disabled) return;
+      const shownWorth = Number(c.price || 0);
+      if (shownWorth >= 5) {
+        toast(`Cannot sell $${c.ticker}: worth ${money(shownWorth)} (must be under $5.00).`);
+        return;
+      }
+      if (btn.dataset.armed !== '1') {
+        btn.dataset.armed = '1';
+        btn.classList.add('armed');
+        btn.textContent = `Click again to sell $${c.ticker} (${money(shownWorth)}) & delete`;
+        setTimeout(() => {
+          if (btn.isConnected && btn.dataset.armed === '1') {
+            btn.dataset.armed = '0';
+            btn.classList.remove('armed');
+            btn.textContent = `💰 Sell & Delete My Coin (${money(c.price)})`;
+          }
+        }, 4000);
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Selling coin...';
+
+      const live = await freshCoin(c);
+      const livePrice = Number(live?.price || c.price || 0);
+      if (!live || String(live.creator_id) !== String(currentUser.id)) {
+        toast('Only the coin creator can sell this coin.');
+        renderCoinDetail();
+        return;
+      }
+      if (livePrice >= 5) {
+        btn.disabled = false;
+        btn.dataset.armed = '0';
+        btn.classList.remove('armed');
+        toast(`$${c.ticker} rose to ${money(livePrice)} ($5.00+ cannot be self-sold).`);
+        selectedCoin = live;
+        renderCoinDetail();
+        return;
+      }
+
+      const { data: holdRow } = await sb
+        .from('holdings')
+        .select('shares')
+        .eq('user_id', currentUser.id)
+        .eq('coin_id', c.id)
+        .maybeSingle();
+      const ownShares = Number(holdRow?.shares || 0);
+      const ownShareProceeds = ownShares > 0 ? calcHoldingsValue(livePrice, ownShares) : 0;
+      const totalPayout = Math.round((livePrice + ownShareProceeds) * 100) / 100;
+      const nowTs = Date.now();
+
+      const selfSellPayload = {
+        coinId: String(c.id),
+        creatorId: String(currentUser.id),
+        coinName: String(live.name || c.name || ''),
+        ticker: String(live.ticker || c.ticker || 'COIN'),
+        priceAtDelete: livePrice,
+        ts: nowTs
+      };
+
+      const { error: tombErr } = await sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__COIN_SELF_SELL__:' + JSON.stringify(selfSellPayload),
+        status: 'denied'
+      });
+      if (tombErr) {
+        btn.disabled = false;
+        btn.dataset.armed = '0';
+        btn.classList.remove('armed');
+        btn.textContent = `💰 Sell & Delete My Coin (${money(livePrice)})`;
+        toast('Sell failed: ' + tombErr.message);
+        return;
+      }
+
+      try {
+        localStorage.setItem(`grind_coin_refund_${c.id}_${currentUser.id}`, '1');
+        await sb.from('premium_requests').insert({
+          user_id: currentUser.id,
+          reason: '__COIN_REFUND_DONE__:' + c.id,
+          status: 'denied'
+        });
+      } catch (e) {}
+
+      if (ownShares > 0) {
+        try {
+          await sb.from('holdings').update({ shares: 0 }).eq('user_id', currentUser.id).eq('coin_id', c.id);
+          await sb.from('holdings').delete().eq('user_id', currentUser.id).eq('coin_id', c.id);
+        } catch (e) {}
+      }
+
+      const newCash = Math.round((Number(currentUser.cash || 0) + totalPayout) * 100) / 100;
+      await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
+      currentUser.cash = newCash;
+
+      adminModStateCache.deletedCoinIds?.add(String(c.id));
+      adminModStateCache.selfSoldCoins?.set(String(c.id), selfSellPayload);
+      coins = coins.filter(x => String(x.id) !== String(c.id));
+      selectedCoin = null;
+
+      updateUIProfile();
+      await updateNetWorth();
+      playSound('sell');
+      toast(`Sold $${live.ticker || c.ticker} for +${money(totalPayout)}! All holders auto-sold 100%.`);
+      await loadCoins();
+      showPage('feed');
+    });
+  }
 
   // Dompinator Delete Handler (inline 2-click confirm + RLS-safe tombstone)
   if (isDompinator()) {
@@ -2425,6 +2690,7 @@ async function postCoinComment(coin, replyTarget = null) {
     toast('Comment error: ' + error.message);
     return;
   }
+  playSound('commenting');
   if (isReply) {
     expandedCommentReplies.add(String(replyTarget.parentId));
     activeReplyTarget = null;
@@ -2911,6 +3177,7 @@ async function buy(coin, amount) {
     coin.change_pct = todayPct;
     updateUIProfile();
     await updateNetWorth();
+    playSound('buy');
     toast(`Bought for ${money(amount)}! Price ${priceFmt(coin.price)} (+${(impact * 100).toFixed(impact < 0.1 ? 2 : 0)}%)`);
     await loadCoins();
     selectedCoin = coins.find(x => x.id === coin.id) || coin;
@@ -2977,6 +3244,7 @@ async function sell(coin, sharesToSell) {
     coin.change_pct = todayPct;
     updateUIProfile();
     await updateNetWorth();
+    playSound('sell');
     toast(`Sold for ${money(proceeds)}`);
     await loadCoins();
     selectedCoin = coins.find(x => x.id === coin.id) || coin;
@@ -3269,13 +3537,23 @@ function getEffectiveProfileStats(p) {
   };
 }
 
+let lbRenderSeq = 0;
+let lbAnimatingUntil = 0;
+let lbHoldTimer = null;
+let lbCleanupTimer = null;
+let lbRankRaf = null;
+
 async function renderLeaderboard() {
   if (!sb) return;
+  const seq = ++lbRenderSeq;
+  const modeAtStart = lbMode;
   await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
   if (currentUser) await updateNetWorth();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
   let query = sb.from('profiles').select('id, username, avatar_url, cash, net_worth, time_played, is_premium');
   const { data } = await query.limit(200);
+  if (seq !== lbRenderSeq || modeAtStart !== lbMode) return;
+
   let list = (data || [])
     .filter(p => !delUsers.has(String(p.id)))
     .map(getEffectiveProfileStats);
@@ -3285,19 +3563,190 @@ async function renderLeaderboard() {
     list.sort((a, b) => Number(b.time_played || 0) - Number(a.time_played || 0));
   }
   list = list.slice(0, 100);
-  $('#leaderboardList').innerHTML = list.map((p, i) => `
-    <div class="lb-row">
-      <div class="lb-rank ${i < 3 ? 'top3' : ''}">#${i + 1}</div>
-      <div class="avatar">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
-      <div class="lb-info">
-        <strong class="profile-link" data-profile="${escapeHtml(p.id)}">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}</strong>
-        <div class="muted tiny">${lbMode === 'networth' ? 'Net worth' : 'Time played'}</div>
+
+  const storageKey = `grind_lb_ranks_${currentUser?.id || 'guest'}_${lbMode}`;
+  let prevRanks = null;
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') prevRanks = parsed;
+    }
+  } catch (e) {}
+
+  const currRanks = {};
+  let climbedCount = 0;
+  let declinedCount = 0;
+  let myMove = null;
+  const hasPrev = Boolean(prevRanks && Object.keys(prevRanks).length > 0);
+
+  const rowModels = list.map((p, i) => {
+    const pid = String(p.id);
+    currRanks[pid] = i;
+    const prevIdx = hasPrev && typeof prevRanks[pid] === 'number' ? prevRanks[pid] : null;
+    const delta = prevIdx !== null ? (prevIdx - i) : null;
+    if (delta !== null) {
+      if (delta > 0) climbedCount += 1;
+      else if (delta < 0) declinedCount += 1;
+    }
+    const isMe = Boolean(currentUser && pid === String(currentUser.id));
+    if (isMe && hasPrev) {
+      myMove = { prevIdx, currIdx: i, delta };
+    }
+    return { p, pid, currIdx: i, prevIdx, delta, isMe };
+  });
+
+  if (lbHoldTimer) { clearTimeout(lbHoldTimer); lbHoldTimer = null; }
+  if (lbCleanupTimer) { clearTimeout(lbCleanupTimer); lbCleanupTimer = null; }
+  if (lbRankRaf) { cancelAnimationFrame(lbRankRaf); lbRankRaf = null; }
+
+  const listEl = $('#leaderboardList');
+  const bannerEl = $('#lbMovementBanner');
+
+  if (bannerEl) {
+    const anyChanges = hasPrev && (climbedCount > 0 || declinedCount > 0);
+    if (anyChanges || (myMove && myMove.delta !== null && myMove.delta !== 0)) {
+      const parts = [];
+      if (myMove && myMove.prevIdx !== null && myMove.delta !== 0) {
+        const up = myMove.delta > 0;
+        parts.push(`<span class="lb-movement-pill ${up ? 'up' : 'down'}">Your rank: #${myMove.prevIdx + 1} → #${myMove.currIdx + 1} (${up ? '▲ +' : '▼ '}${Math.abs(myMove.delta)})</span>`);
+      } else if (myMove && myMove.delta === null) {
+        parts.push(`<span class="lb-movement-pill up">You entered the Top 100 at #${myMove.currIdx + 1}!</span>`);
+      } else {
+        parts.push(`<span>Since your last visit to <strong>${lbMode === 'networth' ? 'Net Worth' : 'Time Played'}</strong>:</span>`);
+      }
+      const statBits = [];
+      if (climbedCount > 0) statBits.push(`<span style="color:#34d399;font-weight:700;">▲ ${climbedCount} climbed</span>`);
+      if (declinedCount > 0) statBits.push(`<span style="color:#f87171;font-weight:700;">▼ ${declinedCount} slipped</span>`);
+      bannerEl.innerHTML = `${parts.join('')}<div>${statBits.join(' · ') || 'Positions updated'}</div>`;
+      bannerEl.classList.remove('hidden');
+    } else {
+      bannerEl.classList.add('hidden');
+      bannerEl.innerHTML = '';
+    }
+  }
+
+  listEl.innerHTML = rowModels.map(({ p, pid, currIdx, prevIdx, delta, isMe }) => {
+    const startRankNum = (delta !== null && delta !== 0) ? (prevIdx + 1) : (currIdx + 1);
+    let deltaHtml = '';
+    let stateCls = '';
+    if (hasPrev) {
+      if (delta === null) {
+        deltaHtml = `<span class="lb-delta new">NEW</span>`;
+        stateCls = 'is-new-entry';
+      } else if (delta > 0) {
+        deltaHtml = `<span class="lb-delta up">▲ ${delta}</span>`;
+        stateCls = 'is-climbing';
+      } else if (delta < 0) {
+        deltaHtml = `<span class="lb-delta down">▼ ${Math.abs(delta)}</span>`;
+        stateCls = 'is-declining';
+      } else {
+        deltaHtml = `<span class="lb-delta same">—</span>`;
+      }
+    }
+    return `
+      <div class="lb-row ${stateCls} ${isMe ? 'is-me' : ''}" data-lb-idx="${currIdx}" data-lb-prev="${prevIdx !== null ? prevIdx : ''}" data-lb-delta="${delta !== null ? delta : 'new'}">
+        <div class="lb-rank-side">
+          <div class="lb-rank ${currIdx < 3 ? 'top3' : ''}">#${startRankNum}</div>
+          ${deltaHtml}
+        </div>
+        <div class="avatar">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
+        <div class="lb-info">
+          <strong class="profile-link" data-profile="${escapeHtml(pid)}">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}</strong>
+          <div class="muted tiny">${lbMode === 'networth' ? 'Net worth' : 'Time played'}</div>
+        </div>
+        <div class="lb-value">${lbMode === 'networth' ? money(p.net_worth || 0) : formatTime(p.time_played || 0)}</div>
       </div>
-      <div class="lb-value">${lbMode === 'networth' ? money(p.net_worth || 0) : formatTime(p.time_played || 0)}</div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
+
   $('#emptyLeaderboard').classList.toggle('hidden', list.length > 0);
   $$('#leaderboardList [data-profile]').forEach(el => el.addEventListener('click', () => openProfileModal(el.dataset.profile)));
+
+  // Persist current spots so the next visit compares against this exact snapshot
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(currRanks));
+  } catch (e) {}
+
+  // FLIP smooth climb / decline animation from last-visit spot to current spot
+  if (hasPrev && (climbedCount > 0 || declinedCount > 0)) {
+    const rows = Array.from(listEl.querySelectorAll('.lb-row'));
+    let stride = 74;
+    if (rows.length >= 2) {
+      const measured = rows[1].offsetTop - rows[0].offsetTop;
+      if (measured > 30) stride = measured;
+    }
+
+    const movedRows = [];
+    rows.forEach(row => {
+      const prevStr = row.dataset.lbPrev;
+      const d = Number(row.dataset.lbDelta);
+      if (prevStr === '' || !Number.isFinite(d) || d === 0) return;
+      const prevIdx = Number(prevStr);
+      const currIdx = Number(row.dataset.lbIdx);
+      const rawOffset = (prevIdx - currIdx) * stride;
+      const maxJump = stride * 14;
+      const clampedOffset = Math.sign(rawOffset) * Math.min(Math.abs(rawOffset), maxJump);
+
+      row.style.transition = 'none';
+      row.style.transform = `translate3d(0, ${clampedOffset}px, 0) scale(0.992)`;
+      row.style.zIndex = d > 0 ? '6' : '2';
+      movedRows.push({
+        row,
+        prevIdx,
+        currIdx,
+        delta: d,
+        rankEl: row.querySelector('.lb-rank')
+      });
+    });
+
+    if (movedRows.length > 0) {
+      lbAnimatingUntil = Date.now() + 1600;
+      void listEl.offsetHeight;
+
+      lbHoldTimer = setTimeout(() => {
+        if (seq !== lbRenderSeq) return;
+        requestAnimationFrame(() => {
+          movedRows.forEach((m, idx) => {
+            const delay = Math.min(idx * 16, 220);
+            m.row.style.transition = `transform 1150ms cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms, box-shadow 450ms ease, border-color 450ms ease`;
+            m.row.style.transform = 'translate3d(0, 0, 0) scale(1)';
+          });
+
+          const animStart = performance.now();
+          const animDur = 1100;
+          const stepRanks = now => {
+            if (seq !== lbRenderSeq) return;
+            const t = Math.min(1, (now - animStart) / animDur);
+            const eased = 1 - Math.pow(1 - t, 3);
+            movedRows.forEach(m => {
+              if (!m.rankEl) return;
+              const val = Math.round((m.prevIdx + 1) + ((m.currIdx - m.prevIdx) * eased));
+              m.rankEl.textContent = `#${val}`;
+            });
+            if (t < 1) {
+              lbRankRaf = requestAnimationFrame(stepRanks);
+            } else {
+              movedRows.forEach(m => {
+                if (m.rankEl) m.rankEl.textContent = `#${m.currIdx + 1}`;
+              });
+              lbRankRaf = null;
+            }
+          };
+          lbRankRaf = requestAnimationFrame(stepRanks);
+
+          lbCleanupTimer = setTimeout(() => {
+            movedRows.forEach(m => {
+              m.row.style.transition = '';
+              m.row.style.transform = '';
+              m.row.style.zIndex = '';
+            });
+            lbCleanupTimer = null;
+          }, 1450);
+        });
+      }, 220);
+    }
+  }
 }
 
 // ---------- Profile Preview Modal (Public stats + Dompinator Admin Controls) ----------
@@ -7729,3 +8178,100 @@ function triggerWhaleCoinBuyAnimation(coin, amount, impact) {
     setAuthMode('login');
   }
 })();
+
+// ============================================================
+// ---------- SOUND ENGINE (sounds/*.mp3) ---------------------
+// ============================================================
+const GRIND_SOUNDS = ['click', 'buy', 'sell', 'upload', 'commenting'];
+const GRIND_SOUND_VOLUMES = {
+  click: 0.28,
+  buy: 0.48,
+  sell: 0.48,
+  upload: 0.52,
+  commenting: 0.42
+};
+let grindAudioCtx = null;
+const grindSoundBuffers = new Map();
+const grindSoundLoading = new Map();
+let lastClickSoundAt = 0;
+
+function ensureGrindAudioCtx() {
+  if (!grindAudioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) {
+      try { grindAudioCtx = new Ctx(); } catch (e) {}
+    }
+  }
+  if (grindAudioCtx && grindAudioCtx.state === 'suspended') {
+    grindAudioCtx.resume().catch(() => {});
+  }
+  return grindAudioCtx;
+}
+
+async function preloadGrindSound(name) {
+  if (!GRIND_SOUNDS.includes(name)) return null;
+  if (grindSoundBuffers.has(name)) return grindSoundBuffers.get(name);
+  if (grindSoundLoading.has(name)) return grindSoundLoading.get(name);
+  const task = (async () => {
+    const ctx = ensureGrindAudioCtx();
+    if (!ctx) return null;
+    for (const ext of ['mp3', 'wav', 'ogg']) {
+      try {
+        const res = await fetch(`sounds/${name}.${ext}`);
+        if (!res.ok) continue;
+        const arr = await res.arrayBuffer();
+        const buf = await ctx.decodeAudioData(arr);
+        grindSoundBuffers.set(name, buf);
+        return buf;
+      } catch (e) {}
+    }
+    return null;
+  })();
+  grindSoundLoading.set(name, task);
+  return task;
+}
+
+function playSound(name) {
+  if (!GRIND_SOUNDS.includes(name)) return;
+  const vol = GRIND_SOUND_VOLUMES[name] ?? 0.45;
+  try {
+    const ctx = ensureGrindAudioCtx();
+    const cachedBuf = grindSoundBuffers.get(name);
+    if (ctx && cachedBuf) {
+      const src = ctx.createBufferSource();
+      src.buffer = cachedBuf;
+      const gain = ctx.createGain();
+      gain.gain.value = vol;
+      src.connect(gain);
+      gain.connect(ctx.destination);
+      src.start(0);
+      return;
+    }
+    preloadGrindSound(name);
+    const audio = new Audio(`sounds/${name}.mp3`);
+    audio.volume = vol;
+    audio.play().catch(() => {});
+  } catch (e) {}
+}
+
+document.addEventListener('pointerdown', e => {
+  ensureGrindAudioCtx();
+  GRIND_SOUNDS.forEach(s => preloadGrindSound(s));
+  const target = e.target?.closest?.(
+    'button, .nav-btn, .feed-tab, .coin-card, .amount-btn, .sell-btn, .fav-btn, .zoom-btn, .creator-chip, .live-coin-chip, .theme-strip, .profile-link, a.brand, .auth-tab, .pro-plan-card'
+  );
+  if (!target || target.disabled || target.classList.contains('locked')) return;
+  if (
+    target.id === 'buyBtn' ||
+    target.classList.contains('sell-btn') ||
+    target.id === 'postCommentBtn' ||
+    target.hasAttribute('data-reply-send') ||
+    (target.closest('#createForm') && target.type === 'submit')
+  ) {
+    return;
+  }
+  const now = performance.now();
+  if (now - lastClickSoundAt < 45) return;
+  lastClickSoundAt = now;
+  playSound('click');
+}, { passive: true });

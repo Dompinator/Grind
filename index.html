@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=41">
+  <link rel="stylesheet" href="styles.css?v=43">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -210,6 +210,7 @@
             <button class="feed-tab active" data-lb="networth">Net Worth</button>
             <button class="feed-tab" data-lb="time">Time Played</button>
           </div>
+          <div id="lbMovementBanner" class="lb-movement-banner hidden"></div>
           <div id="leaderboardList" class="leaderboard-list"></div>
           <div id="emptyLeaderboard" class="empty-state hidden">
             <p>No players yet.</p>
@@ -894,6 +895,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=42"></script>
+  <script src="app.js?v=44"></script>
 </body>
 </html>

@@ -1951,6 +1951,159 @@ body[data-theme="gold-platinum"] .featured-slot-badge {
   }
 }
 
+/* ---------- Global Leaderboards Smooth Climb / Decline Animation ---------- */
+@keyframes lbBannerSlideIn {
+  0% { opacity: 0; transform: translate3d(0, -10px, 0) scale(0.98); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+@keyframes lbDeltaPop {
+  0% { opacity: 0; transform: scale(0.65); }
+  65% { opacity: 1; transform: scale(1.12); }
+  100% { opacity: 1; transform: scale(1); }
+}
+@keyframes lbNewRowEnter {
+  0% { opacity: 0; transform: translate3d(18px, 0, 0) scale(0.98); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+.leaderboard-list {
+  position: relative;
+}
+.lb-row {
+  position: relative;
+  will-change: transform;
+}
+.lb-row.is-me {
+  border-color: rgba(168, 85, 247, 0.45);
+}
+.lb-row.is-climbing {
+  border-color: rgba(52, 211, 153, 0.56) !important;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.42), 0 0 22px rgba(52, 211, 153, 0.16);
+}
+.lb-row.is-declining {
+  border-color: rgba(248, 113, 113, 0.42) !important;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.34), 0 0 16px rgba(248, 113, 113, 0.1);
+}
+.lb-row.is-new-entry {
+  border-color: rgba(251, 191, 36, 0.48) !important;
+  animation: lbNewRowEnter 620ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.lb-rank {
+  font-variant-numeric: tabular-nums;
+}
+.lb-rank-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 50px;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.lb-delta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+  animation: lbDeltaPop 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.lb-delta.up {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.16);
+  border: 1px solid rgba(52, 211, 153, 0.48);
+}
+.lb-delta.down {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.14);
+  border: 1px solid rgba(248, 113, 113, 0.42);
+}
+.lb-delta.new {
+  color: #fde047;
+  background: rgba(251, 191, 36, 0.15);
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  letter-spacing: 0.04em;
+}
+.lb-delta.same {
+  color: var(--muted);
+  opacity: 0.55;
+  padding: 2px 4px;
+}
+
+.lb-movement-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+  animation: lbBannerSlideIn 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.lb-movement-banner strong {
+  color: var(--text);
+}
+.lb-movement-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 12px;
+}
+.lb-movement-pill.up { color: #34d399; }
+.lb-movement-pill.down { color: #f87171; }
+
+/* ---------- Creator Self-Sell Coin (Under $5) ---------- */
+.creator-sell-coin-wrap {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.creator-sell-coin-btn {
+  width: 100%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.16) 0%, rgba(245, 158, 11, 0.1) 100%);
+  color: #fde68a;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, filter 0.15s ease;
+}
+.creator-sell-coin-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.28) 0%, rgba(245, 158, 11, 0.18) 100%);
+  border-color: rgba(251, 191, 36, 0.78);
+  color: #fffbeb;
+  transform: translateY(-1px);
+}
+.creator-sell-coin-btn.armed {
+  border-color: rgba(248, 113, 113, 0.78);
+  background: linear-gradient(135deg, rgba(248, 113, 113, 0.25) 0%, rgba(185, 28, 28, 0.22) 100%);
+  color: #fecaca;
+}
+.creator-sell-coin-btn.locked,
+.creator-sell-coin-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+}
+
+
+
 
 
 
