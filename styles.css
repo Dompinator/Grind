@@ -669,6 +669,14 @@ label input:focus, label textarea:focus, label select:focus { outline: none; bor
   background-position: center;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45);
 }
+.theme-strip-banner[data-preview="rose-amethyst"] {
+  background-image:
+    linear-gradient(105deg, rgba(20, 6, 15, .36) 0%, rgba(136, 19, 55, .14) 52%, rgba(244, 63, 94, .34) 100%),
+    url('assets/textures/rose-amethyst.jpg');
+  background-size: cover;
+  background-position: center;
+  box-shadow: inset 0 1px 0 rgba(253, 164, 175, .42);
+}
 .theme-strip-swatches {
   position: relative;
   z-index: 1;
@@ -1025,6 +1033,52 @@ body[data-theme="gold-platinum"] {
     url('assets/textures/gold-platinum.jpg?v=2') center/cover fixed no-repeat;
 }
 
+body[data-theme="rose-amethyst"] {
+  --bg: #10050c;
+  --panel: rgba(24, 9, 20, .72);
+  --panel2: rgba(44, 15, 36, .8);
+  --surface-deep: rgba(16, 6, 14, .76);
+  --line: rgba(251, 113, 133, .28);
+  --text: #fff5f8;
+  --muted: #dfbad0;
+  --purple: #fb7185;
+  --purple-dark: #be123c;
+  --accent-soft: rgba(244, 63, 94, .18);
+  --sidebar-grad:
+    linear-gradient(180deg, rgba(22, 7, 18, .82) 0%, rgba(11, 3, 10, .9) 100%),
+    url('assets/textures/rose-amethyst.jpg') center/cover no-repeat;
+  --topbar-bg: rgba(16, 5, 13, .68);
+  --hero-grad:
+    radial-gradient(ellipse at 85% 16%, rgba(244, 63, 94, .24), transparent 48%),
+    linear-gradient(135deg, rgba(38, 11, 29, .68) 0%, rgba(15, 5, 14, .82) 100%),
+    url('assets/textures/rose-amethyst.jpg') center/cover no-repeat;
+  --orb-grad:
+    radial-gradient(circle at 28% 24%, rgba(255, 255, 255, .58), transparent 45%),
+    linear-gradient(135deg, #fecdd3 0%, #fb7185 34%, #e11d48 68%, #9333ea 100%);
+  --orb-text: #ffffff;
+  --btn-grad: linear-gradient(112deg, #fda4af 0%, #f43f5e 42%, #be185d 100%);
+  --btn-text: #ffffff;
+  --btn-shadow: inset 0 1px 0 rgba(255, 255, 255, .44), 0 6px 22px rgba(244, 63, 94, .34);
+  --modal-grad:
+    linear-gradient(180deg, rgba(28, 10, 23, .88) 0%, rgba(14, 5, 12, .95) 100%),
+    url('assets/textures/rose-amethyst.jpg') center/cover no-repeat;
+  --card-surface:
+    linear-gradient(158deg, rgba(36, 12, 30, .7) 0%, rgba(16, 6, 14, .8) 100%);
+  --card-rim:
+    inset 0 1px 0 rgba(254, 205, 211, .22),
+    inset 0 -1px 0 rgba(244, 63, 94, .14),
+    0 12px 32px rgba(0, 0, 0, .5);
+  --card-hover-shadow:
+    inset 0 1px 0 rgba(255, 228, 230, .36),
+    inset 0 -1px 0 rgba(244, 63, 94, .24),
+    0 18px 40px rgba(0, 0, 0, .64),
+    0 0 24px rgba(244, 63, 94, .22);
+  background:
+    radial-gradient(ellipse at 74% 12%, rgba(244, 63, 94, .14), transparent 48%),
+    linear-gradient(180deg, rgba(14, 4, 12, .36) 0%, rgba(12, 3, 10, .58) 100%),
+    url('assets/textures/rose-amethyst.jpg') center/cover fixed no-repeat;
+}
+
 /* Smoked Glass & Chamfered Luxury Surfaces for PRO + PREMIUM */
 body[data-theme="gold-obsidian"] .coin-card,
 body[data-theme="gold-obsidian"] .form-card,
@@ -1073,7 +1127,23 @@ body[data-theme="gold-platinum"] .user-notif-card,
 body[data-theme="gold-platinum"] .live-row,
 body[data-theme="gold-platinum"] .grindbot-shell,
 body[data-theme="gold-platinum"] .pass-tier-card,
-body[data-theme="gold-platinum"] .personal-pnl-bar {
+body[data-theme="gold-platinum"] .personal-pnl-bar,
+body[data-theme="rose-amethyst"] .coin-card,
+body[data-theme="rose-amethyst"] .form-card,
+body[data-theme="rose-amethyst"] .portfolio-summary > div,
+body[data-theme="rose-amethyst"] .holding,
+body[data-theme="rose-amethyst"] .lb-row,
+body[data-theme="rose-amethyst"] .chart-wrap,
+body[data-theme="rose-amethyst"] .trade-panel,
+body[data-theme="rose-amethyst"] .coin-leaderboard,
+body[data-theme="rose-amethyst"] .coin-comments-card,
+body[data-theme="rose-amethyst"] .request-card,
+body[data-theme="rose-amethyst"] .report-card,
+body[data-theme="rose-amethyst"] .user-notif-card,
+body[data-theme="rose-amethyst"] .live-row,
+body[data-theme="rose-amethyst"] .grindbot-shell,
+body[data-theme="rose-amethyst"] .pass-tier-card,
+body[data-theme="rose-amethyst"] .personal-pnl-bar {
   background: var(--card-surface);
   box-shadow: var(--card-rim);
   backdrop-filter: blur(18px) saturate(135%);
@@ -1086,7 +1156,10 @@ body[data-theme="sapphire-obsidian"] .featured-panel,
 body[data-theme="sapphire-obsidian"] .pass-hero-card,
 body[data-theme="gold-platinum"] .hero-panel,
 body[data-theme="gold-platinum"] .featured-panel,
-body[data-theme="gold-platinum"] .pass-hero-card {
+body[data-theme="gold-platinum"] .pass-hero-card,
+body[data-theme="rose-amethyst"] .hero-panel,
+body[data-theme="rose-amethyst"] .featured-panel,
+body[data-theme="rose-amethyst"] .pass-hero-card {
   position: relative;
   overflow: hidden;
   box-shadow: var(--card-rim);
@@ -1094,7 +1167,9 @@ body[data-theme="gold-platinum"] .pass-hero-card {
 body[data-theme="sapphire-obsidian"] .hero-panel::before,
 body[data-theme="sapphire-obsidian"] .pass-hero-card::before,
 body[data-theme="gold-platinum"] .hero-panel::before,
-body[data-theme="gold-platinum"] .pass-hero-card::before {
+body[data-theme="gold-platinum"] .pass-hero-card::before,
+body[data-theme="rose-amethyst"] .hero-panel::before,
+body[data-theme="rose-amethyst"] .pass-hero-card::before {
   content: '';
   position: absolute;
   top: 0;
@@ -1105,11 +1180,13 @@ body[data-theme="gold-platinum"] .pass-hero-card::before {
   animation: grindLuxuryGlint 8s ease-in-out infinite;
 }
 body[data-theme="sapphire-obsidian"] .eyebrow,
-body[data-theme="gold-platinum"] .eyebrow {
+body[data-theme="gold-platinum"] .eyebrow,
+body[data-theme="rose-amethyst"] .eyebrow {
   letter-spacing: 2.6px;
 }
 body[data-theme="sapphire-obsidian"] .topbar,
-body[data-theme="gold-platinum"] .topbar {
+body[data-theme="gold-platinum"] .topbar,
+body[data-theme="rose-amethyst"] .topbar {
   backdrop-filter: blur(20px) saturate(150%);
   -webkit-backdrop-filter: blur(20px) saturate(150%);
   box-shadow: 0 1px 0 rgba(255, 255, 255, .08);
@@ -1122,8 +1199,13 @@ body[data-theme="gold-platinum"] .cash-pill {
   border-color: rgba(243, 201, 105, .48);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .32), 0 0 22px rgba(243, 201, 105, .18);
 }
+body[data-theme="rose-amethyst"] .cash-pill {
+  border-color: rgba(251, 113, 133, .5);
+  box-shadow: inset 0 1px 0 rgba(254, 205, 211, .32), 0 0 22px rgba(244, 63, 94, .22);
+}
 body[data-theme="sapphire-obsidian"] .mini-profile,
-body[data-theme="gold-platinum"] .mini-profile {
+body[data-theme="gold-platinum"] .mini-profile,
+body[data-theme="rose-amethyst"] .mini-profile {
   padding: 10px 11px;
   border-radius: 14px;
   background: rgba(255, 255, 255, .04);
@@ -1136,33 +1218,41 @@ body[data-theme="sapphire-obsidian"] .hero-orb {
 body[data-theme="gold-platinum"] .hero-orb {
   box-shadow: inset 0 2px 6px rgba(255, 255, 255, .6), 0 0 36px rgba(243, 201, 105, .32);
 }
+body[data-theme="rose-amethyst"] .hero-orb {
+  box-shadow: inset 0 2px 6px rgba(255, 255, 255, .52), 0 0 36px rgba(244, 63, 94, .38);
+}
 
 /* Shared sleek surface & typography refinement for unlocked themes */
 body[data-theme="gold-obsidian"],
 body[data-theme="sapphire-obsidian"],
-body[data-theme="gold-platinum"] {
+body[data-theme="gold-platinum"],
+body[data-theme="rose-amethyst"] {
   font-variant-numeric: tabular-nums;
 }
 body[data-theme="gold-obsidian"] .sidebar,
 body[data-theme="sapphire-obsidian"] .sidebar,
-body[data-theme="gold-platinum"] .sidebar {
+body[data-theme="gold-platinum"] .sidebar,
+body[data-theme="rose-amethyst"] .sidebar {
   background: var(--sidebar-grad);
   backdrop-filter: blur(18px);
 }
 body[data-theme="gold-obsidian"] .topbar,
 body[data-theme="sapphire-obsidian"] .topbar,
-body[data-theme="gold-platinum"] .topbar {
+body[data-theme="gold-platinum"] .topbar,
+body[data-theme="rose-amethyst"] .topbar {
   background: var(--topbar-bg);
 }
 body[data-theme="gold-obsidian"] .brand-icon,
 body[data-theme="sapphire-obsidian"] .brand-icon,
-body[data-theme="gold-platinum"] .brand-icon {
+body[data-theme="gold-platinum"] .brand-icon,
+body[data-theme="rose-amethyst"] .brand-icon {
   background: var(--orb-grad);
   color: var(--orb-text);
 }
 body[data-theme="gold-obsidian"] .primary-btn,
 body[data-theme="sapphire-obsidian"] .primary-btn,
-body[data-theme="gold-platinum"] .primary-btn {
+body[data-theme="gold-platinum"] .primary-btn,
+body[data-theme="rose-amethyst"] .primary-btn {
   background: var(--btn-grad);
   color: var(--btn-text);
   box-shadow: var(--btn-shadow);
@@ -1170,7 +1260,8 @@ body[data-theme="gold-platinum"] .primary-btn {
 }
 body[data-theme="gold-obsidian"] .nav-btn,
 body[data-theme="sapphire-obsidian"] .nav-btn,
-body[data-theme="gold-platinum"] .nav-btn {
+body[data-theme="gold-platinum"] .nav-btn,
+body[data-theme="rose-amethyst"] .nav-btn {
   color: var(--muted);
   font-weight: 600;
 }
@@ -1179,97 +1270,121 @@ body[data-theme="gold-obsidian"] .nav-btn:hover,
 body[data-theme="sapphire-obsidian"] .nav-btn.active,
 body[data-theme="sapphire-obsidian"] .nav-btn:hover,
 body[data-theme="gold-platinum"] .nav-btn.active,
-body[data-theme="gold-platinum"] .nav-btn:hover {
+body[data-theme="gold-platinum"] .nav-btn:hover,
+body[data-theme="rose-amethyst"] .nav-btn.active,
+body[data-theme="rose-amethyst"] .nav-btn:hover {
   background: var(--panel2);
   color: var(--text);
 }
 body[data-theme="gold-obsidian"] .nav-btn.active,
 body[data-theme="sapphire-obsidian"] .nav-btn.active,
-body[data-theme="gold-platinum"] .nav-btn.active {
+body[data-theme="gold-platinum"] .nav-btn.active,
+body[data-theme="rose-amethyst"] .nav-btn.active {
   box-shadow: inset 3px 0 0 var(--purple);
 }
 body[data-theme="gold-obsidian"] .cash-pill,
 body[data-theme="sapphire-obsidian"] .cash-pill,
 body[data-theme="gold-platinum"] .cash-pill,
+body[data-theme="rose-amethyst"] .cash-pill,
 body[data-theme="gold-obsidian"] .feed-tab,
 body[data-theme="sapphire-obsidian"] .feed-tab,
 body[data-theme="gold-platinum"] .feed-tab,
+body[data-theme="rose-amethyst"] .feed-tab,
 body[data-theme="gold-obsidian"] .creator-chip,
 body[data-theme="sapphire-obsidian"] .creator-chip,
 body[data-theme="gold-platinum"] .creator-chip,
+body[data-theme="rose-amethyst"] .creator-chip,
 body[data-theme="gold-obsidian"] .live-coin-chip,
 body[data-theme="sapphire-obsidian"] .live-coin-chip,
 body[data-theme="gold-platinum"] .live-coin-chip,
+body[data-theme="rose-amethyst"] .live-coin-chip,
 body[data-theme="gold-obsidian"] .edit-coin-btn,
 body[data-theme="sapphire-obsidian"] .edit-coin-btn,
 body[data-theme="gold-platinum"] .edit-coin-btn,
+body[data-theme="rose-amethyst"] .edit-coin-btn,
 body[data-theme="gold-obsidian"] .cmt-action-btn,
 body[data-theme="sapphire-obsidian"] .cmt-action-btn,
 body[data-theme="gold-platinum"] .cmt-action-btn,
+body[data-theme="rose-amethyst"] .cmt-action-btn,
 body[data-theme="gold-obsidian"] .fav-btn,
 body[data-theme="sapphire-obsidian"] .fav-btn,
 body[data-theme="gold-platinum"] .fav-btn,
+body[data-theme="rose-amethyst"] .fav-btn,
 body[data-theme="gold-obsidian"] .zoom-btn,
 body[data-theme="sapphire-obsidian"] .zoom-btn,
 body[data-theme="gold-platinum"] .zoom-btn,
+body[data-theme="rose-amethyst"] .zoom-btn,
 body[data-theme="gold-obsidian"] .amount-btn,
 body[data-theme="sapphire-obsidian"] .amount-btn,
-body[data-theme="gold-platinum"] .amount-btn {
+body[data-theme="gold-platinum"] .amount-btn,
+body[data-theme="rose-amethyst"] .amount-btn {
   background: var(--panel2);
   border-color: var(--line);
 }
 body[data-theme="gold-obsidian"] .feed-tab.active,
 body[data-theme="sapphire-obsidian"] .feed-tab.active,
-body[data-theme="gold-platinum"] .feed-tab.active {
+body[data-theme="gold-platinum"] .feed-tab.active,
+body[data-theme="rose-amethyst"] .feed-tab.active {
   background: var(--accent-soft);
   border-color: var(--purple);
   color: var(--text);
 }
 body[data-theme="gold-obsidian"] .hero-panel,
 body[data-theme="sapphire-obsidian"] .hero-panel,
-body[data-theme="gold-platinum"] .hero-panel {
+body[data-theme="gold-platinum"] .hero-panel,
+body[data-theme="rose-amethyst"] .hero-panel {
   background: var(--hero-grad);
   border-color: var(--line);
 }
 body[data-theme="gold-obsidian"] .hero-panel h3,
 body[data-theme="sapphire-obsidian"] .hero-panel h3,
 body[data-theme="gold-platinum"] .hero-panel h3,
+body[data-theme="rose-amethyst"] .hero-panel h3,
 body[data-theme="gold-obsidian"] .coin-price,
 body[data-theme="sapphire-obsidian"] .coin-price,
 body[data-theme="gold-platinum"] .coin-price,
+body[data-theme="rose-amethyst"] .coin-price,
 body[data-theme="gold-obsidian"] .portfolio-summary strong,
 body[data-theme="sapphire-obsidian"] .portfolio-summary strong,
-body[data-theme="gold-platinum"] .portfolio-summary strong {
+body[data-theme="gold-platinum"] .portfolio-summary strong,
+body[data-theme="rose-amethyst"] .portfolio-summary strong {
   font-weight: 700;
   letter-spacing: -0.02em;
 }
 body[data-theme="gold-obsidian"] .hero-orb,
 body[data-theme="sapphire-obsidian"] .hero-orb,
-body[data-theme="gold-platinum"] .hero-orb {
+body[data-theme="gold-platinum"] .hero-orb,
+body[data-theme="rose-amethyst"] .hero-orb {
   background: var(--orb-grad);
   color: var(--orb-text);
   font-weight: 700;
 }
 body[data-theme="gold-obsidian"] .coin-card:hover,
 body[data-theme="sapphire-obsidian"] .coin-card:hover,
-body[data-theme="gold-platinum"] .coin-card:hover {
+body[data-theme="gold-platinum"] .coin-card:hover,
+body[data-theme="rose-amethyst"] .coin-card:hover {
   box-shadow: var(--card-hover-shadow);
 }
 body[data-theme="gold-obsidian"] .coin-logo,
 body[data-theme="sapphire-obsidian"] .coin-logo,
 body[data-theme="gold-platinum"] .coin-logo,
+body[data-theme="rose-amethyst"] .coin-logo,
 body[data-theme="gold-obsidian"] .avatar,
 body[data-theme="sapphire-obsidian"] .avatar,
 body[data-theme="gold-platinum"] .avatar,
+body[data-theme="rose-amethyst"] .avatar,
 body[data-theme="gold-obsidian"] .profile-upload,
 body[data-theme="sapphire-obsidian"] .profile-upload,
 body[data-theme="gold-platinum"] .profile-upload,
+body[data-theme="rose-amethyst"] .profile-upload,
 body[data-theme="gold-obsidian"] .creator-mini-av,
 body[data-theme="sapphire-obsidian"] .creator-mini-av,
 body[data-theme="gold-platinum"] .creator-mini-av,
+body[data-theme="rose-amethyst"] .creator-mini-av,
 body[data-theme="gold-obsidian"] .live-coin-mini,
 body[data-theme="sapphire-obsidian"] .live-coin-mini,
-body[data-theme="gold-platinum"] .live-coin-mini {
+body[data-theme="gold-platinum"] .live-coin-mini,
+body[data-theme="rose-amethyst"] .live-coin-mini {
   background: var(--panel2);
 }
 body[data-theme="gold-obsidian"] label input,
@@ -1334,32 +1449,58 @@ body[data-theme="gold-platinum"] .grindbot-msg.bot,
 body[data-theme="gold-platinum"] .grindbot-composer input,
 body[data-theme="gold-platinum"] .report-details-box,
 body[data-theme="gold-platinum"] .live-post-msg,
-body[data-theme="gold-platinum"] .ad-stage {
+body[data-theme="gold-platinum"] .ad-stage,
+body[data-theme="rose-amethyst"] label input,
+body[data-theme="rose-amethyst"] label textarea,
+body[data-theme="rose-amethyst"] label select,
+body[data-theme="rose-amethyst"] .feed-search,
+body[data-theme="rose-amethyst"] .tier-list,
+body[data-theme="rose-amethyst"] .comment-item,
+body[data-theme="rose-amethyst"] .comment-composer-body textarea,
+body[data-theme="rose-amethyst"] .featured-card,
+body[data-theme="rose-amethyst"] .profile-modal-stats > div,
+body[data-theme="rose-amethyst"] .daily-day,
+body[data-theme="rose-amethyst"] .pass-time-pill,
+body[data-theme="rose-amethyst"] .pass-progress-track,
+body[data-theme="rose-amethyst"] .pass-board-shell,
+body[data-theme="rose-amethyst"] .pass-spine-cell,
+body[data-theme="rose-amethyst"] .pass-spine-time,
+body[data-theme="rose-amethyst"] .pass-track-label.spine,
+body[data-theme="rose-amethyst"] .grindbot-msg.bot,
+body[data-theme="rose-amethyst"] .grindbot-composer input,
+body[data-theme="rose-amethyst"] .report-details-box,
+body[data-theme="rose-amethyst"] .live-post-msg,
+body[data-theme="rose-amethyst"] .ad-stage {
   background: var(--surface-deep);
 }
 body[data-theme="gold-obsidian"] .pass-track-labels,
 body[data-theme="sapphire-obsidian"] .pass-track-labels,
-body[data-theme="gold-platinum"] .pass-track-labels {
+body[data-theme="gold-platinum"] .pass-track-labels,
+body[data-theme="rose-amethyst"] .pass-track-labels {
   background: var(--panel);
 }
 body[data-theme="gold-obsidian"] .pass-hero-card,
 body[data-theme="sapphire-obsidian"] .pass-hero-card,
 body[data-theme="gold-platinum"] .pass-hero-card,
+body[data-theme="rose-amethyst"] .pass-hero-card,
 body[data-theme="gold-obsidian"] .featured-panel,
 body[data-theme="sapphire-obsidian"] .featured-panel,
-body[data-theme="gold-platinum"] .featured-panel {
+body[data-theme="gold-platinum"] .featured-panel,
+body[data-theme="rose-amethyst"] .featured-panel {
   background: var(--hero-grad);
   border-color: var(--line);
 }
 body[data-theme="gold-obsidian"] .modal-card,
 body[data-theme="sapphire-obsidian"] .modal-card,
-body[data-theme="gold-platinum"] .modal-card {
+body[data-theme="gold-platinum"] .modal-card,
+body[data-theme="rose-amethyst"] .modal-card {
   background: var(--modal-grad);
   backdrop-filter: blur(18px);
 }
 body[data-theme="gold-obsidian"] .pass-side-btn,
 body[data-theme="sapphire-obsidian"] .pass-side-btn,
-body[data-theme="gold-platinum"] .pass-side-btn {
+body[data-theme="gold-platinum"] .pass-side-btn,
+body[data-theme="rose-amethyst"] .pass-side-btn {
   background: var(--accent-soft);
   border-color: var(--line);
 }
@@ -1368,22 +1509,27 @@ body[data-theme="gold-obsidian"] .pass-side-btn:hover,
 body[data-theme="sapphire-obsidian"] .pass-side-btn.active,
 body[data-theme="sapphire-obsidian"] .pass-side-btn:hover,
 body[data-theme="gold-platinum"] .pass-side-btn.active,
-body[data-theme="gold-platinum"] .pass-side-btn:hover {
+body[data-theme="gold-platinum"] .pass-side-btn:hover,
+body[data-theme="rose-amethyst"] .pass-side-btn.active,
+body[data-theme="rose-amethyst"] .pass-side-btn:hover {
   background: var(--panel2);
   border-color: var(--purple);
 }
 body[data-theme="gold-obsidian"] .grindbot-avatar,
 body[data-theme="sapphire-obsidian"] .grindbot-avatar,
 body[data-theme="gold-platinum"] .grindbot-avatar,
+body[data-theme="rose-amethyst"] .grindbot-avatar,
 body[data-theme="gold-obsidian"] .grindbot-msg.user,
 body[data-theme="sapphire-obsidian"] .grindbot-msg.user,
-body[data-theme="gold-platinum"] .grindbot-msg.user {
+body[data-theme="gold-platinum"] .grindbot-msg.user,
+body[data-theme="rose-amethyst"] .grindbot-msg.user {
   background: var(--btn-grad);
   color: var(--btn-text);
 }
 body[data-theme="gold-obsidian"] .toast,
 body[data-theme="sapphire-obsidian"] .toast,
-body[data-theme="gold-platinum"] .toast {
+body[data-theme="gold-platinum"] .toast,
+body[data-theme="rose-amethyst"] .toast {
   background: var(--panel2);
   border-color: var(--purple);
   color: var(--text);
@@ -1391,15 +1537,18 @@ body[data-theme="gold-platinum"] .toast {
 }
 body[data-theme="gold-obsidian"] hr,
 body[data-theme="sapphire-obsidian"] hr,
-body[data-theme="gold-platinum"] hr {
+body[data-theme="gold-platinum"] hr,
+body[data-theme="rose-amethyst"] hr {
   border-color: var(--line) !important;
 }
 body[data-theme="gold-obsidian"] .nav-count-badge,
 body[data-theme="sapphire-obsidian"] .nav-count-badge,
 body[data-theme="gold-platinum"] .nav-count-badge,
+body[data-theme="rose-amethyst"] .nav-count-badge,
 body[data-theme="gold-obsidian"] .featured-slot-badge,
 body[data-theme="sapphire-obsidian"] .featured-slot-badge,
-body[data-theme="gold-platinum"] .featured-slot-badge {
+body[data-theme="gold-platinum"] .featured-slot-badge,
+body[data-theme="rose-amethyst"] .featured-slot-badge {
   background: var(--accent-soft);
   border-color: var(--line);
   color: var(--text);

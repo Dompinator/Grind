@@ -4535,13 +4535,22 @@ const GRIND_THEMES = [
     textureLabel: 'Platinum Scales',
     desc: 'Sculpted metallic platinum scales background with 24k champagne gold gleam.',
     colors: ['#0a0c11', '#212634', '#e2e8f0', '#f3c969']
+  },
+  {
+    id: 'rose-amethyst',
+    name: 'Rose & Amethyst',
+    reqTier: 'premium',
+    tierBadge: 'PREMIUM',
+    textureLabel: 'Amethyst Scales',
+    desc: 'Pink & crimson crystal accents over smooth faceted amethyst shards & scales.',
+    colors: ['#10050c', '#3b0a26', '#fb7185', '#c026d3']
   }
 ];
 
 function isThemeUnlocked(themeId, tier) {
   if (themeId === 'default') return true;
   if (themeId === 'gold-obsidian') return tier === 'pro' || tier === 'premium';
-  if (themeId === 'sapphire-obsidian' || themeId === 'gold-platinum') return tier === 'premium';
+  if (themeId === 'sapphire-obsidian' || themeId === 'gold-platinum' || themeId === 'rose-amethyst') return tier === 'premium';
   return false;
 }
 
@@ -4580,9 +4589,9 @@ function renderThemeSettings() {
 
   if (subEl) {
     if (tier === 'premium') {
-      subEl.textContent = 'Premium unlocked: switch freely between all 4 themes & textures.';
+      subEl.textContent = 'Premium unlocked: switch freely between all 5 themes & textures.';
     } else if (tier === 'pro') {
-      subEl.textContent = 'PRO unlocked: Default and Gold & Obsidian are available. Upgrade to Premium for textured Sapphire & Platinum.';
+      subEl.textContent = 'PRO unlocked: Default and Gold & Obsidian are available. Upgrade to Premium for textured Sapphire, Platinum & Rose Amethyst.';
     } else {
       subEl.textContent = 'Member tier uses Default. Unlock Gold & Obsidian with PRO or textured themes with Premium.';
     }
@@ -8318,10 +8327,15 @@ document.addEventListener('pointerdown', e => {
 // ============================================================
 // ---------- PREMIUM THEME AMBIENT MUSIC ENGINE --------------
 // ============================================================
-const PREMIUM_MUSIC_THEMES = new Set(['sapphire-obsidian', 'gold-platinum']);
+const PREMIUM_MUSIC_TRACKS = {
+  'sapphire-obsidian': { file: 'premium-ambient', title: 'Obsidian Lounge — Soothing Ambient' },
+  'gold-platinum': { file: 'premium-ambient', title: 'Obsidian Lounge — Soothing Ambient' },
+  'rose-amethyst': { file: 'rose-amethyst-ambient', title: 'Velvet Crystal — Rose & Amethyst' }
+};
 const AMBIENT_TARGET_GAIN = 0.22;
-let ambientBuffer = null;
-let ambientLoadingTask = null;
+const ambientBuffers = new Map();
+const ambientLoadingTasks = new Map();
+let ambientCurrentTrackFile = null;
 let ambientSourceNode = null;
 let ambientGainNode = null;
 let ambientFallbackAudio = null;
@@ -8330,8 +8344,12 @@ let ambientStopTimer = null;
 let ambientDesired = false;
 let ambientPlaying = false;
 
+function getPremiumMusicTrackForTheme(themeId) {
+  return PREMIUM_MUSIC_TRACKS[themeId] || null;
+}
+
 function isPremiumMusicTheme(themeId) {
-  return PREMIUM_MUSIC_THEMES.has(themeId);
+  return Boolean(getPremiumMusicTrackForTheme(themeId));
 }
 
 function getMusicPrefKey(uid) {
@@ -8362,24 +8380,27 @@ function shouldPlayPremiumAmbientMusic() {
   return isPremiumMusicTheme(getActiveThemeId());
 }
 
-async function loadAmbientMusicBuffer() {
-  if (ambientBuffer) return ambientBuffer;
-  if (ambientLoadingTask) return ambientLoadingTask;
-  ambientLoadingTask = (async () => {
+async function loadAmbientMusicBuffer(trackFile) {
+  if (!trackFile) return null;
+  if (ambientBuffers.has(trackFile)) return ambientBuffers.get(trackFile);
+  if (ambientLoadingTasks.has(trackFile)) return ambientLoadingTasks.get(trackFile);
+  const task = (async () => {
     const ctx = ensureGrindAudioCtx();
     if (!ctx) return null;
     for (const ext of ['mp3', 'wav', 'ogg']) {
       try {
-        const res = await fetch(`sounds/premium-ambient.${ext}`);
+        const res = await fetch(`sounds/${trackFile}.${ext}`);
         if (!res.ok) continue;
         const arr = await res.arrayBuffer();
-        ambientBuffer = await ctx.decodeAudioData(arr);
-        return ambientBuffer;
+        const decoded = await ctx.decodeAudioData(arr);
+        ambientBuffers.set(trackFile, decoded);
+        return decoded;
       } catch (e) {}
     }
     return null;
   })();
-  return ambientLoadingTask;
+  ambientLoadingTasks.set(trackFile, task);
+  return task;
 }
 
 function clearAmbientTimers() {
@@ -8419,8 +8440,7 @@ function stopFallbackAmbientAudio(immediate) {
   }, 45);
 }
 
-function stopPremiumAmbientMusic(immediate = false) {
-  ambientDesired = false;
+function stopCurrentAmbientPlayback(immediate = false) {
   ambientPlaying = false;
   clearAmbientTimers();
 
@@ -8437,10 +8457,10 @@ function stopPremiumAmbientMusic(immediate = false) {
         gain.gain.setValueAtTime(0, now);
         src.stop();
       } else {
-        gain.gain.linearRampToValueAtTime(0.0001, now + 0.65);
+        gain.gain.linearRampToValueAtTime(0.0001, now + 0.55);
         ambientStopTimer = setTimeout(() => {
           try { src.stop(); } catch (e) {}
-        }, 700);
+        }, 600);
       }
     } catch (e) {
       try { src.stop(); } catch (err) {}
@@ -8448,24 +8468,40 @@ function stopPremiumAmbientMusic(immediate = false) {
   }
 
   stopFallbackAmbientAudio(immediate);
+}
+
+function stopPremiumAmbientMusic(immediate = false) {
+  ambientDesired = false;
+  ambientCurrentTrackFile = null;
+  stopCurrentAmbientPlayback(immediate);
   renderMusicSettings();
 }
 
 async function startPremiumAmbientMusic() {
-  if (!shouldPlayPremiumAmbientMusic()) {
+  const track = getPremiumMusicTrackForTheme(getActiveThemeId());
+  if (!track || !shouldPlayPremiumAmbientMusic()) {
     stopPremiumAmbientMusic(false);
     return;
   }
+
+  const targetFile = track.file;
+  const switchingTrack = Boolean(ambientCurrentTrackFile && ambientCurrentTrackFile !== targetFile);
+  if (switchingTrack) {
+    stopCurrentAmbientPlayback(true);
+  }
+
   ambientDesired = true;
+  ambientCurrentTrackFile = targetFile;
   clearAmbientTimers();
 
   const ctx = ensureGrindAudioCtx();
   if (ctx && ctx.state === 'running') {
-    const buf = await loadAmbientMusicBuffer();
+    const buf = await loadAmbientMusicBuffer(targetFile);
     if (!ambientDesired || !shouldPlayPremiumAmbientMusic()) return;
+    if (getPremiumMusicTrackForTheme(getActiveThemeId())?.file !== targetFile) return;
     if (buf) {
       stopFallbackAmbientAudio(true);
-      if (ambientSourceNode && ambientGainNode) {
+      if (ambientSourceNode && ambientGainNode && ambientCurrentTrackFile === targetFile) {
         const now = ctx.currentTime;
         ambientGainNode.gain.cancelScheduledValues(now);
         ambientGainNode.gain.setValueAtTime(ambientGainNode.gain.value, now);
@@ -8494,13 +8530,21 @@ async function startPremiumAmbientMusic() {
 
   // Fallback HTMLAudio if AudioContext isn't ready/suspended yet or buffer still loading
   try {
-    if (!ambientFallbackAudio) {
-      ambientFallbackAudio = new Audio('sounds/premium-ambient.mp3');
+    if (!ambientFallbackAudio || switchingTrack || ambientFallbackAudio.dataset.track !== targetFile) {
+      if (ambientFallbackAudio) {
+        try { ambientFallbackAudio.pause(); } catch (e) {}
+      }
+      ambientFallbackAudio = new Audio(`sounds/${targetFile}.mp3`);
+      ambientFallbackAudio.dataset.track = targetFile;
       ambientFallbackAudio.loop = true;
       ambientFallbackAudio.volume = 0;
     }
     await ambientFallbackAudio.play();
     if (!ambientDesired || !shouldPlayPremiumAmbientMusic()) {
+      stopFallbackAmbientAudio(true);
+      return;
+    }
+    if (getPremiumMusicTrackForTheme(getActiveThemeId())?.file !== targetFile) {
       stopFallbackAmbientAudio(true);
       return;
     }
@@ -8519,7 +8563,6 @@ async function startPremiumAmbientMusic() {
       }
     }, 55);
   } catch (e) {
-    // Browser blocked autoplay before user interaction; handleUserGestureForAmbientMusic will retry
     ambientPlaying = false;
     renderMusicSettings();
   }
@@ -8536,11 +8579,12 @@ function syncPremiumAmbientMusic() {
 function handleUserGestureForAmbientMusic() {
   if (!shouldPlayPremiumAmbientMusic()) return;
   const ctx = ensureGrindAudioCtx();
+  const targetFile = getPremiumMusicTrackForTheme(getActiveThemeId())?.file || null;
   if (ctx && ctx.state === 'suspended') {
     ctx.resume().then(() => {
       if (shouldPlayPremiumAmbientMusic()) startPremiumAmbientMusic();
     }).catch(() => {});
-  } else if (!ambientPlaying || (ambientBuffer && !ambientSourceNode)) {
+  } else if (!ambientPlaying || ambientCurrentTrackFile !== targetFile || (ambientBuffers.has(targetFile) && !ambientSourceNode)) {
     startPremiumAmbientMusic();
   }
 }
@@ -8554,18 +8598,23 @@ function renderMusicSettings() {
   const toggleLabel = $('#ambientMusicToggleLabel');
   const eqBars = $('#musicEqBars');
   const pill = $('#musicStatePill');
+  const titleEl = $('#musicTrackTitle');
   const desc = $('#musicStatusDesc');
   if (!toggleBtn) return;
 
   const enabled = isUserMusicEnabled();
   const activeTheme = getActiveThemeId();
-  const onPremiumTheme = isPremiumMusicTheme(activeTheme);
+  const activeTrack = getPremiumMusicTrackForTheme(activeTheme);
+  const onPremiumTheme = Boolean(activeTrack);
   const pausedForAds = currentPage === 'ads';
 
   toggleBtn.classList.toggle('active', enabled);
   toggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
   if (toggleLabel) {
     toggleLabel.textContent = enabled ? 'Music: On' : 'Music: Off';
+  }
+  if (titleEl) {
+    titleEl.textContent = activeTrack ? activeTrack.title : 'Obsidian Lounge — Soothing Ambient';
   }
 
   const activelyPlaying = Boolean(enabled && onPremiumTheme && !pausedForAds && ambientPlaying);
@@ -8592,12 +8641,16 @@ function renderMusicSettings() {
   if (desc) {
     if (!enabled) {
       desc.textContent = 'Background music is turned off for your account.';
+    } else if (activeTheme === 'rose-amethyst') {
+      desc.textContent = activelyPlaying
+        ? 'Now playing Velvet Crystal ambient soundtrack for Rose & Amethyst.'
+        : 'Enabled — Velvet Crystal ambient music plays while Rose & Amethyst is active.';
     } else if (onPremiumTheme) {
       desc.textContent = activelyPlaying
         ? 'Now playing soothing ambient lounge music for your PREMIUM theme.'
         : 'Enabled — soothing ambient music plays while Sapphire & Obsidian or Gold & Platinum is active.';
     } else {
-      desc.textContent = 'Switch to a PREMIUM theme above (Sapphire & Obsidian or Gold & Platinum) to hear the soundtrack.';
+      desc.textContent = 'Switch to a PREMIUM theme above (Sapphire & Obsidian, Gold & Platinum, or Rose & Amethyst) to hear its soundtrack.';
     }
   }
 }
