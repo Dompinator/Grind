@@ -1129,6 +1129,10 @@ $('#logoutBtn')?.addEventListener('click', async () => {
 
 // ---------- Navigation ----------
 function showPage(page) {
+  if (page === 'grindbot' && currentUser && getUserTier(currentUser) === 'member') {
+    openProUpgradeModal();
+    return;
+  }
   const wasAds = currentPage === 'ads';
   if (wasAds && page !== 'ads') cleanupAds();
   currentPage = page;
@@ -6690,6 +6694,63 @@ $('#grindBotClearBtn')?.addEventListener('click', () => {
 });
 
 $('#grindBotOpenDailyBtn')?.addEventListener('click', () => checkDailyLogin(true));
+
+// ---------- PRO Tier Paid Upgrade Modal (Member GRIND-BOT transition) ----------
+let selectedProUpgradePlan = 'monthly';
+let proUpgradeCloseTimer = null;
+
+function setProUpgradePlan(plan) {
+  selectedProUpgradePlan = plan === 'yearly' ? 'yearly' : 'monthly';
+  $$('#proPlanGrid [data-pro-plan]').forEach(card => {
+    card.classList.toggle('selected', card.dataset.proPlan === selectedProUpgradePlan);
+  });
+  const cta = $('#proUpgradePayBtn');
+  if (cta) {
+    cta.textContent = selectedProUpgradePlan === 'yearly'
+      ? 'Upgrade to PRO · 499 kr / yr'
+      : 'Upgrade to PRO · 39.99 kr / mo';
+  }
+}
+
+function openProUpgradeModal() {
+  const modal = $('#proUpgradeModal');
+  if (!modal) return;
+  if (proUpgradeCloseTimer) {
+    clearTimeout(proUpgradeCloseTimer);
+    proUpgradeCloseTimer = null;
+  }
+  setProUpgradePlan(selectedProUpgradePlan);
+  modal.classList.remove('hidden');
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      modal.classList.add('is-visible');
+    });
+  });
+}
+
+function closeProUpgradeModal() {
+  const modal = $('#proUpgradeModal');
+  if (!modal || modal.classList.contains('hidden')) return;
+  modal.classList.remove('is-visible');
+  if (proUpgradeCloseTimer) clearTimeout(proUpgradeCloseTimer);
+  proUpgradeCloseTimer = setTimeout(() => {
+    modal.classList.add('hidden');
+    proUpgradeCloseTimer = null;
+  }, 320);
+}
+
+$$('#proPlanGrid [data-pro-plan]').forEach(btn => {
+  btn.addEventListener('click', () => setProUpgradePlan(btn.dataset.proPlan));
+});
+$('#proUpgradePayBtn')?.addEventListener('click', e => {
+  e.preventDefault();
+  // Intentionally does nothing (visual PRO upgrade prompt only)
+});
+$('#closeProUpgradeBtn')?.addEventListener('click', closeProUpgradeModal);
+$('#proUpgradeLaterBtn')?.addEventListener('click', closeProUpgradeModal);
+$('#proUpgradeModal')?.addEventListener('click', e => {
+  if (e.target?.id === 'proUpgradeModal') closeProUpgradeModal();
+});
 
 // ---------- Init ----------
 (async () => {
