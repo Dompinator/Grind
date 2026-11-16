@@ -1257,6 +1257,8 @@ function updateUIProfile() {
     gbTag.classList.toggle('unlocked', hasPro);
   }
   updatePremiumSection();
+  applyUserTheme();
+  renderThemeSettings();
   updateNotificationsBadge();
   updatePassNavBadge();
   if (currentPage === 'grindbot') renderGrindBotPage();
@@ -1317,6 +1319,7 @@ $('#logoutBtn')?.addEventListener('click', async () => {
   grindBotHistory = [];
   if (realtimeChannel && sb) sb.removeChannel(realtimeChannel);
   $('#appView').classList.add('hidden');
+  delete document.body.dataset.theme;
   $('#tosModal')?.classList.add('hidden');
   $('#updateModal')?.classList.add('hidden');
   $('#warnModal')?.classList.add('hidden');
@@ -1367,7 +1370,10 @@ function showPage(page) {
     passScrollInitDone = false;
     loadPassState().then(() => renderPassPage(true));
   }
-  if (page === 'account') updatePremiumSection();
+  if (page === 'account') {
+    updatePremiumSection();
+    renderThemeSettings();
+  }
   if (page === 'report') loadReportPage();
   if (page === 'notifications') loadRequests();
   if (page === 'admin' && isDompinator()) loadAdminPage();
@@ -2955,7 +2961,8 @@ function drawChartWithBubbles(coin, trades) {
   // line
   ctx.beginPath();
   points.forEach((p, i) => { const x = xAt(i), y = yAt(p.price); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-  ctx.strokeStyle = '#c084fc';
+  const accentStroke = (getComputedStyle(document.body).getPropertyValue('--purple') || '').trim() || '#c084fc';
+  ctx.strokeStyle = accentStroke;
   ctx.lineWidth = 3;
   ctx.lineJoin = 'round';
   ctx.stroke();
@@ -3918,15 +3925,154 @@ $('#profileImage')?.addEventListener('change', async (e) => {
   });
 });
 
+// ---------- Theme Settings (Tier-locked visual themes) ----------
+const GRIND_THEMES = [
+  {
+    id: 'default',
+    name: 'Default',
+    reqTier: 'member',
+    tierBadge: 'Default',
+    desc: 'Classic GRIND deep violet interface.',
+    colors: ['#0c0916', '#161222', '#c084fc', '#7c3aed']
+  },
+  {
+    id: 'gold-obsidian',
+    name: 'Gold & Obsidian',
+    reqTier: 'pro',
+    tierBadge: 'PRO',
+    desc: 'Obsidian dark surfaces with warm brushed gold accents.',
+    colors: ['#08080b', '#121218', '#fbbf24', '#d97706']
+  },
+  {
+    id: 'sapphire-obsidian',
+    name: 'Sapphire & Obsidian',
+    reqTier: 'premium',
+    tierBadge: 'PREMIUM',
+    desc: 'Deep obsidian slate with crisp electric sapphire glow.',
+    colors: ['#07090f', '#101624', '#38bdf8', '#2563eb']
+  },
+  {
+    id: 'gold-platinum',
+    name: 'Gold & Platinum',
+    reqTier: 'premium',
+    tierBadge: 'PREMIUM',
+    desc: 'Sleek gunmetal, champagne gold, and silver platinum trim.',
+    colors: ['#0e1015', '#171a23', '#f3c969', '#e2e8f0']
+  }
+];
+
+function isThemeUnlocked(themeId, tier) {
+  if (themeId === 'default') return true;
+  if (themeId === 'gold-obsidian') return tier === 'pro' || tier === 'premium';
+  if (themeId === 'sapphire-obsidian' || themeId === 'gold-platinum') return tier === 'premium';
+  return false;
+}
+
+function getActiveThemeId() {
+  if (!currentUser) return 'default';
+  const tier = getUserTier(currentUser);
+  let saved = 'default';
+  try {
+    saved = localStorage.getItem('grind_theme_' + currentUser.id) || 'default';
+  } catch (e) {}
+  if (!isThemeUnlocked(saved, tier)) return 'default';
+  return saved;
+}
+
+function applyUserTheme() {
+  const activeId = getActiveThemeId();
+  if (activeId && activeId !== 'default') {
+    document.body.dataset.theme = activeId;
+  } else {
+    delete document.body.dataset.theme;
+  }
+  if (currentPage === 'coin' && selectedCoin && typeof drawChart === 'function') {
+    try { drawChart(); } catch (e) {}
+  }
+}
+
+function renderThemeSettings() {
+  const listEl = $('#themeStripsList');
+  const subEl = $('#themeSettingsSub');
+  if (!listEl || !currentUser) return;
+
+  const tier = getUserTier(currentUser);
+  const activeId = getActiveThemeId();
+
+  if (subEl) {
+    if (tier === 'premium') {
+      subEl.textContent = 'Premium unlocked: switch freely between all 4 themes.';
+    } else if (tier === 'pro') {
+      subEl.textContent = 'PRO unlocked: Default and Gold & Obsidian are available. Upgrade to Premium for Sapphire & Platinum.';
+    } else {
+      subEl.textContent = 'Member tier uses Default. Unlock Gold & Obsidian with PRO or all themes with Premium.';
+    }
+  }
+
+  listEl.innerHTML = GRIND_THEMES.map(theme => {
+    const unlocked = isThemeUnlocked(theme.id, tier);
+    const isActive = activeId === theme.id;
+    const pillClass = theme.reqTier === 'pro' ? 'pro' : theme.reqTier === 'premium' ? 'premium' : '';
+    const statusText = isActive
+      ? '✓ Active'
+      : unlocked
+        ? 'Use theme'
+        : `🔒 ${theme.tierBadge}`;
+    const stripBars = theme.colors.map(hex => `<span style="background:${hex};"></span>`).join('');
+    const edgeGrad = `linear-gradient(180deg, ${theme.colors[2]}, ${theme.colors[3]})`;
+
+    return `
+      <button type="button"
+              class="theme-strip ${isActive ? 'active' : ''} ${unlocked ? '' : 'locked'}"
+              data-theme-pick="${escapeHtml(theme.id)}"
+              aria-pressed="${isActive ? 'true' : 'false'}">
+        <span class="theme-strip-edge" style="background:${edgeGrad};"></span>
+        <div class="theme-strip-left">
+          <div class="theme-strip-bar" aria-hidden="true">${stripBars}</div>
+          <div class="theme-strip-meta">
+            <div class="theme-strip-title">
+              <span>${escapeHtml(theme.name)}</span>
+              <span class="theme-tier-pill ${pillClass}">${escapeHtml(theme.tierBadge)}</span>
+            </div>
+            <div class="theme-strip-desc">${escapeHtml(theme.desc)}</div>
+          </div>
+        </div>
+        <span class="theme-strip-status">${statusText}</span>
+      </button>
+    `;
+  }).join('');
+
+  $$('#themeStripsList [data-theme-pick]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pickedId = btn.dataset.themePick;
+      const themeObj = GRIND_THEMES.find(t => t.id === pickedId);
+      if (!themeObj || !currentUser) return;
+      const curTier = getUserTier(currentUser);
+      if (!isThemeUnlocked(pickedId, curTier)) {
+        const reqLabel = themeObj.reqTier === 'pro' ? 'PRO' : 'Premium';
+        toast(`🔒 ${themeObj.name} requires ${reqLabel} tier!`);
+        return;
+      }
+      try {
+        localStorage.setItem('grind_theme_' + currentUser.id, pickedId);
+      } catch (e) {}
+      applyUserTheme();
+      renderThemeSettings();
+      toast(`Theme changed to ${themeObj.name}`);
+    });
+  });
+}
+
 // ---------- Premium requests ----------
 function updatePremiumSection() {
   if (!currentUser) return;
   const statusEl = $('#premiumStatus');
   const form = $('#requestForm');
-  if (currentUser.is_premium) {
+  const tier = getUserTier(currentUser);
+  if (tier === 'premium') {
     statusEl.textContent = 'You have Premium! Max 3 coins, Blue Star icon, and 2X daily rewards.';
     form.classList.add('hidden');
-  } else if (currentUser.is_pro) {
+  } else if (tier === 'pro') {
     statusEl.textContent = 'You have PRO! Max 2 coins, Gold Crown icon, and 2X daily rewards. Request Premium for 3 coins and Blue Star.';
     form.classList.remove('hidden');
   } else {

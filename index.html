@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=35">
+  <link rel="stylesheet" href="styles.css?v=36">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -264,6 +264,16 @@
               </div>
             </div>
             <p id="accountMessage" class="form-message"></p>
+            <hr style="border-color:#3a2e4a;margin:20px 0">
+            <div id="themeSettingsSection">
+              <div class="theme-settings-head">
+                <div>
+                  <h4>Theme settings</h4>
+                  <p class="muted tiny" id="themeSettingsSub">Pick a visual theme unlocked by your account tier.</p>
+                </div>
+              </div>
+              <div id="themeStripsList" class="theme-strips-list"></div>
+            </div>
             <hr style="border-color:#3a2e4a;margin:20px 0">
             <div id="premiumSection">
               <h4>Account Tier &amp; Perks</h4>
@@ -842,6 +852,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=36"></script>
+  <script src="app.js?v=37"></script>
 </body>
 </html>
