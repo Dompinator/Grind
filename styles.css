@@ -624,19 +624,21 @@ label input:focus, label textarea:focus, label select:focus { outline: none; bor
 .theme-strip-banner {
   position: relative;
   width: 100%;
-  height: 50px;
+  height: 62px;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  padding: 8px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, .1);
+  padding: 9px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, .14);
   overflow: hidden;
+  background-size: cover;
+  background-position: center;
 }
 .theme-strip-banner::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .12) 0%, transparent 45%, rgba(0, 0, 0, .28) 100%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .14) 0%, transparent 45%, rgba(0, 0, 0, .38) 100%);
   pointer-events: none;
 }
 .theme-strip-banner[data-preview="default"] {
@@ -645,27 +647,27 @@ label input:focus, label textarea:focus, label select:focus { outline: none; bor
     linear-gradient(105deg, #0c0916 0%, #161222 32%, #5b21b6 70%, #c084fc 100%);
 }
 .theme-strip-banner[data-preview="gold-obsidian"] {
-  background:
-    radial-gradient(ellipse at 82% 20%, rgba(251, 191, 36, .34), transparent 55%),
-    linear-gradient(105deg, #08080b 0%, #121218 42%, #92400e 74%, #fbbf24 100%);
+  background-image:
+    linear-gradient(105deg, rgba(8, 8, 11, .45) 0%, rgba(18, 18, 24, .2) 55%, rgba(251, 191, 36, .28) 100%),
+    url('assets/textures/gold-obsidian.jpg');
+  background-size: cover;
+  background-position: center;
 }
 .theme-strip-banner[data-preview="sapphire-obsidian"] {
-  background:
-    repeating-linear-gradient(128deg, rgba(186, 230, 253, .055) 0px, rgba(186, 230, 253, .055) 1px, transparent 1px, transparent 5px),
-    repeating-linear-gradient(38deg, rgba(56, 189, 248, .04) 0px, rgba(56, 189, 248, .04) 1px, transparent 1px, transparent 9px),
-    radial-gradient(ellipse at 18% 0%, rgba(56, 189, 248, .42), transparent 52%),
-    radial-gradient(ellipse at 82% 100%, rgba(37, 99, 235, .45), transparent 55%),
-    linear-gradient(105deg, #060911 0%, #0f172a 38%, #1d4ed8 72%, #38bdf8 100%);
-  box-shadow: inset 0 1px 0 rgba(186, 230, 253, .28);
+  background-image:
+    linear-gradient(105deg, rgba(6, 9, 17, .35) 0%, rgba(15, 23, 42, .12) 52%, rgba(56, 189, 248, .3) 100%),
+    url('assets/textures/sapphire-obsidian.jpg');
+  background-size: cover;
+  background-position: center;
+  box-shadow: inset 0 1px 0 rgba(186, 230, 253, .36);
 }
 .theme-strip-banner[data-preview="gold-platinum"] {
-  background:
-    repeating-linear-gradient(102deg, rgba(255, 255, 255, .075) 0px, rgba(255, 255, 255, .075) 1px, transparent 1px, transparent 3px),
-    repeating-linear-gradient(12deg, rgba(243, 201, 105, .04) 0px, rgba(243, 201, 105, .04) 1px, transparent 1px, transparent 7px),
-    radial-gradient(ellipse at 72% 15%, rgba(254, 243, 199, .38), transparent 48%),
-    radial-gradient(ellipse at 26% 85%, rgba(226, 232, 240, .28), transparent 52%),
-    linear-gradient(105deg, #0e1015 0%, #262c3a 30%, #94a3b8 54%, #e2e8f0 70%, #f3c969 88%, #d97706 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .32);
+  background-image:
+    linear-gradient(105deg, rgba(12, 14, 19, .28) 0%, rgba(226, 232, 240, .14) 54%, rgba(243, 201, 105, .32) 100%),
+    url('assets/textures/gold-platinum.jpg');
+  background-size: cover;
+  background-position: center;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .42);
 }
 .theme-strip-swatches {
   position: relative;
@@ -675,30 +677,30 @@ label input:focus, label textarea:focus, label select:focus { outline: none; bor
   gap: 5px;
   padding: 4px 8px;
   border-radius: 999px;
-  background: rgba(8, 8, 12, .56);
-  border: 1px solid rgba(255, 255, 255, .16);
-  backdrop-filter: blur(6px);
+  background: rgba(8, 8, 12, .66);
+  border: 1px solid rgba(255, 255, 255, .18);
+  backdrop-filter: blur(8px);
 }
 .theme-strip-swatches span {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, .28);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .4);
+  border: 1px solid rgba(255, 255, 255, .32);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .45);
 }
 .theme-strip-tex-tag {
   position: relative;
   z-index: 1;
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: .6px;
+  letter-spacing: .7px;
   text-transform: uppercase;
-  padding: 3px 9px;
+  padding: 3px 10px;
   border-radius: 999px;
-  background: rgba(8, 8, 12, .58);
-  border: 1px solid rgba(255, 255, 255, .18);
-  color: rgba(255, 255, 255, .92);
-  backdrop-filter: blur(6px);
+  background: rgba(8, 8, 12, .68);
+  border: 1px solid rgba(255, 255, 255, .2);
+  color: rgba(255, 255, 255, .95);
+  backdrop-filter: blur(8px);
 }
 .theme-strip-body {
   display: flex;
@@ -767,126 +769,161 @@ label input:focus, label textarea:focus, label select:focus { outline: none; bor
   background: rgba(0, 0, 0, .25);
 }
 @media (max-width: 600px) {
-  .theme-strip-banner { height: 42px; padding: 7px 11px; }
+  .theme-strip-banner { height: 50px; padding: 7px 11px; }
   .theme-strip-body { flex-wrap: wrap; gap: 10px; }
 }
 
-/* ---------- Unlocked PRO & PREMIUM Themes (Sleeker polish + rich PREMIUM textures; Default untouched) ---------- */
+/* ---------- Unlocked PRO & PREMIUM Luxury Materials (Default untouched) ---------- */
+@keyframes grindLuxuryGlint {
+  0% { transform: translateX(-140%) skewX(-22deg); opacity: 0; }
+  20% { opacity: .65; }
+  45% { transform: translateX(220%) skewX(-22deg); opacity: 0; }
+  100% { transform: translateX(220%) skewX(-22deg); opacity: 0; }
+}
+
 body[data-theme="gold-obsidian"] {
   --bg: #08080b;
-  --panel: #121218;
-  --panel2: #1a1a22;
-  --surface-deep: #0d0d12;
-  --line: rgba(251, 191, 36, .22);
+  --panel: rgba(14, 14, 19, .82);
+  --panel2: rgba(26, 25, 34, .88);
+  --surface-deep: rgba(9, 9, 13, .82);
+  --line: rgba(251, 191, 36, .26);
   --text: #fafaf9;
-  --muted: #a1a1aa;
+  --muted: #b4b4be;
   --purple: #fbbf24;
   --purple-dark: #d97706;
   --accent-soft: rgba(251, 191, 36, .14);
-  --sidebar-grad: linear-gradient(180deg, #0d0d12 0%, #08080b 100%);
-  --topbar-bg: rgba(8, 8, 11, .84);
-  --hero-grad: linear-gradient(135deg, rgba(251, 191, 36, .12) 0%, #14141b 55%, #0c0c10 100%);
-  --orb-grad: linear-gradient(135deg, #fde68a 0%, #f59e0b 55%, #b45309 100%);
+  --sidebar-grad:
+    linear-gradient(180deg, rgba(10, 10, 14, .88) 0%, rgba(6, 6, 9, .92) 100%),
+    url('assets/textures/gold-obsidian.jpg') center/cover no-repeat;
+  --topbar-bg: rgba(8, 8, 12, .72);
+  --hero-grad:
+    linear-gradient(135deg, rgba(251, 191, 36, .12) 0%, rgba(12, 12, 17, .8) 55%, rgba(8, 8, 11, .9) 100%),
+    url('assets/textures/gold-obsidian.jpg') center/cover no-repeat;
+  --orb-grad: linear-gradient(135deg, #fef08a 0%, #f59e0b 55%, #92400e 100%);
   --orb-text: #1c1000;
   --btn-grad: linear-gradient(110deg, #fde68a 0%, #f59e0b 55%, #d97706 100%);
   --btn-text: #1c1000;
-  --btn-shadow: 0 4px 16px rgba(245, 158, 11, .24);
-  --modal-grad: linear-gradient(180deg, #16161d 0%, #0f0f14 100%);
-  --card-hover-shadow: 0 12px 30px rgba(0, 0, 0, .45), 0 0 0 1px rgba(251, 191, 36, .25);
+  --btn-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 4px 18px rgba(245, 158, 11, .26);
+  --modal-grad:
+    linear-gradient(180deg, rgba(16, 16, 22, .92) 0%, rgba(10, 10, 14, .96) 100%),
+    url('assets/textures/gold-obsidian.jpg') center/cover no-repeat;
+  --card-surface: rgba(12, 12, 17, .8);
+  --card-rim: inset 0 1px 0 rgba(251, 191, 36, .12), 0 10px 28px rgba(0, 0, 0, .45);
+  --card-hover-shadow: inset 0 1px 0 rgba(251, 191, 36, .28), 0 14px 32px rgba(0, 0, 0, .58), 0 0 0 1px rgba(251, 191, 36, .32);
+  background:
+    radial-gradient(ellipse at 78% 12%, rgba(251, 191, 36, .08), transparent 45%),
+    linear-gradient(180deg, rgba(6, 6, 9, .54) 0%, rgba(6, 6, 9, .72) 100%),
+    url('assets/textures/gold-obsidian.jpg') center/cover fixed no-repeat;
 }
 
 body[data-theme="sapphire-obsidian"] {
-  --bg: #060911;
-  --panel: #0e1523;
-  --panel2: #162136;
-  --surface-deep: #090e19;
-  --line: rgba(56, 189, 248, .24);
-  --text: #f0f7ff;
-  --muted: #94a3b8;
+  --bg: #050810;
+  --panel: rgba(8, 13, 24, .68);
+  --panel2: rgba(15, 24, 44, .78);
+  --surface-deep: rgba(6, 10, 19, .72);
+  --line: rgba(125, 211, 252, .26);
+  --text: #f3f8ff;
+  --muted: #a6bbd4;
   --purple: #38bdf8;
   --purple-dark: #2563eb;
-  --accent-soft: rgba(56, 189, 248, .15);
+  --accent-soft: rgba(56, 189, 248, .16);
   --sidebar-grad:
-    repeating-linear-gradient(132deg, rgba(56, 189, 248, .022) 0px, rgba(56, 189, 248, .022) 1px, transparent 1px, transparent 7px),
-    radial-gradient(ellipse at 20% 0%, rgba(56, 189, 248, .11), transparent 55%),
-    linear-gradient(180deg, #0b1120 0%, #060911 100%);
-  --topbar-bg: rgba(7, 11, 20, .82);
+    linear-gradient(180deg, rgba(7, 11, 20, .82) 0%, rgba(4, 7, 14, .88) 100%),
+    url('assets/textures/sapphire-obsidian.jpg') center/cover no-repeat;
+  --topbar-bg: rgba(5, 8, 16, .66);
   --hero-grad:
-    repeating-linear-gradient(128deg, rgba(186, 230, 253, .035) 0px, rgba(186, 230, 253, .035) 1px, transparent 1px, transparent 6px),
-    radial-gradient(ellipse at 86% 14%, rgba(56, 189, 248, .22), transparent 50%),
-    linear-gradient(135deg, rgba(37, 99, 235, .16) 0%, #0f172a 54%, #080d18 100%);
+    radial-gradient(ellipse at 86% 15%, rgba(56, 189, 248, .22), transparent 48%),
+    linear-gradient(135deg, rgba(12, 20, 38, .66) 0%, rgba(6, 10, 20, .8) 100%),
+    url('assets/textures/sapphire-obsidian.jpg') center/cover no-repeat;
   --orb-grad:
-    radial-gradient(circle at 30% 25%, rgba(255, 255, 255, .42), transparent 50%),
-    linear-gradient(135deg, #7dd3fc 0%, #0284c7 55%, #1e40af 100%);
+    radial-gradient(circle at 28% 24%, rgba(255, 255, 255, .55), transparent 46%),
+    linear-gradient(135deg, #bae6fd 0%, #38bdf8 34%, #1d4ed8 72%, #0f172a 100%);
   --orb-text: #ffffff;
-  --btn-grad: linear-gradient(110deg, #38bdf8 0%, #2563eb 100%);
+  --btn-grad: linear-gradient(112deg, #7dd3fc 0%, #38bdf8 35%, #2563eb 100%);
   --btn-text: #ffffff;
-  --btn-shadow: inset 0 1px 0 rgba(255, 255, 255, .28), 0 4px 16px rgba(56, 189, 248, .28);
+  --btn-shadow: inset 0 1px 0 rgba(255, 255, 255, .42), 0 6px 22px rgba(56, 189, 248, .34);
   --modal-grad:
-    repeating-linear-gradient(130deg, rgba(56, 189, 248, .025) 0px, rgba(56, 189, 248, .025) 1px, transparent 1px, transparent 7px),
-    linear-gradient(180deg, #11192b 0%, #090e19 100%);
+    linear-gradient(180deg, rgba(10, 16, 30, .86) 0%, rgba(6, 10, 19, .94) 100%),
+    url('assets/textures/sapphire-obsidian.jpg') center/cover no-repeat;
   --card-surface:
-    repeating-linear-gradient(130deg, rgba(186, 230, 253, .022) 0px, rgba(186, 230, 253, .022) 1px, transparent 1px, transparent 6px),
-    radial-gradient(ellipse at 100% 0%, rgba(56, 189, 248, .08), transparent 55%),
-    linear-gradient(165deg, rgba(22, 33, 54, .92) 0%, rgba(12, 18, 30, .96) 100%);
-  --card-rim: inset 0 1px 0 rgba(186, 230, 253, .13), 0 8px 24px rgba(0, 0, 0, .28);
-  --card-hover-shadow: inset 0 1px 0 rgba(186, 230, 253, .22), 0 14px 32px rgba(0, 0, 0, .48), 0 0 0 1px rgba(56, 189, 248, .28);
+    linear-gradient(160deg, rgba(16, 26, 48, .68) 0%, rgba(7, 11, 22, .76) 100%);
+  --card-rim:
+    inset 0 1px 0 rgba(186, 230, 253, .22),
+    inset 0 -1px 0 rgba(56, 189, 248, .1),
+    0 12px 32px rgba(0, 0, 0, .48);
+  --card-hover-shadow:
+    inset 0 1px 0 rgba(224, 242, 254, .36),
+    0 18px 40px rgba(0, 0, 0, .62),
+    0 0 24px rgba(56, 189, 248, .18);
   background:
-    repeating-linear-gradient(130deg, rgba(56, 189, 248, .016) 0px, rgba(56, 189, 248, .016) 1px, transparent 1px, transparent 8px),
-    radial-gradient(ellipse at 75% 8%, rgba(56, 189, 248, .12), transparent 46%),
-    radial-gradient(ellipse at 18% 92%, rgba(37, 99, 235, .1), transparent 50%),
-    #060911;
-  background-attachment: fixed;
+    radial-gradient(ellipse at 74% 12%, rgba(56, 189, 248, .12), transparent 48%),
+    linear-gradient(180deg, rgba(4, 7, 15, .34) 0%, rgba(4, 7, 15, .56) 100%),
+    url('assets/textures/sapphire-obsidian.jpg') center/cover fixed no-repeat;
 }
 
 body[data-theme="gold-platinum"] {
-  --bg: #0c0e13;
-  --panel: #161a23;
-  --panel2: #212634;
-  --surface-deep: #11141c;
-  --line: rgba(226, 232, 240, .24);
+  --bg: #0b0d12;
+  --panel: rgba(20, 23, 32, .68);
+  --panel2: rgba(33, 38, 52, .78);
+  --surface-deep: rgba(15, 18, 25, .72);
+  --line: rgba(226, 232, 240, .28);
   --text: #f8fafc;
-  --muted: #cbd5e1;
+  --muted: #d1d9e6;
   --purple: #f3c969;
   --purple-dark: #eab308;
-  --accent-soft: rgba(243, 201, 105, .15);
+  --accent-soft: rgba(243, 201, 105, .17);
   --sidebar-grad:
-    repeating-linear-gradient(102deg, rgba(255, 255, 255, .022) 0px, rgba(255, 255, 255, .022) 1px, transparent 1px, transparent 3px),
-    radial-gradient(ellipse at 50% 0%, rgba(226, 232, 240, .08), transparent 55%),
-    linear-gradient(180deg, #151922 0%, #0b0d12 100%);
-  --topbar-bg: rgba(14, 16, 22, .84);
+    linear-gradient(180deg, rgba(22, 26, 36, .8) 0%, rgba(11, 13, 19, .88) 100%),
+    url('assets/textures/gold-platinum.jpg') center/cover no-repeat;
+  --topbar-bg: rgba(14, 16, 23, .66);
   --hero-grad:
-    repeating-linear-gradient(102deg, rgba(255, 255, 255, .036) 0px, rgba(255, 255, 255, .036) 1px, transparent 1px, transparent 3px),
-    radial-gradient(ellipse at 85% 18%, rgba(243, 201, 105, .18), transparent 48%),
-    radial-gradient(ellipse at 15% 85%, rgba(226, 232, 240, .12), transparent 52%),
-    linear-gradient(135deg, #212633 0%, #151922 52%, #10131a 100%);
+    radial-gradient(ellipse at 85% 18%, rgba(243, 201, 105, .2), transparent 46%),
+    linear-gradient(135deg, rgba(28, 33, 46, .66) 0%, rgba(14, 17, 24, .78) 100%),
+    url('assets/textures/gold-platinum.jpg') center/cover no-repeat;
   --orb-grad:
-    repeating-linear-gradient(108deg, rgba(255, 255, 255, .18) 0px, rgba(255, 255, 255, .18) 1px, transparent 1px, transparent 3px),
-    linear-gradient(135deg, #ffffff 0%, #e2e8f0 34%, #f3c969 68%, #ca8a04 100%);
+    radial-gradient(circle at 30% 25%, rgba(255, 255, 255, .75), transparent 45%),
+    linear-gradient(135deg, #ffffff 0%, #e2e8f0 32%, #f3c969 68%, #b45309 100%);
   --orb-text: #171206;
-  --btn-grad:
-    repeating-linear-gradient(104deg, rgba(255, 255, 255, .14) 0px, rgba(255, 255, 255, .14) 1px, transparent 1px, transparent 3px),
-    linear-gradient(110deg, #fef3c7 0%, #eab308 48%, #e2e8f0 100%);
-  --btn-text: #171206;
-  --btn-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 4px 16px rgba(243, 201, 105, .24);
+  --btn-grad: linear-gradient(112deg, #fef9c3 0%, #f3c969 44%, #e2e8f0 100%);
+  --btn-text: #151105;
+  --btn-shadow: inset 0 1px 0 rgba(255, 255, 255, .65), 0 6px 22px rgba(243, 201, 105, .3);
   --modal-grad:
-    repeating-linear-gradient(102deg, rgba(255, 255, 255, .026) 0px, rgba(255, 255, 255, .026) 1px, transparent 1px, transparent 3px),
-    linear-gradient(180deg, #1d212e 0%, #11141c 100%);
+    linear-gradient(180deg, rgba(26, 30, 42, .86) 0%, rgba(14, 17, 25, .94) 100%),
+    url('assets/textures/gold-platinum.jpg') center/cover no-repeat;
   --card-surface:
-    repeating-linear-gradient(102deg, rgba(255, 255, 255, .024) 0px, rgba(255, 255, 255, .024) 1px, transparent 1px, transparent 3px),
-    radial-gradient(ellipse at 92% 0%, rgba(243, 201, 105, .08), transparent 48%),
-    linear-gradient(160deg, rgba(33, 38, 52, .92) 0%, rgba(20, 23, 32, .96) 100%);
-  --card-rim: inset 0 1px 0 rgba(248, 250, 252, .16), inset 0 -1px 0 rgba(243, 201, 105, .08), 0 8px 24px rgba(0, 0, 0, .28);
-  --card-hover-shadow: inset 0 1px 0 rgba(248, 250, 252, .24), 0 14px 32px rgba(0, 0, 0, .44), 0 0 0 1px rgba(243, 201, 105, .3);
+    linear-gradient(158deg, rgba(36, 41, 56, .66) 0%, rgba(16, 19, 28, .76) 100%);
+  --card-rim:
+    inset 0 1px 0 rgba(255, 255, 255, .25),
+    inset 0 -1px 0 rgba(243, 201, 105, .14),
+    0 12px 32px rgba(0, 0, 0, .46);
+  --card-hover-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .38),
+    inset 0 -1px 0 rgba(243, 201, 105, .24),
+    0 18px 40px rgba(0, 0, 0, .6),
+    0 0 24px rgba(243, 201, 105, .16);
   background:
-    repeating-linear-gradient(102deg, rgba(255, 255, 255, .016) 0px, rgba(255, 255, 255, .016) 1px, transparent 1px, transparent 4px),
-    radial-gradient(ellipse at 80% 10%, rgba(243, 201, 105, .09), transparent 45%),
-    radial-gradient(ellipse at 22% 85%, rgba(226, 232, 240, .07), transparent 50%),
-    #0c0e13;
-  background-attachment: fixed;
+    radial-gradient(ellipse at 78% 12%, rgba(243, 201, 105, .1), transparent 46%),
+    linear-gradient(180deg, rgba(10, 12, 18, .32) 0%, rgba(10, 12, 18, .54) 100%),
+    url('assets/textures/gold-platinum.jpg') center/cover fixed no-repeat;
 }
 
-/* Smooth tactile surfaces for PREMIUM textured themes */
+/* Smoked Glass & Chamfered Luxury Surfaces for PRO + PREMIUM */
+body[data-theme="gold-obsidian"] .coin-card,
+body[data-theme="gold-obsidian"] .form-card,
+body[data-theme="gold-obsidian"] .portfolio-summary > div,
+body[data-theme="gold-obsidian"] .holding,
+body[data-theme="gold-obsidian"] .lb-row,
+body[data-theme="gold-obsidian"] .chart-wrap,
+body[data-theme="gold-obsidian"] .trade-panel,
+body[data-theme="gold-obsidian"] .coin-leaderboard,
+body[data-theme="gold-obsidian"] .coin-comments-card,
+body[data-theme="gold-obsidian"] .request-card,
+body[data-theme="gold-obsidian"] .report-card,
+body[data-theme="gold-obsidian"] .user-notif-card,
+body[data-theme="gold-obsidian"] .live-row,
+body[data-theme="gold-obsidian"] .grindbot-shell,
+body[data-theme="gold-obsidian"] .pass-tier-card,
+body[data-theme="gold-obsidian"] .personal-pnl-bar,
 body[data-theme="sapphire-obsidian"] .coin-card,
 body[data-theme="sapphire-obsidian"] .form-card,
 body[data-theme="sapphire-obsidian"] .portfolio-summary > div,
@@ -921,7 +958,65 @@ body[data-theme="gold-platinum"] .pass-tier-card,
 body[data-theme="gold-platinum"] .personal-pnl-bar {
   background: var(--card-surface);
   box-shadow: var(--card-rim);
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
+}
+
+/* ULTRA-LUXURY PREMIUM-ONLY specular glint & signature accents */
+body[data-theme="sapphire-obsidian"] .hero-panel,
+body[data-theme="sapphire-obsidian"] .featured-panel,
+body[data-theme="sapphire-obsidian"] .pass-hero-card,
+body[data-theme="gold-platinum"] .hero-panel,
+body[data-theme="gold-platinum"] .featured-panel,
+body[data-theme="gold-platinum"] .pass-hero-card {
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--card-rim);
+}
+body[data-theme="sapphire-obsidian"] .hero-panel::before,
+body[data-theme="sapphire-obsidian"] .pass-hero-card::before,
+body[data-theme="gold-platinum"] .hero-panel::before,
+body[data-theme="gold-platinum"] .pass-hero-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 42%;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, .1) 50%, transparent 100%);
+  pointer-events: none;
+  animation: grindLuxuryGlint 8s ease-in-out infinite;
+}
+body[data-theme="sapphire-obsidian"] .eyebrow,
+body[data-theme="gold-platinum"] .eyebrow {
+  letter-spacing: 2.6px;
+}
+body[data-theme="sapphire-obsidian"] .topbar,
+body[data-theme="gold-platinum"] .topbar {
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .08);
+}
+body[data-theme="sapphire-obsidian"] .cash-pill {
+  border-color: rgba(56, 189, 248, .48);
+  box-shadow: inset 0 1px 0 rgba(186, 230, 253, .28), 0 0 22px rgba(56, 189, 248, .18);
+}
+body[data-theme="gold-platinum"] .cash-pill {
+  border-color: rgba(243, 201, 105, .48);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .32), 0 0 22px rgba(243, 201, 105, .18);
+}
+body[data-theme="sapphire-obsidian"] .mini-profile,
+body[data-theme="gold-platinum"] .mini-profile {
+  padding: 10px 11px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .04);
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14);
+}
+body[data-theme="sapphire-obsidian"] .hero-orb {
+  box-shadow: inset 0 2px 6px rgba(255, 255, 255, .45), 0 0 36px rgba(56, 189, 248, .35);
+}
+body[data-theme="gold-platinum"] .hero-orb {
+  box-shadow: inset 0 2px 6px rgba(255, 255, 255, .6), 0 0 36px rgba(243, 201, 105, .32);
 }
 
 /* Shared sleek surface & typography refinement for unlocked themes */
@@ -934,6 +1029,7 @@ body[data-theme="gold-obsidian"] .sidebar,
 body[data-theme="sapphire-obsidian"] .sidebar,
 body[data-theme="gold-platinum"] .sidebar {
   background: var(--sidebar-grad);
+  backdrop-filter: blur(18px);
 }
 body[data-theme="gold-obsidian"] .topbar,
 body[data-theme="sapphire-obsidian"] .topbar,
@@ -1034,7 +1130,6 @@ body[data-theme="sapphire-obsidian"] .hero-orb,
 body[data-theme="gold-platinum"] .hero-orb {
   background: var(--orb-grad);
   color: var(--orb-text);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, .45);
   font-weight: 700;
 }
 body[data-theme="gold-obsidian"] .coin-card:hover,
@@ -1142,6 +1237,7 @@ body[data-theme="gold-obsidian"] .modal-card,
 body[data-theme="sapphire-obsidian"] .modal-card,
 body[data-theme="gold-platinum"] .modal-card {
   background: var(--modal-grad);
+  backdrop-filter: blur(18px);
 }
 body[data-theme="gold-obsidian"] .pass-side-btn,
 body[data-theme="sapphire-obsidian"] .pass-side-btn,
@@ -1173,6 +1269,7 @@ body[data-theme="gold-platinum"] .toast {
   background: var(--panel2);
   border-color: var(--purple);
   color: var(--text);
+  backdrop-filter: blur(16px);
 }
 body[data-theme="gold-obsidian"] hr,
 body[data-theme="sapphire-obsidian"] hr,

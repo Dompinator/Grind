@@ -3941,8 +3941,8 @@ const GRIND_THEMES = [
     name: 'Gold & Obsidian',
     reqTier: 'pro',
     tierBadge: 'PRO',
-    textureLabel: 'Obsidian Matte',
-    desc: 'Obsidian dark surfaces with warm brushed gold accents.',
+    textureLabel: 'Volcanic Obsidian',
+    desc: 'Matte volcanic obsidian stone with 24k gold veining.',
     colors: ['#08080b', '#121218', '#fbbf24', '#d97706']
   },
   {
@@ -3950,18 +3950,18 @@ const GRIND_THEMES = [
     name: 'Sapphire & Obsidian',
     reqTier: 'premium',
     tierBadge: 'PREMIUM',
-    textureLabel: 'Liquid-Silk Weave',
-    desc: 'Silky obsidian crystal weave with frosted sapphire highlights.',
-    colors: ['#060911', '#0e1523', '#38bdf8', '#2563eb']
+    textureLabel: 'Crystal Obsidian',
+    desc: 'Polished volcanic obsidian crystal with royal sapphire veins & smoked glass.',
+    colors: ['#050810', '#0e1523', '#38bdf8', '#2563eb']
   },
   {
     id: 'gold-platinum',
     name: 'Gold & Platinum',
     reqTier: 'premium',
     tierBadge: 'PREMIUM',
-    textureLabel: 'Brushed Metallic',
-    desc: 'Machined brushed-platinum grain with champagne gold trim.',
-    colors: ['#0c0e13', '#212634', '#e2e8f0', '#f3c969']
+    textureLabel: 'Brushed Platinum',
+    desc: 'Machined dark brushed platinum metal plate with 24k champagne gold gleam.',
+    colors: ['#0b0d12', '#212634', '#e2e8f0', '#f3c969']
   }
 ];
 
