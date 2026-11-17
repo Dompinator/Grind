@@ -40,20 +40,27 @@ repository. The browser re-encodes uploads with a maximum dimension of 340 px.
 
 ## 4. Remove old uploaded video payloads (optional, destructive to PLAY videos)
 
+Before applying the cleanup, you can inspect the number of legacy
+uploaded-video rows with this query in the Supabase SQL Editor:
+
+```sql
+SELECT count(*) AS uploaded_play_video_rows
+FROM public.premium_requests
+WHERE left(reason, 13) = '__PLAY_VID__:'
+  AND position('"kind":"video"' in reason) > 0;
+```
+
 The migration file
 `supabase/migrations/20261117000100_remove_legacy_play_video_payloads.sql`
-contains a count query followed by a narrowly scoped DELETE.
-
-Review the count first. Only run the DELETE if the count matches the uploaded
-PLAY videos you intend to discard. It deletes rows whose reason starts with
-`__PLAY_VID__:` and whose JSON `kind` is `video`.
+contains only the narrowly scoped DELETE. It deletes rows with that exact
+PLAY video prefix and serialized `"kind":"video"` marker.
 
 It does **not** delete premium requests, scene-based PLAY shorts, PLAY votes,
 comments, view records, donations, follows, user profiles, accounts, coins,
 trades, or any other table rows.
 
-The deletion is irreversible unless you have a database backup. Do not run
-the DELETE until the new Edge Function has been deployed and tested.
+The deletion is irreversible unless you have a database backup. Apply the
+migration only after the new Edge Function has been deployed and tested.
 
 ## Important
 
