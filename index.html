@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=50">
+  <link rel="stylesheet" href="styles.css?v=51">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -55,6 +55,7 @@
           <button class="nav-btn" data-page="money"><span>▣</span> Money</button>
           <button class="nav-btn" data-page="global"><span>⊕</span> Global</button>
           <button class="nav-btn" data-page="play"><span>▶</span> Play</button>
+          <button type="button" class="nav-btn" id="navUploadBtn"><span>⇪</span> UPLOAD</button>
           <button class="nav-btn" id="navGrindBot" data-page="grindbot"><span>⌘</span> GRIND-BOT <span id="navGrindBotTag" class="nav-tier-chip">PRO+</span></button>
           <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
           <button class="nav-btn" data-page="report"><span>△</span> Report</button>
@@ -256,7 +257,6 @@
               <div class="play-topbar-right">
                 <button type="button" class="zoom-btn" id="playRefreshBtn" title="Refresh feed">↻</button>
                 <button type="button" class="zoom-btn" id="playMuteAllBtn">🔊 Sound On</button>
-                <button type="button" class="primary-btn play-upload-btn" id="playUploadOpenBtn">＋ Upload</button>
               </div>
             </header>
 
@@ -1252,6 +1252,17 @@
 
         <div class="play-editor-tools-col">
           <div class="play-tool-block">
+            <div class="eyebrow purple-text" style="margin-bottom:8px;">ASPECT RATIO</div>
+            <div class="play-aspect-group" id="playAspectRatioGroup">
+              <button type="button" class="play-aspect-btn active" data-aspect="9:16">9:16</button>
+              <button type="button" class="play-aspect-btn" data-aspect="4:5">4:5</button>
+              <button type="button" class="play-aspect-btn" data-aspect="1:1">1:1</button>
+              <button type="button" class="play-aspect-btn" data-aspect="4:3">4:3</button>
+              <button type="button" class="play-aspect-btn" data-aspect="16:9">16:9</button>
+            </div>
+          </div>
+
+          <div class="play-tool-block">
             <div class="eyebrow purple-text" style="margin-bottom:8px;">BACKGROUND COLOR</div>
             <div class="play-bg-swatches" id="playBgSwatches">
               <button type="button" class="play-bg-swatch active" data-bg="#161222" style="background:#161222" title="Obsidian"></button>
@@ -1355,6 +1366,6 @@
   <div id="rewardBurstLayer" class="reward-burst-layer" aria-hidden="true"></div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=51"></script>
+  <script src="app.js?v=52"></script>
 </body>
 </html>

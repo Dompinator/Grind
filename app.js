@@ -1567,7 +1567,14 @@ function showPage(page) {
   if (typeof syncPremiumAmbientMusic === 'function') syncPremiumAmbientMusic();
   if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
 }
-$$('.nav-btn').forEach(b => b.addEventListener('click', () => showPage(b.dataset.page)));
+$$('.nav-btn').forEach(b => b.addEventListener('click', () => {
+  if (!b.dataset.page) return;
+  showPage(b.dataset.page);
+}));
+$('#navUploadBtn')?.addEventListener('click', () => {
+  if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
+  openPlayUploadChoiceModal();
+});
 $$('[data-goto]').forEach(b => b.addEventListener('click', () => showPage(b.dataset.goto)));
 $$('.feed-tab').forEach(b => {
   if (b.dataset.feed) {
@@ -4898,9 +4905,33 @@ async function loadMusicList(force = false) {
   return items;
 }
 
+const PLAY_ASPECT_RATIOS = {
+  '9:16': 9 / 16,
+  '4:5': 4 / 5,
+  '1:1': 1,
+  '4:3': 4 / 3,
+  '16:9': 16 / 9
+};
+
+function parsePlayAspectRatio(val, fallback = 9 / 16) {
+  if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+    return Math.min(2.6, Math.max(0.35, val));
+  }
+  const s = String(val || '').trim();
+  if (PLAY_ASPECT_RATIOS[s]) return PLAY_ASPECT_RATIOS[s];
+  if (s.includes(':')) {
+    const [w, h] = s.split(':').map(Number);
+    if (w > 0 && h > 0) return Math.min(2.6, Math.max(0.35, w / h));
+  }
+  const n = Number(s);
+  if (Number.isFinite(n) && n > 0) return Math.min(2.6, Math.max(0.35, n));
+  return fallback;
+}
+
 const PLAY_LIKE_PAYOUT = 0.50;
 const playState = {
   videos: [],
+  adsList: [],
   videosById: new Map(),
   votesByVideo: new Map(),      // videoId -> Map(userId -> 'like'|'dislike'|'none')
   uniqueLikersByVideo: new Map(), // videoId -> Set(userId !== creator)
@@ -4963,6 +4994,7 @@ async function loadPlayData(force = false) {
             kind: p.kind === 'video' ? 'video' : 'scene',
             title: String(p.title || '').slice(0, 80),
             bgColor: String(p.bgColor || '#161222'),
+            aspectRatio: p.aspectRatio || (p.videoWidth && p.videoHeight ? (Number(p.videoWidth) / Number(p.videoHeight)) : '9:16'),
             elements: Array.isArray(p.elements) ? p.elements.slice(0, 30) : [],
             videoUrl: typeof p.videoUrl === 'string' && (p.videoUrl.startsWith('data:video/') || p.videoUrl.startsWith('https://')) ? p.videoUrl : '',
             musicName: String(p.musicName || ''),
@@ -5205,39 +5237,63 @@ function renderPlaySceneElementsHtml(elements = []) {
   }).join('');
 }
 
-function buildPlayDeck(videos, adsList, focusVideoId = null) {
+function getTotalPlayPoolCount() {
+  return (playState.videos?.length || 0) + (playState.adsList?.length || 0);
+}
+
+function pickNextRandomPlayItem(lastUniqueKey = '') {
+  const videos = playState.videos || [];
+  const ads = playState.adsList || [];
+  const totalUnique = videos.length + ads.length;
+  if (totalUnique === 0) return null;
+
+  if (totalUnique === 1) {
+    if (lastUniqueKey) return null;
+    if (videos.length === 1) {
+      return { slideType: 'video', uniqueKey: 'vid:' + videos[0].id, id: videos[0].id, video: videos[0] };
+    }
+    return { slideType: 'ad', uniqueKey: 'ad:' + ads[0].name, id: 'ad_' + ads[0].name, ad: ads[0] };
+  }
+
+  const availVideos = videos.filter(v => ('vid:' + v.id) !== lastUniqueKey);
+  const availAds = ads.filter(a => ('ad:' + a.name) !== lastUniqueKey);
+
+  let pickAd = false;
+  if (availVideos.length > 0 && availAds.length > 0) {
+    pickAd = Math.random() < 0.22;
+  } else if (availVideos.length === 0) {
+    pickAd = true;
+  }
+
+  if (pickAd && availAds.length > 0) {
+    const ad = availAds[Math.floor(Math.random() * availAds.length)];
+    return { slideType: 'ad', uniqueKey: 'ad:' + ad.name, id: 'ad_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6), ad };
+  }
+  const pool = availVideos.length ? availVideos : videos;
+  const vid = pool[Math.floor(Math.random() * pool.length)];
+  return { slideType: 'video', uniqueKey: 'vid:' + vid.id, id: vid.id, video: vid };
+}
+
+function buildInitialPlayDeck(videos, adsList, focusVideoId = null, batchSize = 10) {
+  playState.adsList = Array.isArray(adsList) ? adsList : [];
   const deck = [];
-  const cleanVideos = [...(videos || [])];
+  let lastKey = '';
+
   if (focusVideoId) {
-    const idx = cleanVideos.findIndex(v => v.id === String(focusVideoId));
-    if (idx > 0) {
-      const [chosen] = cleanVideos.splice(idx, 1);
-      cleanVideos.unshift(chosen);
+    const focused = (videos || []).find(v => v.id === String(focusVideoId));
+    if (focused) {
+      lastKey = 'vid:' + focused.id;
+      deck.push({ slideType: 'video', uniqueKey: lastKey, id: focused.id, video: focused });
     }
   }
 
-  const ads = [...(adsList || [])];
-  for (let i = ads.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [ads[i], ads[j]] = [ads[j], ads[i]];
+  const targetLen = getTotalPlayPoolCount() <= 1 ? 1 : batchSize;
+  while (deck.length < targetLen) {
+    const next = pickNextRandomPlayItem(lastKey);
+    if (!next) break;
+    lastKey = next.uniqueKey;
+    deck.push(next);
   }
-
-  if (!cleanVideos.length) {
-    ads.forEach((ad, i) => deck.push({ slideType: 'ad', id: `ad_${i}_${ad.name}`, ad }));
-    return deck;
-  }
-
-  let adCursor = 0;
-  let nextAdAt = 2 + Math.floor(Math.random() * 2); // appear randomly every 2-3 videos
-  cleanVideos.forEach((vid, idx) => {
-    deck.push({ slideType: 'video', id: vid.id, video: vid });
-    if (ads.length && (idx + 1) === nextAdAt) {
-      const ad = ads[adCursor % ads.length];
-      adCursor += 1;
-      deck.push({ slideType: 'ad', id: `ad_${idx}_${ad.name}`, ad });
-      nextAdAt += 2 + Math.floor(Math.random() * 3);
-    }
-  });
   return deck;
 }
 
@@ -5291,6 +5347,11 @@ function activatePlaySlide(index) {
     playState.activeAudio = audio;
     audio.play().catch(() => {});
   }
+
+  // Continuously extend infinite random stream before reaching the end
+  if (index >= playState.deck.length - 4 && getTotalPlayPoolCount() >= 2) {
+    appendRandomPlaySlides(6);
+  }
 }
 
 function toggleActiveSlidePause(slideEl) {
@@ -5311,107 +5372,116 @@ function toggleActiveSlidePause(slideEl) {
   }
 }
 
-function renderPlayFeed(focusVideoId = null) {
-  const track = $('#playFeedTrack');
-  if (!track) return;
-
-  stopActivePlayMedia();
-  if (playState.observer) {
-    try { playState.observer.disconnect(); } catch (e) {}
-    playState.observer = null;
-  }
-  playState.activeSlideIndex = -1;
-
-  if (!playState.deck.length) {
-    track.innerHTML = `
-      <div class="play-empty-slide">
-        <div class="empty-icon">▶</div>
-        <h3>No Play Videos Yet</h3>
-        <p class="muted" style="max-width:340px;">Be the first to Create a Short or Upload a video! Every like you receive from other traders earns you <strong>$0.50</strong>.</p>
-        <button type="button" class="primary-btn" id="playEmptyUploadBtn">＋ Create or Upload Short</button>
-      </div>`;
-    $('#playEmptyUploadBtn')?.addEventListener('click', openPlayUploadChoiceModal);
-    return;
-  }
-
-  track.innerHTML = playState.deck.map((item, idx) => {
-    if (item.slideType === 'ad') {
-      const ad = item.ad;
-      return `
-        <article class="play-slide play-slide-ad" data-slide-idx="${idx}">
-          <div class="play-phone-frame">
-            <div class="play-media-surface" data-play-tap="${idx}">
-              ${ad.type === 'video'
-                ? `<video class="play-media-video" src="${escapeHtml(ad.url)}" playsinline loop preload="metadata" data-fallback-src="${escapeHtml(ad.fallbackUrl || '')}"></video>`
-                : `<img class="play-media-img" src="${escapeHtml(ad.url)}" alt="${escapeHtml(ad.name)}" data-fallback-src="${escapeHtml(ad.fallbackUrl || '')}">`}
-              <div class="play-pause-badge hidden">❚❚</div>
-              <div class="play-scrim-bottom"></div>
-              <div class="play-meta-bottom">
-                <span class="play-ad-pill">SPONSORED · AD</span>
-                <div class="play-video-title">${escapeHtml(cleanMediaDisplayName(ad.name))}</div>
-                <div class="muted tiny">Scroll up or down anytime to keep browsing Play.</div>
-              </div>
-            </div>
-          </div>
-        </article>`;
-    }
-
-    const v = item.video;
-    const sum = getPlayVoteSummary(v.id);
-    const prof = v.profile || { id: v.user_id, username: 'Trader' };
-    const uname = prof.username || 'Trader';
-    const equippedTid = typeof getUserEquippedTitleId === 'function' ? getUserEquippedTitleId(v.user_id) : null;
-    const titleHtml = equippedTid && typeof renderTitleBadgeHtml === 'function' ? renderTitleBadgeHtml(equippedTid, true) : '';
-    const canDel = currentUser && (String(currentUser.id) === String(v.user_id) || isDompinator());
-
+function createPlaySlideHtml(item, idx) {
+  if (item.slideType === 'ad') {
+    const ad = item.ad;
+    const initAr = ad.type === 'video' ? 16 / 9 : 1;
     return `
-      <article class="play-slide" data-slide-idx="${idx}" data-video-id="${escapeHtml(v.id)}">
+      <article class="play-slide play-slide-ad" data-slide-idx="${idx}">
         <div class="play-phone-frame">
-          <div class="play-media-surface" data-play-tap="${idx}" style="background:${v.kind === 'scene' ? escapeHtml(v.bgColor) : '#090710'};">
-            ${v.kind === 'video'
-              ? `<video class="play-media-video" src="${escapeHtml(v.videoUrl)}" playsinline loop preload="metadata"></video>`
-              : `<div class="play-scene-layer">${renderPlaySceneElementsHtml(v.elements)}</div>`}
+          <div class="play-media-surface" data-play-tap="${idx}" style="--play-ar-num:${initAr.toFixed(4)};aspect-ratio:${initAr.toFixed(4)};">
+            ${ad.type === 'video'
+              ? `<video class="play-media-video" src="${escapeHtml(ad.url)}" playsinline loop preload="metadata" data-fallback-src="${escapeHtml(ad.fallbackUrl || '')}"></video>`
+              : `<img class="play-media-img" src="${escapeHtml(ad.url)}" alt="${escapeHtml(ad.name)}" data-fallback-src="${escapeHtml(ad.fallbackUrl || '')}">`}
             <div class="play-pause-badge hidden">❚❚</div>
             <div class="play-scrim-bottom"></div>
             <div class="play-meta-bottom">
-              <div class="play-creator-row" data-play-profile="${escapeHtml(v.user_id)}">
-                <div class="avatar play-creator-av">${prof.avatar_url ? `<img src="${escapeHtml(prof.avatar_url)}">` : escapeHtml(uname[0].toUpperCase())}</div>
-                <div class="play-creator-meta">
-                  <div class="play-creator-name">${escapeHtml(uname)}${tierBadgeHtml(prof)}</div>
-                  ${titleHtml ? `<div class="play-creator-title">${titleHtml}</div>` : ''}
-                </div>
-              </div>
-              ${v.title ? `<div class="play-video-title">${escapeHtml(v.title)}</div>` : ''}
-              ${v.musicName ? `<div class="play-music-chip">♫ ${escapeHtml(cleanMediaDisplayName(v.musicName))}</div>` : ''}
+              <span class="play-ad-pill">SPONSORED · AD</span>
+              <div class="play-video-title">${escapeHtml(cleanMediaDisplayName(ad.name))}</div>
+              <div class="muted tiny">Scroll up or down anytime to keep browsing Play.</div>
             </div>
-          </div>
-
-          <div class="play-action-rail">
-            <button type="button" class="play-rail-btn ${sum.myVote === 'like' ? 'is-liked' : ''}" data-play-vote="like" data-vid="${escapeHtml(v.id)}" title="Like ($0.50 to creator)">
-              <span class="play-rail-icon">♥</span>
-              <span class="play-rail-count">${sum.likes}</span>
-            </button>
-            <button type="button" class="play-rail-btn ${sum.myVote === 'dislike' ? 'is-disliked' : ''}" data-play-vote="dislike" data-vid="${escapeHtml(v.id)}" title="Dislike">
-              <span class="play-rail-icon">👎</span>
-              <span class="play-rail-count">${sum.dislikes}</span>
-            </button>
-            <button type="button" class="play-rail-btn" data-play-comment="${escapeHtml(v.id)}" title="Comments">
-              <span class="play-rail-icon">💬</span>
-              <span class="play-rail-count">${sum.commentsCount}</span>
-            </button>
-            ${canDel ? `
-              <button type="button" class="play-rail-btn is-danger" data-play-delete="${escapeHtml(v.id)}" title="Delete video">
-                <span class="play-rail-icon">🗑</span>
-                <span class="play-rail-count">Del</span>
-              </button>
-            ` : ''}
           </div>
         </div>
       </article>`;
-  }).join('');
+  }
 
-  // Wire image/video GitHub raw fallbacks for ads
-  $$('#playFeedTrack [data-fallback-src]').forEach(el => {
+  const v = item.video;
+  const sum = getPlayVoteSummary(v.id);
+  const prof = v.profile || { id: v.user_id, username: 'Trader' };
+  const uname = prof.username || 'Trader';
+  const equippedTid = typeof getUserEquippedTitleId === 'function' ? getUserEquippedTitleId(v.user_id) : null;
+  const titleHtml = equippedTid && typeof renderTitleBadgeHtml === 'function' ? renderTitleBadgeHtml(equippedTid, true) : '';
+  const canDel = currentUser && (String(currentUser.id) === String(v.user_id) || isDompinator());
+  const arNum = parsePlayAspectRatio(v.aspectRatio, 9 / 16);
+
+  return `
+    <article class="play-slide" data-slide-idx="${idx}" data-video-id="${escapeHtml(v.id)}">
+      <div class="play-phone-frame">
+        <div class="play-media-surface" data-play-tap="${idx}" style="--play-ar-num:${arNum.toFixed(4)};aspect-ratio:${arNum.toFixed(4)};background:${v.kind === 'scene' ? escapeHtml(v.bgColor) : '#090710'};">
+          ${v.kind === 'video'
+            ? `<video class="play-media-video" src="${escapeHtml(v.videoUrl)}" playsinline loop preload="metadata"></video>`
+            : `<div class="play-scene-layer">${renderPlaySceneElementsHtml(v.elements)}</div>`}
+          <div class="play-pause-badge hidden">❚❚</div>
+          <div class="play-scrim-bottom"></div>
+          <div class="play-meta-bottom">
+            <div class="play-creator-row" data-play-profile="${escapeHtml(v.user_id)}">
+              <div class="avatar play-creator-av">${prof.avatar_url ? `<img src="${escapeHtml(prof.avatar_url)}">` : escapeHtml(uname[0].toUpperCase())}</div>
+              <div class="play-creator-meta">
+                <div class="play-creator-name">${escapeHtml(uname)}${tierBadgeHtml(prof)}</div>
+                ${titleHtml ? `<div class="play-creator-title">${titleHtml}</div>` : ''}
+              </div>
+            </div>
+            ${v.title ? `<div class="play-video-title">${escapeHtml(v.title)}</div>` : ''}
+            ${v.musicName ? `<div class="play-music-chip">♫ ${escapeHtml(cleanMediaDisplayName(v.musicName))}</div>` : ''}
+          </div>
+        </div>
+
+        <div class="play-action-rail">
+          <button type="button" class="play-rail-btn ${sum.myVote === 'like' ? 'is-liked' : ''}" data-play-vote="like" data-vid="${escapeHtml(v.id)}" title="Like ($0.50 to creator)">
+            <span class="play-rail-icon">♥</span>
+            <span class="play-rail-count">${sum.likes}</span>
+          </button>
+          <button type="button" class="play-rail-btn ${sum.myVote === 'dislike' ? 'is-disliked' : ''}" data-play-vote="dislike" data-vid="${escapeHtml(v.id)}" title="Dislike">
+            <span class="play-rail-icon">👎</span>
+            <span class="play-rail-count">${sum.dislikes}</span>
+          </button>
+          <button type="button" class="play-rail-btn" data-play-comment="${escapeHtml(v.id)}" title="Comments">
+            <span class="play-rail-icon">💬</span>
+            <span class="play-rail-count">${sum.commentsCount}</span>
+          </button>
+          ${canDel ? `
+            <button type="button" class="play-rail-btn is-danger" data-play-delete="${escapeHtml(v.id)}" title="Delete video">
+              <span class="play-rail-icon">🗑</span>
+              <span class="play-rail-count">Del</span>
+            </button>
+          ` : ''}
+        </div>
+      </div>
+    </article>`;
+}
+
+function wirePlaySlideInteractions(slideEl) {
+  if (!slideEl) return;
+
+  // Dynamic video/img file aspect ratio detection
+  const surface = slideEl.querySelector('.play-media-surface');
+  const vidEl = slideEl.querySelector('video.play-media-video');
+  const imgEl = slideEl.querySelector('img.play-media-img');
+  if (vidEl && surface) {
+    const applyVidAr = () => {
+      if (vidEl.videoWidth > 0 && vidEl.videoHeight > 0) {
+        const ar = Math.min(2.6, Math.max(0.35, vidEl.videoWidth / vidEl.videoHeight));
+        surface.style.setProperty('--play-ar-num', ar.toFixed(4));
+        surface.style.aspectRatio = ar.toFixed(4);
+      }
+    };
+    if (vidEl.readyState >= 1) applyVidAr();
+    vidEl.addEventListener('loadedmetadata', applyVidAr);
+  }
+  if (imgEl && surface) {
+    const applyImgAr = () => {
+      if (imgEl.naturalWidth > 0 && imgEl.naturalHeight > 0) {
+        const ar = Math.min(2.6, Math.max(0.35, imgEl.naturalWidth / imgEl.naturalHeight));
+        surface.style.setProperty('--play-ar-num', ar.toFixed(4));
+        surface.style.aspectRatio = ar.toFixed(4);
+      }
+    };
+    if (imgEl.complete) applyImgAr();
+    imgEl.addEventListener('load', applyImgAr);
+  }
+
+  // Fallback URL for ads
+  slideEl.querySelectorAll('[data-fallback-src]').forEach(el => {
     const fb = el.dataset.fallbackSrc;
     if (!fb) return;
     el.addEventListener('error', () => {
@@ -5423,15 +5493,15 @@ function renderPlayFeed(focusVideoId = null) {
   });
 
   // Tap to pause/play
-  $$('#playFeedTrack [data-play-tap]').forEach(el => {
+  slideEl.querySelectorAll('[data-play-tap]').forEach(el => {
     el.addEventListener('click', e => {
       if (e.target.closest('[data-play-profile]')) return;
-      toggleActiveSlidePause(el.closest('.play-slide'));
+      toggleActiveSlidePause(slideEl);
     });
   });
 
   // Creator profile click
-  $$('#playFeedTrack [data-play-profile]').forEach(el => {
+  slideEl.querySelectorAll('[data-play-profile]').forEach(el => {
     el.addEventListener('click', e => {
       e.stopPropagation();
       openProfileModal(el.dataset.playProfile);
@@ -5439,7 +5509,7 @@ function renderPlayFeed(focusVideoId = null) {
   });
 
   // Vote buttons
-  $$('#playFeedTrack [data-play-vote]').forEach(btn => {
+  slideEl.querySelectorAll('[data-play-vote]').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       handlePlayVote(btn.dataset.vid, btn.dataset.playVote);
@@ -5447,7 +5517,7 @@ function renderPlayFeed(focusVideoId = null) {
   });
 
   // Comment drawer buttons
-  $$('#playFeedTrack [data-play-comment]').forEach(btn => {
+  slideEl.querySelectorAll('[data-play-comment]').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       openPlayCommentsDrawer(btn.dataset.playComment);
@@ -5455,7 +5525,7 @@ function renderPlayFeed(focusVideoId = null) {
   });
 
   // Delete video buttons
-  $$('#playFeedTrack [data-play-delete]').forEach(btn => {
+  slideEl.querySelectorAll('[data-play-delete]').forEach(btn => {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
       const vidId = btn.dataset.playDelete;
@@ -5474,6 +5544,55 @@ function renderPlayFeed(focusVideoId = null) {
       await deletePlayVideo(vidId);
     });
   });
+}
+
+function appendRandomPlaySlides(count = 6) {
+  const track = $('#playFeedTrack');
+  if (!track || getTotalPlayPoolCount() < 2) return;
+  let lastKey = playState.deck.length ? playState.deck[playState.deck.length - 1].uniqueKey : '';
+  const startIdx = playState.deck.length;
+  const newItems = [];
+  for (let i = 0; i < count; i++) {
+    const next = pickNextRandomPlayItem(lastKey);
+    if (!next) break;
+    lastKey = next.uniqueKey;
+    playState.deck.push(next);
+    newItems.push({ item: next, idx: startIdx + newItems.length });
+  }
+  if (!newItems.length) return;
+
+  const temp = document.createElement('div');
+  temp.innerHTML = newItems.map(x => createPlaySlideHtml(x.item, x.idx)).join('');
+  Array.from(temp.children).forEach(slideEl => {
+    track.appendChild(slideEl);
+    wirePlaySlideInteractions(slideEl);
+    if (playState.observer) playState.observer.observe(slideEl);
+  });
+}
+
+function renderPlayFeed(focusVideoId = null) {
+  const track = $('#playFeedTrack');
+  if (!track) return;
+
+  stopActivePlayMedia();
+  if (playState.observer) {
+    try { playState.observer.disconnect(); } catch (e) {}
+    playState.observer = null;
+  }
+  playState.activeSlideIndex = -1;
+
+  if (!playState.deck.length) {
+    track.innerHTML = `
+      <div class="play-empty-slide">
+        <div class="empty-icon">▶</div>
+        <h3>No Play Videos Yet</h3>
+        <p class="muted" style="max-width:340px;">Press <strong>← Back</strong> and click <strong>UPLOAD</strong> under Play in the sidebar to create or upload the first video! Earn <strong>$0.50</strong> per like.</p>
+      </div>`;
+    return;
+  }
+
+  track.innerHTML = playState.deck.map((item, idx) => createPlaySlideHtml(item, idx)).join('');
+  $$('#playFeedTrack .play-slide').forEach(slideEl => wirePlaySlideInteractions(slideEl));
 
   const slides = $$('#playFeedTrack .play-slide');
   if ('IntersectionObserver' in window) {
@@ -5505,7 +5624,7 @@ async function startPlayPage(focusVideoId = null) {
   ]);
   syncPlayLikeEarnings();
   if (currentPage !== 'play') return;
-  playState.deck = buildPlayDeck(playState.videos, adsList, focusVideoId);
+  playState.deck = buildInitialPlayDeck(playState.videos, adsList, focusVideoId, 10);
   renderPlayFeed(focusVideoId);
 }
 
@@ -5539,10 +5658,9 @@ async function handlePlayVote(videoId, voteType) {
     ls.add(uid);
   }
 
-  // Update visible buttons immediately without recreating video element
-  const slideEl = document.querySelector(`#playFeedTrack .play-slide[data-video-id="${CSS.escape(videoId)}"]`);
-  if (slideEl) {
-    const newSum = getPlayVoteSummary(videoId);
+  // Update ALL matching slides in infinite scroll without recreating video elements
+  const newSum = getPlayVoteSummary(videoId);
+  document.querySelectorAll(`#playFeedTrack .play-slide[data-video-id="${CSS.escape(videoId)}"]`).forEach(slideEl => {
     const likeBtn = slideEl.querySelector('[data-play-vote="like"]');
     const dislikeBtn = slideEl.querySelector('[data-play-vote="dislike"]');
     if (likeBtn) {
@@ -5555,7 +5673,7 @@ async function handlePlayVote(videoId, voteType) {
       const c = dislikeBtn.querySelector('.play-rail-count');
       if (c) c.textContent = String(newSum.dislikes);
     }
-  }
+  });
 
   const { error } = await sb.from('premium_requests').insert({
     user_id: currentUser.id,
@@ -5591,7 +5709,7 @@ async function deletePlayVideo(videoId) {
   if (typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
   if (currentPage === 'play') {
     const ads = await loadAdsList(false);
-    playState.deck = buildPlayDeck(playState.videos, ads);
+    playState.deck = buildInitialPlayDeck(playState.videos, ads, null, 10);
     renderPlayFeed();
   }
 }
@@ -5747,8 +5865,8 @@ function renderPlayCommentsDrawerList() {
   const cmts = playState.commentsByVideo.get(vidId) || [];
   if (titleEl) titleEl.textContent = `Comments (${cmts.length})`;
 
-  const slideCountEl = document.querySelector(`#playFeedTrack .play-slide[data-video-id="${CSS.escape(vidId)}"] [data-play-comment] .play-rail-count`);
-  if (slideCountEl) slideCountEl.textContent = String(cmts.length);
+  document.querySelectorAll(`#playFeedTrack .play-slide[data-video-id="${CSS.escape(vidId)}"] [data-play-comment] .play-rail-count`)
+    .forEach(el => { el.textContent = String(cmts.length); });
 
   if (!cmts.length) {
     listEl.innerHTML = '<div class="empty-state" style="padding:26px 12px;"><p class="muted tiny">No comments yet. Say something!</p></div>';
@@ -5872,6 +5990,9 @@ $('#playPrevBtn')?.addEventListener('click', () => {
 $('#playNextBtn')?.addEventListener('click', () => {
   const track = $('#playFeedTrack');
   if (!track) return;
+  if (playState.activeSlideIndex >= playState.deck.length - 3 && getTotalPlayPoolCount() >= 2) {
+    appendRandomPlaySlides(6);
+  }
   const targetIdx = Math.min(Math.max(0, playState.deck.length - 1), playState.activeSlideIndex + 1);
   const slide = track.querySelector(`.play-slide[data-slide-idx="${targetIdx}"]`);
   if (slide) slide.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -5880,6 +6001,7 @@ $('#playNextBtn')?.addEventListener('click', () => {
 // ---------- Play Upload Choice + Short Creator Studio + Video File Upload ----------
 const playEditorState = {
   bgColor: '#161222',
+  aspectRatio: '9:16',
   elements: [], // { id, type:'gif'|'text', x, y, scale, gifUrl, text, color, style }
   selectedId: null,
   musicName: '',
@@ -5888,6 +6010,19 @@ const playEditorState = {
   gifQuery: '',
   saving: false
 };
+
+function syncPlayEditorAspectUi() {
+  const ratioKey = playEditorState.aspectRatio || '9:16';
+  const arNum = parsePlayAspectRatio(ratioKey, 9 / 16);
+  const stage = $('#playEditorStage');
+  if (stage) {
+    stage.style.setProperty('--play-ar-num', arNum.toFixed(4));
+    stage.style.aspectRatio = arNum.toFixed(4);
+  }
+  $$('#playAspectRatioGroup .play-aspect-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.aspect === ratioKey);
+  });
+}
 
 async function populateMusicSelect(selectEl, emptyLabel = 'No Music') {
   if (!selectEl) return;
@@ -5928,7 +6063,6 @@ function openPlayUploadChoiceModal() {
   $('#playUploadChoiceModal')?.classList.remove('hidden');
 }
 
-$('#playUploadOpenBtn')?.addEventListener('click', openPlayUploadChoiceModal);
 $('#closePlayChoiceBtn')?.addEventListener('click', () => hideModalSmooth($('#playUploadChoiceModal')));
 $('#playUploadChoiceModal')?.addEventListener('click', e => {
   if (e.target === $('#playUploadChoiceModal')) hideModalSmooth($('#playUploadChoiceModal'));
@@ -6072,6 +6206,7 @@ async function loadPlayEditorGifs(query = '') {
 async function openPlayCreatorStudio() {
   $('#playUploadChoiceModal')?.classList.add('hidden');
   playEditorState.bgColor = '#161222';
+  playEditorState.aspectRatio = '9:16';
   playEditorState.elements = [];
   playEditorState.selectedId = null;
   playEditorState.gifQuery = '';
@@ -6087,6 +6222,7 @@ async function openPlayCreatorStudio() {
   $('#playEditorPlusMenu')?.classList.add('hidden');
   $('#playEditorTextPanel')?.classList.add('hidden');
   $('#playEditorGifPanel')?.classList.add('hidden');
+  syncPlayEditorAspectUi();
   renderPlayEditorStage();
   $('#playCreatorModal')?.classList.remove('hidden');
   await populateMusicSelect($('#playEditorMusicSelect'), 'No Music');
@@ -6099,6 +6235,13 @@ function closePlayCreatorStudio() {
 
 $('#playChooseCreateBtn')?.addEventListener('click', openPlayCreatorStudio);
 $('#playCreatorCancelBtn')?.addEventListener('click', closePlayCreatorStudio);
+
+$$('#playAspectRatioGroup .play-aspect-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    playEditorState.aspectRatio = btn.dataset.aspect || '9:16';
+    syncPlayEditorAspectUi();
+  });
+});
 
 $$('#playBgSwatches .play-bg-swatch').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -6219,6 +6362,7 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
     kind: 'scene',
     title: ($('#playCreatorTitle')?.value || '').trim().slice(0, 60),
     bgColor: playEditorState.bgColor || '#161222',
+    aspectRatio: playEditorState.aspectRatio || '9:16',
     elements: playEditorState.elements.map(({ id, type, x, y, scale, gifUrl, text, color, style }) => ({
       id, type, x, y, scale,
       ...(gifUrl ? { gifUrl } : {}),
@@ -6254,6 +6398,7 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
 
 // Video File Upload Modal
 let pendingUploadVideoDataUrl = '';
+let pendingUploadVideoAspect = 9 / 16;
 let pendingUploadBusy = false;
 
 function readFileAsDataUrlPromise(file) {
@@ -6262,6 +6407,25 @@ function readFileAsDataUrlPromise(file) {
     r.onload = () => resolve(String(r.result || ''));
     r.onerror = () => reject(new Error('Could not read video file'));
     r.readAsDataURL(file);
+  });
+}
+
+function probeVideoAspectRatio(file) {
+  return new Promise(resolve => {
+    const objectUrl = URL.createObjectURL(file);
+    const vid = document.createElement('video');
+    vid.muted = true;
+    vid.playsInline = true;
+    vid.src = objectUrl;
+    vid.onloadedmetadata = () => {
+      const ar = (vid.videoWidth > 0 && vid.videoHeight > 0) ? (vid.videoWidth / vid.videoHeight) : (9 / 16);
+      URL.revokeObjectURL(objectUrl);
+      resolve(Math.min(2.6, Math.max(0.35, Number(ar.toFixed(4)))));
+    };
+    vid.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(9 / 16);
+    };
   });
 }
 
@@ -6278,11 +6442,13 @@ async function compressPlayVideoFile(file, onProgress) {
   });
 
   const maxDur = Math.min(Number(vid.duration || 12), 18);
-  const scaleW = Math.min(420, vid.videoWidth || 360);
-  const scaleH = Math.max(240, Math.round((vid.videoHeight || 640) * (scaleW / (vid.videoWidth || 360))));
+  const natW = vid.videoWidth || 360;
+  const natH = vid.videoHeight || 640;
+  const aspectRatio = Math.min(2.6, Math.max(0.35, Number((natW / natH).toFixed(4))));
+  const scale = Math.min(1, 640 / Math.max(natW, natH));
   const canvas = document.createElement('canvas');
-  canvas.width = scaleW;
-  canvas.height = Math.min(760, scaleH);
+  canvas.width = Math.max(160, Math.round((natW * scale) / 2) * 2);
+  canvas.height = Math.max(160, Math.round((natH * scale) / 2) * 2);
   const ctx = canvas.getContext('2d');
   const stream = canvas.captureStream(24);
   const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
@@ -6301,7 +6467,7 @@ async function compressPlayVideoFile(file, onProgress) {
         return;
       }
       const dataUrl = await readFileAsDataUrlPromise(blob);
-      resolve(dataUrl);
+      resolve({ dataUrl, aspectRatio });
     };
     recorder.onerror = () => {
       URL.revokeObjectURL(objectUrl);
@@ -6329,6 +6495,7 @@ async function compressPlayVideoFile(file, onProgress) {
 async function openPlayVideoFileModal() {
   $('#playUploadChoiceModal')?.classList.add('hidden');
   pendingUploadVideoDataUrl = '';
+  pendingUploadVideoAspect = 9 / 16;
   pendingUploadBusy = false;
   if ($('#playUploadTitleInput')) $('#playUploadTitleInput').value = '';
   if ($('#playUploadFileInput')) $('#playUploadFileInput').value = '';
@@ -6363,6 +6530,7 @@ $('#playUploadFileInput')?.addEventListener('change', async e => {
   const pubBtn = $('#publishPlayVideoFileBtn');
   const prev = $('#playUploadPreviewVideo');
   pendingUploadVideoDataUrl = '';
+  pendingUploadVideoAspect = 9 / 16;
   if (pubBtn) pubBtn.disabled = true;
   if (!file) return;
   if (msgEl) msgEl.textContent = '';
@@ -6371,15 +6539,22 @@ $('#playUploadFileInput')?.addEventListener('change', async e => {
   try {
     pendingUploadBusy = true;
     if (file.size <= 2.2 * 1024 * 1024) {
-      pendingUploadVideoDataUrl = await readFileAsDataUrlPromise(file);
+      const [ar, dataUrl] = await Promise.all([
+        probeVideoAspectRatio(file),
+        readFileAsDataUrlPromise(file)
+      ]);
+      pendingUploadVideoAspect = ar;
+      pendingUploadVideoDataUrl = dataUrl;
     } else {
       if (typeof MediaRecorder === 'undefined') {
         throw new Error('Please choose a smaller video clip under 2.2 MB.');
       }
       if (nameEl) nameEl.textContent = `Optimizing ${file.name} for Play... 0%`;
-      pendingUploadVideoDataUrl = await compressPlayVideoFile(file, pct => {
+      const res = await compressPlayVideoFile(file, pct => {
         if (nameEl) nameEl.textContent = `Optimizing ${file.name} for Play... ${pct}%`;
       });
+      pendingUploadVideoDataUrl = res.dataUrl;
+      pendingUploadVideoAspect = res.aspectRatio;
       if (nameEl) nameEl.textContent = `${file.name} · Ready!`;
     }
     if (prev && pendingUploadVideoDataUrl) {
@@ -6409,6 +6584,7 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
     id: newVidId,
     kind: 'video',
     title: ($('#playUploadTitleInput')?.value || '').trim().slice(0, 60),
+    aspectRatio: pendingUploadVideoAspect || (9 / 16),
     videoUrl: pendingUploadVideoDataUrl,
     musicName: track ? track.name : '',
     musicUrl: track ? track.url : '',
