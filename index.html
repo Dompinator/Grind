@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=53">
+  <link rel="stylesheet" href="styles.css?v=54">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -1207,20 +1207,15 @@
         <div>
           <div class="eyebrow purple-text">PLAY STUDIO</div>
           <h3 id="playUploadChoiceTitle">Share to Play</h3>
-          <p class="muted tiny" style="margin:2px 0 0;">Earn $0.50 per like plus creator donations from viewers in Play &amp; Live.</p>
+          <p class="muted tiny" style="margin:2px 0 0;">All created &amp; uploaded shorts appear in Play. Earn $0.50 per like plus donations.</p>
         </div>
         <button type="button" class="zoom-btn" id="closePlayChoiceBtn" aria-label="Close">✕</button>
       </div>
-      <div class="play-choice-grid play-choice-grid-3">
+      <div class="play-choice-grid">
         <button type="button" class="play-choice-btn" id="playChooseCreateBtn">
           <span class="play-choice-icon">✦</span>
           <strong>Create Short</strong>
-          <small class="muted tiny">Pick colors or gradients, add GIFs, Text, Stickers &amp; Music, animate &amp; drag freely.</small>
-        </button>
-        <button type="button" class="play-choice-btn" id="playChoosePhotoBtn">
-          <span class="play-choice-icon">🖼</span>
-          <strong>Photo / Meme Short</strong>
-          <small class="muted tiny">Drop an image or screenshot into Studio with captions, stickers &amp; Music.</small>
+          <small class="muted tiny">Pick colors or gradients, drop in Images, GIFs, Text &amp; Stickers, add Music &amp; animate.</small>
         </button>
         <button type="button" class="play-choice-btn" id="playChooseUploadBtn">
           <span class="play-choice-icon">⇪</span>
@@ -1244,7 +1239,7 @@
       <div class="play-creator-body">
         <div class="play-editor-stage-col">
           <div id="playEditorStage" class="play-editor-stage" style="background:#161222;">
-            <div id="playEditorEmptyHint" class="play-editor-empty-hint">Press <strong>＋ Add Element</strong> to add GIFs, Text, Stickers, or Photos — drag them anywhere!</div>
+            <div id="playEditorEmptyHint" class="play-editor-empty-hint">Press <strong>＋ Add Element</strong> to drop Images, GIFs, Text, or Stickers — drag to move &amp; resize!</div>
           </div>
           <div id="playEditorSelectionBar" class="play-editor-selection-bar hidden">
             <div class="play-sel-top">
@@ -1311,7 +1306,7 @@
                   <button type="button" id="playAddGifModeBtn">🎞 Add GIF (GIPHY)</button>
                   <button type="button" id="playAddTextModeBtn">𝐓 Add Text</button>
                   <button type="button" id="playAddStickerModeBtn">😎 Add Sticker / Emoji</button>
-                  <button type="button" id="playAddPhotoModeBtn">🖼 Add Photo</button>
+                  <button type="button" id="playAddPhotoModeBtn">🖼 Add Image</button>
                 </div>
               </div>
             </div>
@@ -1476,6 +1471,6 @@
   <div id="rewardBurstLayer" class="reward-burst-layer" aria-hidden="true"></div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=54"></script>
+  <script src="app.js?v=55"></script>
 </body>
 </html>

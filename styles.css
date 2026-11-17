@@ -4727,6 +4727,7 @@ body[data-theme="rose-amethyst"] .featured-slot-badge {
   pointer-events: auto;
   cursor: grab;
   touch-action: none;
+  overflow: visible !important;
   border: 1.5px dashed transparent;
   transition: border-color 0.14s ease, box-shadow 0.14s ease;
 }
@@ -4736,6 +4737,36 @@ body[data-theme="rose-amethyst"] .featured-slot-badge {
 .play-canvas-item.is-editable.is-selected {
   border-color: #fbbf24;
   box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.35);
+}
+.play-resize-handle {
+  display: none;
+  position: absolute;
+  right: -11px;
+  bottom: -11px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fbbf24;
+  color: #161222;
+  border: 2px solid #0c0916;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  align-items: center;
+  justify-content: center;
+  cursor: nwse-resize;
+  pointer-events: auto;
+  touch-action: none;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+  transform: scale(var(--el-inv-scale, 1));
+  z-index: 6;
+}
+.play-canvas-item.is-editable.is-selected .play-resize-handle {
+  display: inline-flex;
+}
+.play-editor-stage.is-dragover {
+  border-color: #fbbf24;
+  box-shadow: inset 0 0 0 3px rgba(251, 191, 36, 0.35), 0 18px 44px rgba(0, 0, 0, 0.52);
 }
 
 .play-pause-badge {
@@ -5801,13 +5832,7 @@ body[data-theme="rose-amethyst"] .featured-slot-badge {
   color: #fff;
 }
 
-/* Expanded Upload Choice + Studio + Video Effects */
-.play-choice-card {
-  max-width: 720px;
-}
-.play-choice-grid-3 {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
+/* Expanded Studio + Video Effects */
 .play-editor-selection-bar {
   flex-direction: column;
   align-items: stretch;

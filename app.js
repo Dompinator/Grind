@@ -6490,7 +6490,7 @@ function renderEditorSelectionBar() {
     return;
   }
   bar.classList.remove('hidden');
-  const labels = { gif: 'GIF Layer', photo: 'Photo Layer', sticker: 'Sticker', text: 'Text Layer' };
+  const labels = { gif: 'GIF Layer', photo: 'Image Layer', sticker: 'Sticker', text: 'Text Layer' };
   if (lbl) lbl.textContent = labels[item.type] || 'Layer';
   if (animBtn) {
     const aMap = { none: '✨ Still', pulse: '💓 Pulse', float: '🎈 Float', spin: '🌀 Spin' };
@@ -6522,26 +6522,32 @@ function renderPlayEditorStage() {
   stage.style.background = playEditorState.bgColor || '#161222';
   const itemsHtml = playEditorState.elements.map(el => {
     const selCls = el.id === playEditorState.selectedId ? 'is-selected' : '';
+    const scaleVal = Number(el.scale || 1);
+    const invScale = (1 / Math.max(0.45, scaleVal)).toFixed(3);
     const rot = Number(el.rot ?? 0);
     const op = Number(el.opacity ?? 1);
     const animCls = ['pulse', 'float', 'spin'].includes(el.anim) ? ` play-anim-${el.anim}` : '';
-    const posStyle = `left:${el.x}%;top:${el.y}%;opacity:${op};transform:translate(-50%,-50%) scale(${el.scale || 1}) rotate(${rot}deg);`;
+    const posStyle = `left:${el.x}%;top:${el.y}%;opacity:${op};--el-inv-scale:${invScale};transform:translate(-50%,-50%) scale(${scaleVal}) rotate(${rot}deg);`;
+    const resizeHandleHtml = `<span class="play-resize-handle" data-resize-el="${escapeHtml(el.id)}" title="Drag corner to resize">⤡</span>`;
     if (el.type === 'gif') {
       return `
         <div class="play-canvas-item is-gif is-editable${animCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}">
           <img src="${escapeHtml(el.gifUrl)}" alt="GIF" draggable="false">
+          ${resizeHandleHtml}
         </div>`;
     }
     if (el.type === 'photo') {
       return `
         <div class="play-canvas-item is-photo is-editable${animCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}">
-          <img src="${escapeHtml(el.photoUrl)}" alt="Photo" draggable="false">
+          <img src="${escapeHtml(el.photoUrl)}" alt="Image" draggable="false">
+          ${resizeHandleHtml}
         </div>`;
     }
     if (el.type === 'sticker') {
       return `
         <div class="play-canvas-item is-sticker is-editable${animCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}">
           <span>${escapeHtml(el.emoji)}</span>
+          ${resizeHandleHtml}
         </div>`;
     }
     const styleCls = el.style === 'plain' ? 'style-plain' : (el.style === 'outline' ? 'style-outline' : 'style-pill');
@@ -6549,13 +6555,15 @@ function renderPlayEditorStage() {
     return `
       <div class="play-canvas-item is-text is-editable ${styleCls}${fontCls}${animCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}color:${escapeHtml(el.color || '#ffffff')};">
         ${escapeHtml(el.text)}
+        ${resizeHandleHtml}
       </div>`;
   }).join('');
 
-  stage.innerHTML = (playEditorState.elements.length ? '' : '<div id="playEditorEmptyHint" class="play-editor-empty-hint">Press <strong>＋ Add Element</strong> to add GIFs, Text, Stickers, or Photos — drag them anywhere!</div>') + itemsHtml;
+  stage.innerHTML = (playEditorState.elements.length ? '' : '<div id="playEditorEmptyHint" class="play-editor-empty-hint">Press <strong>＋ Add Element</strong> to drop Images, GIFs, Text, or Stickers — drag to move &amp; resize!</div>') + itemsHtml;
 
   $$('#playEditorStage [data-edit-el]').forEach(domEl => {
     domEl.addEventListener('pointerdown', e => {
+      if (e.target.closest('[data-resize-el]')) return;
       e.preventDefault();
       e.stopPropagation();
       const elId = domEl.dataset.editEl;
@@ -6595,6 +6603,51 @@ function renderPlayEditorStage() {
       domEl.addEventListener('pointermove', onMove);
       domEl.addEventListener('pointerup', onUp);
       domEl.addEventListener('pointercancel', onUp);
+    });
+  });
+
+  $$('#playEditorStage [data-resize-el]').forEach(handleEl => {
+    handleEl.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const elId = handleEl.dataset.resizeEl;
+      const domEl = handleEl.closest('[data-edit-el]');
+      const item = playEditorState.elements.find(it => it.id === elId);
+      if (!domEl || !item) return;
+
+      playEditorState.selectedId = elId;
+      $$('#playEditorStage [data-edit-el]').forEach(n => n.classList.toggle('is-selected', n.dataset.editEl === elId));
+      renderEditorSelectionBar();
+
+      const r = domEl.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const startDist = Math.max(18, Math.hypot(e.clientX - cx, e.clientY - cy));
+      const startScale = Number(item.scale || 1);
+      const rot = Number(item.rot ?? 0);
+      let resized = false;
+
+      try { handleEl.setPointerCapture(e.pointerId); } catch (err) {}
+
+      const onMove = ev => {
+        const curDist = Math.max(10, Math.hypot(ev.clientX - cx, ev.clientY - cy));
+        if (!resized && Math.abs(curDist - startDist) > 2) {
+          pushPlayEditorHistory();
+          resized = true;
+        }
+        const nextScale = Math.min(2.6, Math.max(0.35, Math.round((startScale * (curDist / startDist)) * 100) / 100));
+        item.scale = nextScale;
+        domEl.style.setProperty('--el-inv-scale', (1 / Math.max(0.45, nextScale)).toFixed(3));
+        domEl.style.transform = `translate(-50%,-50%) scale(${nextScale}) rotate(${rot}deg)`;
+      };
+      const onUp = () => {
+        handleEl.removeEventListener('pointermove', onMove);
+        handleEl.removeEventListener('pointerup', onUp);
+        handleEl.removeEventListener('pointercancel', onUp);
+      };
+      handleEl.addEventListener('pointermove', onMove);
+      handleEl.addEventListener('pointerup', onUp);
+      handleEl.addEventListener('pointercancel', onUp);
     });
   });
 
@@ -6651,7 +6704,7 @@ async function loadPlayEditorGifs(query = '') {
   });
 }
 
-async function openPlayCreatorStudio(promptPhotoPick = false) {
+async function openPlayCreatorStudio() {
   $('#playUploadChoiceModal')?.classList.add('hidden');
   playEditorState.bgColor = '#161222';
   playEditorState.aspectRatio = '9:16';
@@ -6679,9 +6732,6 @@ async function openPlayCreatorStudio(promptPhotoPick = false) {
   syncPlayEditorAspectUi();
   renderPlayEditorStage();
   $('#playCreatorModal')?.classList.remove('hidden');
-  if (promptPhotoPick) {
-    setTimeout(() => $('#playEditorPhotoInput')?.click(), 120);
-  }
   await populateMusicSelect($('#playEditorMusicSelect'), 'No Music');
 }
 
@@ -6690,8 +6740,7 @@ function closePlayCreatorStudio() {
   hideModalSmooth($('#playCreatorModal'));
 }
 
-$('#playChooseCreateBtn')?.addEventListener('click', () => openPlayCreatorStudio(false));
-$('#playChoosePhotoBtn')?.addEventListener('click', () => openPlayCreatorStudio(true));
+$('#playChooseCreateBtn')?.addEventListener('click', () => openPlayCreatorStudio());
 $('#playCreatorCancelBtn')?.addEventListener('click', closePlayCreatorStudio);
 $('#playCreatorUndoBtn')?.addEventListener('click', undoPlayEditor);
 
@@ -6753,23 +6802,50 @@ $('#playAddPhotoModeBtn')?.addEventListener('click', () => {
   $('#playEditorPhotoInput')?.click();
 });
 
-$('#playEditorPhotoInput')?.addEventListener('change', async e => {
-  const file = e.target.files?.[0];
-  e.target.value = '';
-  if (!file) return;
+async function addPlayEditorImageFile(file) {
+  if (!file || !String(file.type || '').startsWith('image/')) {
+    toast('Please choose an image file.');
+    return;
+  }
   try {
     const photoUrl = await compressPlayCanvasImage(file);
     pushPlayEditorHistory();
     const newId = 'el_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
     playEditorState.elements.push({
-      id: newId, type: 'photo', x: 50, y: 48, scale: 1, rot: 0, opacity: 1, anim: 'none', photoUrl
+      id: newId, type: 'photo', x: 50, y: 48, scale: 1.15, rot: 0, opacity: 1, anim: 'none', photoUrl
     });
     playEditorState.selectedId = newId;
     renderPlayEditorStage();
   } catch (err) {
-    toast(err?.message || 'Could not add photo');
+    toast(err?.message || 'Could not add image');
   }
+}
+
+$('#playEditorPhotoInput')?.addEventListener('change', async e => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (file) await addPlayEditorImageFile(file);
 });
+
+(() => {
+  const stageEl = $('#playEditorStage');
+  if (!stageEl) return;
+  stageEl.addEventListener('dragover', e => {
+    if (e.dataTransfer?.types?.includes('Files')) {
+      e.preventDefault();
+      stageEl.classList.add('is-dragover');
+    }
+  });
+  stageEl.addEventListener('dragleave', () => stageEl.classList.remove('is-dragover'));
+  stageEl.addEventListener('drop', async e => {
+    stageEl.classList.remove('is-dragover');
+    const file = e.dataTransfer?.files?.[0];
+    if (file && String(file.type || '').startsWith('image/')) {
+      e.preventDefault();
+      await addPlayEditorImageFile(file);
+    }
+  });
+})();
 
 $('#playCustomEmojiAddBtn')?.addEventListener('click', () => {
   const inp = $('#playCustomEmojiInput');
@@ -7637,25 +7713,52 @@ async function loadLiveFeed() {
     });
   });
 
-  let lpQ = sb.from('premium_requests')
-    .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
-    .like('reason', '__LIVE_POST__:%')
-    .order('created_at', { ascending: false })
-    .limit(40);
-  if (srvResetTs > 0) {
-    lpQ = lpQ.gt('created_at', new Date(srvResetTs).toISOString());
-  }
+  let lpRes = { data: [] };
+  let playLiveRes = { data: [] };
+  try {
+    let lpQ = sb.from('premium_requests')
+      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .like('reason', '__LIVE_POST__:%')
+      .order('created_at', { ascending: false })
+      .limit(40);
+    if (srvResetTs > 0) {
+      lpQ = lpQ.gt('created_at', new Date(srvResetTs).toISOString());
+    }
 
-  let playLiveQ = sb.from('premium_requests')
-    .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
-    .like('reason', '__PLAY_%')
-    .order('created_at', { ascending: true })
-    .limit(1200);
+    const playLiveQ = sb.from('premium_requests')
+      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .like('reason', '__PLAY_%')
+      .order('created_at', { ascending: true })
+      .limit(1200);
 
-  const [lpRes, playLiveRes] = await Promise.all([
-    lpQ.catch(() => ({ data: [] })),
-    playLiveQ.catch(() => ({ data: [] }))
-  ]);
+    const safeQuery = async q => {
+      try {
+        return (await q) || { data: [] };
+      } catch (e) {
+        return { data: [] };
+      }
+    };
+
+    [lpRes, playLiveRes] = await Promise.all([safeQuery(lpQ), safeQuery(playLiveQ)]);
+
+    if (lpRes.error) {
+      let fbLp = sb.from('premium_requests')
+        .select('id, user_id, reason, created_at')
+        .like('reason', '__LIVE_POST__:%')
+        .order('created_at', { ascending: false })
+        .limit(40);
+      if (srvResetTs > 0) fbLp = fbLp.gt('created_at', new Date(srvResetTs).toISOString());
+      lpRes = await safeQuery(fbLp);
+    }
+    if (playLiveRes.error) {
+      const fbPlayLive = sb.from('premium_requests')
+        .select('id, user_id, reason, created_at')
+        .like('reason', '__PLAY_%')
+        .order('created_at', { ascending: true })
+        .limit(1200);
+      playLiveRes = await safeQuery(fbPlayLive);
+    }
+  } catch (e) {}
 
   const postRows = lpRes?.data || [];
   postRows.forEach(r => {
