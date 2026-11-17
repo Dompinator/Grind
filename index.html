@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=54">
+  <link rel="stylesheet" href="styles.css?v=55">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -228,6 +228,7 @@
             <button class="feed-tab active" data-lb="networth">Net Worth</button>
             <button class="feed-tab" data-lb="time">Time Played</button>
             <button class="feed-tab" data-lb="weekly">Weekly Profit</button>
+            <button class="feed-tab" data-lb="creators">Creators</button>
           </div>
           <div id="lbWeeklyControls" class="lb-weekly-controls hidden">
             <div id="lbWeeklySpotlights" class="lb-weekly-spotlights"></div>
@@ -252,7 +253,7 @@
                 <div class="play-brand-chip">
                   <span class="play-brand-icon">▶</span>
                   <strong>Play</strong>
-                  <span class="play-earn-pill">$0.50 / like</span>
+                  <span class="play-earn-pill">$2/like · $0.50/view · +$0.50 liking</span>
                 </div>
               </div>
               <div class="play-topbar-right">
@@ -312,6 +313,7 @@
               <div class="account-identity-meta">
                 <div class="account-identity-name" id="accountIdentityName">Trader</div>
                 <div id="accountIdentityTitleSlot" class="account-title-slot"></div>
+                <div id="accountIdentityFollowStats" class="muted tiny account-identity-follow-stats">0 Followers · 0 Following</div>
               </div>
               <button type="button" class="zoom-btn" data-goto="marketplace">Open Crates →</button>
             </div>
@@ -329,7 +331,7 @@
               <div class="account-titles-head">
                 <div>
                   <h4>Your Play Videos</h4>
-                  <p class="muted tiny">Shorts &amp; videos you published in Play ($0.50 earned per unique like).</p>
+                  <p class="muted tiny">Shorts &amp; videos you published in Play ($2/like · $0.50/unique view · $10/follower).</p>
                 </div>
                 <span class="muted tiny" id="accountPlayVideosCount">0 videos</span>
               </div>
@@ -472,7 +474,7 @@
               <button type="button" class="feed-tab active" data-unotif="all">All</button>
               <button type="button" class="feed-tab" data-unotif="update">Updates</button>
               <button type="button" class="feed-tab" data-unotif="warning">Warnings</button>
-              <button type="button" class="feed-tab" data-unotif="social">Likes &amp; Comments</button>
+              <button type="button" class="feed-tab" data-unotif="social">Followers, Likes &amp; Comments</button>
               <button type="button" class="feed-tab" data-unotif="donate">Donations</button>
             </div>
             <div id="userNotifsList" class="requests-list" style="margin-bottom:28px;"></div>
@@ -1207,7 +1209,8 @@
         <div>
           <div class="eyebrow purple-text">PLAY STUDIO</div>
           <h3 id="playUploadChoiceTitle">Share to Play</h3>
-          <p class="muted tiny" style="margin:2px 0 0;">All created &amp; uploaded shorts appear in Play. Earn $0.50 per like plus donations.</p>
+          <p class="muted tiny" style="margin:2px 0 0;">All created &amp; uploaded shorts appear in Play. Earn $2/like, $0.50/view &amp; $10/follower!</p>
+          <div id="playUploadTierFeeBanner" class="play-tier-fee-banner">Member: $50 · PRO: $10 · Premium: Free</div>
         </div>
         <button type="button" class="zoom-btn" id="closePlayChoiceBtn" aria-label="Close">✕</button>
       </div>
@@ -1345,6 +1348,18 @@
           </div>
 
           <div class="play-tool-block">
+            <div class="eyebrow purple-text" style="margin-bottom:8px;">VOICEOVER (MIC)</div>
+            <div class="play-voiceover-box">
+              <div class="play-vo-controls">
+                <button type="button" class="play-vo-rec-btn" id="playCreatorVoRecBtn">🎙 Record Mic</button>
+                <button type="button" class="zoom-btn hidden" id="playCreatorVoPreviewBtn">▶ Test</button>
+                <button type="button" class="deny-btn hidden" id="playCreatorVoClearBtn" style="padding:5px 10px;font-size:12px;">Clear</button>
+              </div>
+              <div class="muted tiny" id="playCreatorVoStatus">Optional — record your mic (replays with Music at the same time!).</div>
+            </div>
+          </div>
+
+          <div class="play-tool-block">
             <div class="eyebrow purple-text" style="margin-bottom:8px;">MUSIC &amp; COIN PROMO</div>
             <div class="play-music-picker-row">
               <select id="playEditorMusicSelect" class="play-music-select">
@@ -1357,7 +1372,7 @@
                 <option value="">No Linked Coin (optional)</option>
               </select>
             </div>
-            <p class="muted tiny" style="margin:6px 0 0;">Music from GitHub <code>Music/</code> folder · Optional coin tag lets viewers click to trade.</p>
+            <p class="muted tiny" style="margin:6px 0 0;">Music from GitHub <code>Music/</code> folder · Plays alongside Voiceover · STRICTLY no copyrighted uploads.</p>
           </div>
           <p id="playCreatorMsg" class="form-message" style="margin-top:4px;"></p>
         </div>
@@ -1418,11 +1433,22 @@
           <button type="button" class="zoom-btn" id="playUploadMusicPreviewBtn">▶ Test</button>
         </div>
       </label>
+      <label style="margin-top:10px;">Voiceover (Mic · Optional — replays with Music!)
+        <div class="play-voiceover-box" style="margin-top:4px;">
+          <div class="play-vo-controls">
+            <button type="button" class="play-vo-rec-btn" id="playUploadVoRecBtn">🎙 Record Mic</button>
+            <button type="button" class="zoom-btn hidden" id="playUploadVoPreviewBtn">▶ Test</button>
+            <button type="button" class="deny-btn hidden" id="playUploadVoClearBtn" style="padding:5px 10px;font-size:12px;">Clear</button>
+          </div>
+          <div class="muted tiny" id="playUploadVoStatus">No voiceover recorded.</div>
+        </div>
+      </label>
       <label style="margin-top:10px;">Link a Coin (optional)
         <select id="playUploadCoinSelect" class="play-music-select" style="width:100%;">
           <option value="">No Linked Coin</option>
         </select>
       </label>
+      <p class="muted tiny" style="margin:8px 0 0;">STRICTLY NO copyrighted videos or music (<a href="#tos" class="tos-inline-link" data-open-tos="1">TOS</a>). <span id="playUploadFeeInline">Member: $50 · PRO: $10 · Premium: Free</span></p>
       <p id="playUploadMsg" class="form-message"></p>
       <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px;">
         <button type="button" class="zoom-btn" id="cancelPlayVideoFileBtn" style="padding:10px 16px;">Cancel</button>
@@ -1471,6 +1497,6 @@
   <div id="rewardBurstLayer" class="reward-burst-layer" aria-hidden="true"></div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=55"></script>
+  <script src="app.js?v=56"></script>
 </body>
 </html>
