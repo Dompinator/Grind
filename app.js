@@ -1947,9 +1947,22 @@ async function _loadCoinsFresh() {
         if (!row.coin_id || openPriceMap.has(row.coin_id)) return;
         openPriceMap.set(row.coin_id, row.price_after != null ? Number(row.price_after) : 1);
       });
-      tradedTodayIds.forEach(id => {
-        if (!openPriceMap.has(id)) openPriceMap.set(id, 1);
-      });
+      const missingOpenPriceIds = tradedTodayIds.filter(id => !openPriceMap.has(id));
+      if (missingOpenPriceIds.length) {
+        const fallbackPrices = await Promise.all(missingOpenPriceIds.map(id =>
+          sb.from('trades')
+            .select('price_after')
+            .eq('coin_id', id)
+            .lt('created_at', startOfTodayIso)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+        ));
+        fallbackPrices.forEach((result, index) => {
+          const id = missingOpenPriceIds[index];
+          openPriceMap.set(id, result.data?.price_after != null ? Number(result.data.price_after) : 1);
+        });
+      }
     } catch (e) {}
     coins = list.map(c => {
       const st = stats.get(c.id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
