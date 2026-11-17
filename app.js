@@ -8447,33 +8447,144 @@ function renderThemeSettings() {
 }
 
 // ---------- Premium requests ----------
-function updatePremiumSection() {
+const PREMIUM_REQUEST_STATUS_TTL_MS = 30000;
+let premiumRequestStatus = { userId: null, pending: false, checkedAt: 0 };
+let premiumRequestStatusPromise = null;
+let premiumRequestSending = false;
+let premiumRequestPollTimer = null;
+
+async function _checkOwnPremiumRequestPending(uid) {
+  const { data: pendingRow, error: pendingError } = await sb
+    .from('premium_requests')
+    .select('id')
+    .eq('user_id', uid)
+    .eq('status', 'pending')
+    .limit(1)
+    .maybeSingle();
+  if (pendingError) throw pendingError;
+  if (pendingRow) return true;
+
+  // Older installations may store requests as __PREM_REQ__ markers when
+  // the normal pending insert is blocked by Row Level Security.
+  const [{ data: legacyRows, error: legacyError }, { data: doneRows, error: doneError }] = await Promise.all([
+    sb.from('premium_requests')
+      .select('reason')
+      .eq('user_id', uid)
+      .like('reason', '__PREM_REQ__:%')
+      .order('created_at', { ascending: false })
+      .limit(100),
+    sb.from('premium_requests')
+      .select('reason')
+      .like('reason', '__PREM_REQ_DONE__:%')
+      .limit(300)
+  ]);
+  if (legacyError) throw legacyError;
+  if (doneError) throw doneError;
+
+  const doneIds = new Set((doneRows || []).map(row =>
+    String(row.reason || '').slice('__PREM_REQ_DONE__:'.length).trim()
+  ));
+  return (legacyRows || []).some(row => {
+    try {
+      const parsed = JSON.parse(String(row.reason || '').slice('__PREM_REQ__:'.length));
+      return Boolean(parsed?.id) && !doneIds.has(String(parsed.id));
+    } catch (e) {
+      return false;
+    }
+  });
+}
+
+async function refreshOwnPremiumRequestStatus(force = false) {
+  if (!sb || !currentUser?.id) {
+    premiumRequestStatus = { userId: null, pending: false, checkedAt: 0 };
+    return false;
+  }
+  const uid = String(currentUser.id);
+  if (premiumRequestStatusPromise) return premiumRequestStatusPromise;
+  if (!force && premiumRequestStatus.userId === uid &&
+      Date.now() - premiumRequestStatus.checkedAt < PREMIUM_REQUEST_STATUS_TTL_MS) {
+    return premiumRequestStatus.pending;
+  }
+
+  premiumRequestStatusPromise = _checkOwnPremiumRequestPending(uid)
+    .then(pending => {
+      premiumRequestStatus = { userId: uid, pending, checkedAt: Date.now() };
+      return pending;
+    })
+    .finally(() => { premiumRequestStatusPromise = null; });
+  return premiumRequestStatusPromise;
+}
+
+function updatePremiumSection(checkStatus = true) {
   if (!currentUser) return;
   const statusEl = $('#premiumStatus');
   const form = $('#requestForm');
+  const reasonEl = $('#premiumReason');
+  const btn = $('#sendRequestBtn');
   const tier = getUserTier(currentUser);
+
   if (tier === 'premium') {
     statusEl.textContent = 'You have Premium! Max 3 coins, Blue Star icon, and 2X daily rewards.';
     form.classList.add('hidden');
-  } else if (tier === 'pro') {
-    statusEl.textContent = 'You have PRO! Max 2 coins, Gold Crown icon, and 2X daily rewards. Request Premium for 3 coins and Blue Star.';
-    form.classList.remove('hidden');
   } else {
-    statusEl.textContent = 'Member account: max 1 coin. Unlock PRO on Daily Login Day 7 or request Premium for up to 3.';
     form.classList.remove('hidden');
+    if (premiumRequestStatus.userId === String(currentUser.id) && premiumRequestStatus.pending) {
+      statusEl.textContent = 'Your Premium request is waiting for Dompinator to approve or deny it. You can send another request after a decision has been made.';
+    } else if (tier === 'pro') {
+      statusEl.textContent = 'You have PRO! Max 2 coins, Gold Crown icon, and 2X daily rewards. Request Premium for 3 coins and Blue Star.';
+    } else {
+      statusEl.textContent = 'Member account: max 1 coin. Unlock PRO on Daily Login Day 7 or request Premium for up to 3.';
+    }
+  }
+
+  const isPending = tier !== 'premium' &&
+    premiumRequestStatus.userId === String(currentUser.id) &&
+    premiumRequestStatus.pending;
+  if (reasonEl) reasonEl.disabled = isPending || premiumRequestSending;
+  if (btn) {
+    btn.disabled = isPending || premiumRequestSending || tier === 'premium';
+    btn.textContent = premiumRequestSending ? 'Sending...' : (isPending ? 'Request pending' : 'Send request');
+  }
+
+  if (premiumRequestPollTimer) {
+    clearInterval(premiumRequestPollTimer);
+    premiumRequestPollTimer = null;
+  }
+  if (isPending && currentPage === 'account') {
+    premiumRequestPollTimer = setInterval(async () => {
+      if (currentPage !== 'account' || !currentUser) {
+        clearInterval(premiumRequestPollTimer);
+        premiumRequestPollTimer = null;
+        return;
+      }
+      try {
+        await refreshOwnPremiumRequestStatus(true);
+        updatePremiumSection(false);
+      } catch (e) {
+        console.warn('Premium request status check note:', e);
+      }
+    }, 60000);
+  }
+
+  if (checkStatus && tier !== 'premium') {
+    refreshOwnPremiumRequestStatus(false)
+      .then(() => updatePremiumSection(false))
+      .catch(e => {
+        console.warn('Premium request status check note:', e);
+        if (statusEl) statusEl.textContent = 'Could not verify your request status. Please try again in a moment.';
+      });
   }
 }
 
 $('#sendRequestBtn')?.addEventListener('click', async () => {
   if (!sb || !currentUser) return toast('Please log in first.');
+  if (premiumRequestSending) return;
   const reason = ($('#premiumReason')?.value || '').trim();
   if (!reason) return toast('Write a reason.');
 
   const btn = $('#sendRequestBtn');
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Sending...';
-  }
+  premiumRequestSending = true;
+  updatePremiumSection(false);
 
   try {
     let { data: authData } = await sb.auth.getUser();
@@ -8481,9 +8592,23 @@ $('#sendRequestBtn')?.addEventListener('click', async () => {
       const { data: refData } = await sb.auth.refreshSession();
       authData = { user: refData?.user || refData?.session?.user || null };
     }
-    const uid = authData?.user?.id || currentUser.id;
+    const uid = String(authData?.user?.id || currentUser.id || '');
     if (!uid) {
       toast('Session expired. Please log out and log back in.');
+      return;
+    }
+
+    let alreadyPending;
+    try {
+      alreadyPending = await refreshOwnPremiumRequestStatus(true);
+    } catch (statusError) {
+      toast('Could not check your existing Premium request. Please try again.');
+      console.warn('Premium request status check note:', statusError);
+      return;
+    }
+    if (alreadyPending) {
+      updatePremiumSection(false);
+      toast('You already have a Premium request waiting for Dompinator.');
       return;
     }
 
@@ -8512,14 +8637,14 @@ $('#sendRequestBtn')?.addEventListener('click', async () => {
       return;
     }
 
-    toast('Request sent to Dompinator!');
+    premiumRequestStatus = { userId: uid, pending: true, checkedAt: Date.now() };
+    toast('Request sent to Dompinator! You can send another after it is approved or denied.');
     if ($('#premiumReason')) $('#premiumReason').value = '';
+    updatePremiumSection(false);
     if (isDompinator()) updateNotificationsBadge();
   } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = 'Send request';
-    }
+    premiumRequestSending = false;
+    updatePremiumSection(false);
   }
 });
 
