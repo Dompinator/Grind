@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=48">
+  <link rel="stylesheet" href="styles.css?v=49">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -46,20 +46,26 @@
   <div id="appView" class="app hidden">
     <aside class="sidebar">
       <a class="brand" href="#"><span class="brand-icon">G</span><span>GRIND<span class="brand-dot">.</span></span></a>
-      <div class="side-label">MARKET</div>
-      <nav class="main-nav">
-        <button class="nav-btn active" data-page="feed"><span>◈</span> Feed</button>
-        <button class="nav-btn" data-page="live"><span>◉</span> Live</button>
-        <button class="nav-btn" data-page="create"><span>＋</span> Create</button>
-        <button class="nav-btn" data-page="money"><span>▣</span> Money</button>
-        <button class="nav-btn" data-page="global"><span>⊕</span> Global</button>
-        <button class="nav-btn" data-page="ads"><span>▷</span> Ads</button>
-        <button class="nav-btn" id="navGrindBot" data-page="grindbot"><span>⌘</span> GRIND-BOT <span id="navGrindBotTag" class="nav-tier-chip">PRO+</span></button>
-        <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
-        <button class="nav-btn" data-page="report"><span>△</span> Report</button>
-        <button class="nav-btn" id="navNotifications" data-page="notifications"><span>✦</span> Notifications <span id="navNotificationsBadge" class="nav-count-badge hidden">0</span></button>
-        <button class="nav-btn hidden" id="navAdmin" data-page="admin"><span>❖</span> Admin</button>
-      </nav>
+      <div class="sidebar-scroll">
+        <div class="side-label">MARKET</div>
+        <nav class="main-nav">
+          <button class="nav-btn active" data-page="feed"><span>◈</span> Feed</button>
+          <button class="nav-btn" data-page="live"><span>◉</span> Live</button>
+          <button class="nav-btn" data-page="create"><span>＋</span> Create</button>
+          <button class="nav-btn" data-page="money"><span>▣</span> Money</button>
+          <button class="nav-btn" data-page="global"><span>⊕</span> Global</button>
+          <button class="nav-btn" data-page="ads"><span>▷</span> Ads</button>
+          <button class="nav-btn" id="navGrindBot" data-page="grindbot"><span>⌘</span> GRIND-BOT <span id="navGrindBotTag" class="nav-tier-chip">PRO+</span></button>
+          <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
+          <button class="nav-btn" data-page="report"><span>△</span> Report</button>
+          <button class="nav-btn" id="navNotifications" data-page="notifications"><span>✦</span> Notifications <span id="navNotificationsBadge" class="nav-count-badge hidden">0</span></button>
+          <button class="nav-btn hidden" id="navAdmin" data-page="admin"><span>❖</span> Admin</button>
+        </nav>
+        <div class="side-label side-label-store">STORE</div>
+        <nav class="main-nav">
+          <button class="nav-btn" data-page="marketplace"><span>❖</span> Marketplace</button>
+        </nav>
+      </div>
       <div class="sidebar-bottom">
         <button class="nav-btn pass-side-btn" id="navPassBtn" data-page="pass"><span>★</span> Pass <span id="navPassBadge" class="nav-count-badge hidden">0</span></button>
         <div class="mini-profile">
@@ -263,6 +269,25 @@
             </div>
           </div>
           <div class="form-card">
+            <div class="account-identity-card" id="accountIdentityCard">
+              <div class="avatar account-identity-av" id="accountIdentityAvatar">G</div>
+              <div class="account-identity-meta">
+                <div class="account-identity-name" id="accountIdentityName">Trader</div>
+                <div id="accountIdentityTitleSlot" class="account-title-slot"></div>
+              </div>
+              <button type="button" class="zoom-btn" data-goto="marketplace">Open Crates →</button>
+            </div>
+            <div class="account-titles-box" id="accountTitlesSection">
+              <div class="account-titles-head">
+                <div>
+                  <h4>Equipped Title</h4>
+                  <p class="muted tiny" id="accountTitlesSub">Unlock titles from Season 1 Crates in Store → Marketplace.</p>
+                </div>
+                <span class="muted tiny" id="accountTitlesCount">0 / 12 unlocked</span>
+              </div>
+              <div id="accountTitlesGrid" class="account-titles-grid"></div>
+            </div>
+            <hr style="border-color:#3a2e4a;margin:20px 0">
             <div class="username-edit">
               <label>Username<input id="accountUsername" minlength="3" maxlength="20" autocomplete="nickname" placeholder="Pick a username"></label>
               <button class="primary-btn" id="saveUsernameBtn" type="button">Save username</button>
@@ -643,6 +668,49 @@
               <input id="grindBotInput" maxlength="1500" autocomplete="off" placeholder="Ask GRIND-BOT about net worth, coins, Battle Pass, or tactics...">
               <button type="submit" class="primary-btn" id="grindBotSendBtn">Send</button>
             </form>
+          </div>
+        </section>
+
+        <!-- MARKETPLACE (STORE · CSGO-STYLE CRATES) -->
+        <section id="page-marketplace" class="page hidden">
+          <div class="section-head marketplace-head">
+            <div>
+              <div class="eyebrow purple-text">STORE · SEASON 1 CRATES</div>
+              <h3>Marketplace</h3>
+              <p class="muted">Unbox Season 1 Title Crates. Duplicates are not added and give no cash back.</p>
+            </div>
+            <div class="marketplace-summary-pills">
+              <div class="mkt-pill"><span>CASH</span><strong id="mktCashPill">$15.00</strong></div>
+              <div class="mkt-pill"><span>TITLES</span><strong id="mktUnlockedPill">0 / 12</strong></div>
+              <div class="mkt-pill"><span>EQUIPPED</span><strong id="mktEquippedPill">None</strong></div>
+            </div>
+          </div>
+
+          <div id="marketplaceCratesGrid" class="mkt-crates-grid"></div>
+
+          <div id="marketplaceContentsCard" class="form-card mkt-contents-card">
+            <div class="mkt-contents-head">
+              <div>
+                <div class="eyebrow purple-text" id="mktContentsEyebrow">CRATE CONTENTS</div>
+                <h4 id="mktContentsTitle" style="margin:3px 0 0;">Default Crate 1 Drops</h4>
+                <p class="muted tiny" id="mktContentsSub" style="margin:3px 0 0;">Drop rates for each Season 1 Title inside this crate.</p>
+              </div>
+              <button type="button" class="primary-btn" id="mktOpenSelectedBtn">Open Crate · $100.00</button>
+            </div>
+            <div id="mktOddsBar" class="mkt-odds-bar"></div>
+            <div id="mktContentsGrid" class="mkt-items-grid"></div>
+          </div>
+
+          <div class="form-card mkt-locker-card">
+            <div class="mkt-contents-head">
+              <div>
+                <div class="eyebrow purple-text">YOUR COLLECTION</div>
+                <h4 style="margin:3px 0 0;">Season 1 Title Locker</h4>
+                <p class="muted tiny" style="margin:3px 0 0;">Equip any unlocked title to display it on the Leaderboard and your Account view.</p>
+              </div>
+              <button type="button" class="zoom-btn hidden" id="mktUnequipTitleBtn">Unequip Title</button>
+            </div>
+            <div id="mktLockerGrid" class="mkt-items-grid"></div>
           </div>
         </section>
 
@@ -1043,10 +1111,50 @@
     </div>
   </div>
 
+  <!-- CSGO-STYLE CRATE UNBOXING MODAL -->
+  <div id="crateOpenModal" class="modal-backdrop hidden" style="z-index:118;" role="dialog" aria-modal="true" aria-labelledby="crateOpenTitle">
+    <div class="modal-card crate-open-card" id="crateOpenCard">
+      <div class="modal-head crate-open-head">
+        <div>
+          <div class="eyebrow purple-text" id="crateOpenEyebrow">UNLOCKING CRATE</div>
+          <h3 id="crateOpenTitle">Default Crate 1</h3>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button type="button" class="zoom-btn" id="crateSkipSpinBtn">Skip Spin</button>
+          <button type="button" class="zoom-btn hidden" id="closeCrateModalBtn" aria-label="Close crate opener">✕</button>
+        </div>
+      </div>
+
+      <div class="crate-spinner-stage" id="crateSpinnerStage">
+        <div class="crate-needle-top" aria-hidden="true"></div>
+        <div class="crate-needle-line" aria-hidden="true"></div>
+        <div class="crate-needle-bottom" aria-hidden="true"></div>
+        <div class="crate-spinner-viewport" id="crateSpinnerViewport">
+          <div class="crate-reel" id="crateReel"></div>
+        </div>
+        <div class="crate-spinner-vignette" aria-hidden="true"></div>
+      </div>
+
+      <div id="crateSpinCaption" class="crate-spin-caption">Rolling Season 1 drops...</div>
+
+      <div id="crateRevealPanel" class="crate-reveal-panel hidden">
+        <div class="crate-reveal-glow" id="crateRevealGlow" aria-hidden="true"></div>
+        <div class="crate-reveal-tier" id="crateRevealTier">MYTHIC</div>
+        <div class="crate-reveal-item" id="crateRevealItemName">Protector Of Worlds</div>
+        <div class="crate-reveal-status" id="crateRevealStatus">NEW TITLE UNLOCKED!</div>
+        <div class="crate-reveal-actions">
+          <button type="button" class="primary-btn" id="crateEquipRewardBtn">Equip Title</button>
+          <button type="button" class="zoom-btn" id="crateOpenAgainBtn">Open Another</button>
+          <button type="button" class="zoom-btn" id="crateDoneBtn">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- REWARD BURST LAYER (Daily Login & Season Pass) -->
   <div id="rewardBurstLayer" class="reward-burst-layer" aria-hidden="true"></div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=49"></script>
+  <script src="app.js?v=50"></script>
 </body>
 </html>

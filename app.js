@@ -701,7 +701,8 @@ function clearLocalUserState(uid) {
   [
     'grind_pro_', 'grind_daily_', 'grind_watchlist_', 'grind_watchlist_ts_',
     'grind_reset_done_', 'grind_warn_ack_', 'grind_upd_ack_',
-    'grind_tos_pending_', 'grind_tos_ack_'
+    'grind_tos_pending_', 'grind_tos_ack_',
+    'grind_titles_owned_', 'grind_title_equipped_'
   ].forEach(prefix => {
     try { localStorage.removeItem(prefix + uid); } catch (e) {}
   });
@@ -1404,6 +1405,8 @@ function updateUIProfile() {
   applyUserTheme();
   renderThemeSettings();
   renderMusicSettings();
+  if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+  if (currentPage === 'marketplace' && typeof renderMarketplacePage === 'function') renderMarketplacePage();
   updateNotificationsBadge();
   updatePassNavBadge();
   if (currentPage === 'grindbot') renderGrindBotPage();
@@ -1415,6 +1418,13 @@ function enterApp() {
   loadPassState().then(() => {
     if (currentPage === 'pass') renderPassPage();
   });
+  if (typeof loadTitleSystemState === 'function') {
+    loadTitleSystemState(true).then(() => {
+      if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+      if (currentPage === 'marketplace' && typeof renderMarketplacePage === 'function') renderMarketplacePage();
+      if (currentPage === 'global') renderLeaderboard();
+    });
+  }
   showPage('feed');
   startRealtime();
   loadCoins();
@@ -1506,6 +1516,7 @@ function showPage(page) {
     ads: 'Ads',
     grindbot: 'GRIND-BOT',
     pass: `Season ${passState.season || 1} Pass`,
+    marketplace: 'Marketplace',
     account: 'Account settings',
     report: 'Report player or bug',
     notifications: 'Notifications',
@@ -1519,6 +1530,9 @@ function showPage(page) {
   if (page === 'global') renderLeaderboard();
   if (page === 'ads' && !(wasAds && adLocked)) startAdsPage();
   if (page === 'grindbot') renderGrindBotPage();
+  if (page === 'marketplace' && typeof renderMarketplacePage === 'function') {
+    loadTitleSystemState().then(() => renderMarketplacePage());
+  }
   if (page === 'pass') {
     passScrollInitDone = false;
     loadPassState().then(() => renderPassPage(true));
@@ -1527,6 +1541,11 @@ function showPage(page) {
     updatePremiumSection();
     renderThemeSettings();
     renderMusicSettings();
+    if (typeof loadTitleSystemState === 'function') {
+      loadTitleSystemState().then(() => {
+        if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+      });
+    }
   }
   if (page === 'report') loadReportPage();
   if (page === 'notifications') loadRequests();
@@ -3850,126 +3869,145 @@ function formatSignedMoney(val) {
 }
 
 async function computeWeeklyProfitStats(rawProfiles) {
-  const srvResetTs = adminModStateCache.serverResetTs || 0;
-  const delCoins = adminModStateCache.deletedCoinIds || new Set();
-  const weekStartTs = Date.now() - 7 * 24 * 60 * 60 * 1000;
-
-  let coinsQ = sb.from('coins').select('id, creator_id, price, created_at');
-  let tradesQ = sb.from('trades')
-    .select('user_id, coin_id, type, amount_usd, shares, price_after, created_at')
-    .order('created_at', { ascending: true })
-    .limit(10000);
-  if (srvResetTs > 0) {
-    const iso = new Date(srvResetTs).toISOString();
-    coinsQ = coinsQ.gt('created_at', iso);
-    tradesQ = tradesQ.gt('created_at', iso);
-  }
-
-  const [{ data: allCoins }, { data: allTrades }, selfSoldMap] = await Promise.all([
-    coinsQ,
-    tradesQ,
-    fetchSelfSoldCoins()
-  ]);
-
-  const activeCoinMap = new Map();
-  (allCoins || []).forEach(c => {
-    const cid = String(c.id);
-    if (delCoins.has(cid)) return;
-    if (selfSoldMap && selfSoldMap.has(cid)) return;
-    activeCoinMap.set(cid, {
-      id: cid,
-      price: Number(c.price || 1),
-      createdTs: c.created_at ? new Date(c.created_at).getTime() : 0
-    });
-  });
-
-  const coinPriceBeforeWeek = new Map();
-  const sharesBeforeWeek = new Map(); // uid -> Map(cid -> shares)
-  const currSharesByUser = new Map(); // uid -> Map(cid -> shares)
-  const buys7dByUser = new Map();
-  const sells7dByUser = new Map();
-
-  const ensureUserMap = (outer, uid) => {
-    let m = outer.get(uid);
-    if (!m) {
-      m = new Map();
-      outer.set(uid, m);
-    }
-    return m;
-  };
-
-  (allTrades || []).forEach(t => {
-    const cid = String(t.coin_id || '');
-    if (!activeCoinMap.has(cid)) return;
-    const uid = String(t.user_id || '');
-    if (!uid) return;
-    const ts = t.created_at ? new Date(t.created_at).getTime() : 0;
-    const isSell = t.type === 'sell';
-    const sh = Math.max(0, Number(t.shares || 0));
-    const usd = Math.max(0, Number(t.amount_usd || 0));
-    const priceAfter = Number(t.price_after);
-
-    if (ts < weekStartTs) {
-      if (Number.isFinite(priceAfter) && priceAfter > 0) {
-        coinPriceBeforeWeek.set(cid, priceAfter);
-      }
-      const uStart = ensureUserMap(sharesBeforeWeek, uid);
-      const prevSh = uStart.get(cid) || 0;
-      uStart.set(cid, isSell ? Math.max(0, prevSh - sh) : (prevSh + sh));
-    } else {
-      if (isSell) {
-        sells7dByUser.set(uid, (sells7dByUser.get(uid) || 0) + usd);
-      } else {
-        buys7dByUser.set(uid, (buys7dByUser.get(uid) || 0) + usd);
-      }
-    }
-
-    const uCurr = ensureUserMap(currSharesByUser, uid);
-    const prevCurr = uCurr.get(cid) || 0;
-    uCurr.set(cid, isSell ? Math.max(0, prevCurr - sh) : (prevCurr + sh));
-  });
-
   const statsMap = new Map();
-  rawProfiles.forEach(p => {
-    const pid = String(p.id);
-    const uStart = sharesBeforeWeek.get(pid);
-    const uCurr = currSharesByUser.get(pid);
+  if (!sb || !Array.isArray(rawProfiles) || !rawProfiles.length) return statsMap;
 
-    let startHoldVal = 0;
-    if (uStart) {
-      uStart.forEach((sh, cid) => {
-        if (sh <= 1e-8) return;
-        const coin = activeCoinMap.get(cid);
-        if (!coin) return;
-        const pStart = coinPriceBeforeWeek.get(cid) || (coin.createdTs > 0 && coin.createdTs < weekStartTs ? 1 : coin.price);
-        startHoldVal += calcHoldingsValue(pStart, sh);
-      });
+  try {
+    const srvResetTs = adminModStateCache.serverResetTs || 0;
+    const delCoins = adminModStateCache.deletedCoinIds || new Set();
+    const selfSoldMap = adminModStateCache.selfSoldCoins || new Map();
+    const weekStartTs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+    let coinsQ = sb.from('coins').select('id, creator_id, price, created_at');
+    if (srvResetTs > 0) {
+      coinsQ = coinsQ.gt('created_at', new Date(srvResetTs).toISOString());
     }
 
-    let endHoldVal = 0;
-    if (uCurr) {
-      uCurr.forEach((sh, cid) => {
-        if (sh <= 1e-8) return;
-        const coin = activeCoinMap.get(cid);
-        if (!coin) return;
-        endHoldVal += calcHoldingsValue(coin.price, sh);
+    const fetchAllTrades = async () => {
+      const collected = [];
+      const pageSize = 1000;
+      for (let offset = 0; offset < 5000; offset += pageSize) {
+        let q = sb.from('trades')
+          .select('user_id, coin_id, type, amount_usd, shares, price_after, created_at')
+          .order('created_at', { ascending: true })
+          .range(offset, offset + pageSize - 1);
+        if (srvResetTs > 0) {
+          q = q.gt('created_at', new Date(srvResetTs).toISOString());
+        }
+        const { data: batch, error } = await q;
+        if (error || !Array.isArray(batch) || !batch.length) break;
+        collected.push(...batch);
+        if (batch.length < pageSize) break;
+      }
+      return collected;
+    };
+
+    const [{ data: allCoins }, allTrades] = await Promise.all([
+      coinsQ,
+      fetchAllTrades()
+    ]);
+
+    const activeCoinMap = new Map();
+    (allCoins || []).forEach(c => {
+      const cid = String(c.id);
+      if (delCoins.has(cid)) return;
+      if (selfSoldMap && selfSoldMap.has(cid)) return;
+      activeCoinMap.set(cid, {
+        id: cid,
+        price: Number(c.price || 1),
+        createdTs: c.created_at ? new Date(c.created_at).getTime() : 0
       });
-    }
-
-    const buys7d = buys7dByUser.get(pid) || 0;
-    const sells7d = sells7dByUser.get(pid) || 0;
-    const basisUsd = startHoldVal + buys7d;
-    const profitUsd = (endHoldVal + sells7d) - basisUsd;
-    const hasActivity = basisUsd > 0.01 || sells7d > 0.01;
-    const profitPct = basisUsd > 0.01 ? (profitUsd / basisUsd) * 100 : 0;
-
-    statsMap.set(pid, {
-      profitPct: Number.isFinite(profitPct) ? profitPct : 0,
-      profitUsd: Number.isFinite(profitUsd) ? profitUsd : 0,
-      basisUsd,
-      hasActivity
     });
-  });
+
+    const coinPriceBeforeWeek = new Map();
+    const sharesBeforeWeek = new Map(); // uid -> Map(cid -> shares)
+    const currSharesByUser = new Map(); // uid -> Map(cid -> shares)
+    const buys7dByUser = new Map();
+    const sells7dByUser = new Map();
+
+    const ensureUserMap = (outer, uid) => {
+      let m = outer.get(uid);
+      if (!m) {
+        m = new Map();
+        outer.set(uid, m);
+      }
+      return m;
+    };
+
+    (allTrades || []).forEach(t => {
+      const cid = String(t.coin_id || '');
+      if (!activeCoinMap.has(cid)) return;
+      const uid = String(t.user_id || '');
+      if (!uid) return;
+      const ts = t.created_at ? new Date(t.created_at).getTime() : 0;
+      const isSell = t.type === 'sell';
+      const sh = Math.max(0, Number(t.shares || 0));
+      const usd = Math.max(0, Number(t.amount_usd || 0));
+      const priceAfter = Number(t.price_after);
+
+      if (ts < weekStartTs) {
+        if (Number.isFinite(priceAfter) && priceAfter > 0) {
+          coinPriceBeforeWeek.set(cid, priceAfter);
+        }
+        const uStart = ensureUserMap(sharesBeforeWeek, uid);
+        const prevSh = uStart.get(cid) || 0;
+        uStart.set(cid, isSell ? Math.max(0, prevSh - sh) : (prevSh + sh));
+      } else {
+        if (isSell) {
+          sells7dByUser.set(uid, (sells7dByUser.get(uid) || 0) + usd);
+        } else {
+          buys7dByUser.set(uid, (buys7dByUser.get(uid) || 0) + usd);
+        }
+      }
+
+      const uCurr = ensureUserMap(currSharesByUser, uid);
+      const prevCurr = uCurr.get(cid) || 0;
+      uCurr.set(cid, isSell ? Math.max(0, prevCurr - sh) : (prevCurr + sh));
+    });
+
+    rawProfiles.forEach(p => {
+      const pid = String(p.id);
+      const uStart = sharesBeforeWeek.get(pid);
+      const uCurr = currSharesByUser.get(pid);
+
+      let startHoldVal = 0;
+      if (uStart) {
+        uStart.forEach((sh, cid) => {
+          if (sh <= 1e-8) return;
+          const coin = activeCoinMap.get(cid);
+          if (!coin) return;
+          const pStart = coinPriceBeforeWeek.get(cid) || (coin.createdTs > 0 && coin.createdTs < weekStartTs ? 1 : coin.price);
+          startHoldVal += calcHoldingsValue(pStart, sh);
+        });
+      }
+
+      let endHoldVal = 0;
+      if (uCurr) {
+        uCurr.forEach((sh, cid) => {
+          if (sh <= 1e-8) return;
+          const coin = activeCoinMap.get(cid);
+          if (!coin) return;
+          endHoldVal += calcHoldingsValue(coin.price, sh);
+        });
+      }
+
+      const buys7d = buys7dByUser.get(pid) || 0;
+      const sells7d = sells7dByUser.get(pid) || 0;
+      const basisUsd = startHoldVal + buys7d;
+      const profitUsd = (endHoldVal + sells7d) - basisUsd;
+      const hasActivity = basisUsd > 0.01 || sells7d > 0.01;
+      const profitPct = basisUsd > 0.01 ? (profitUsd / basisUsd) * 100 : 0;
+
+      statsMap.set(pid, {
+        profitPct: Number.isFinite(profitPct) ? profitPct : 0,
+        profitUsd: Number.isFinite(profitUsd) ? profitUsd : 0,
+        basisUsd,
+        hasActivity
+      });
+    });
+  } catch (err) {
+    console.warn('Weekly profit computation note:', err);
+  }
 
   return statsMap;
 }
@@ -3979,7 +4017,15 @@ async function renderLeaderboard() {
   const seq = ++lbRenderSeq;
   const modeAtStart = lbMode;
   const weeklySortAtStart = lbWeeklySort;
-  await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
+  const listEl = $('#leaderboardList');
+  if (modeAtStart === 'weekly' && listEl) {
+    listEl.innerHTML = '<div class="empty-state" style="padding:28px 14px;"><p class="muted tiny">Calculating 7-day profits...</p></div>';
+  }
+  await Promise.all([
+    loadProUserIds(),
+    fetchAdminModerationState(),
+    typeof loadTitleSystemState === 'function' ? loadTitleSystemState() : Promise.resolve()
+  ]);
   if (currentUser) await updateNetWorth();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
   const { data } = await sb.from('profiles').select('id, username, avatar_url, cash, net_worth, time_played, is_premium').limit(200);
@@ -4103,7 +4149,6 @@ async function renderLeaderboard() {
   if (lbCleanupTimer) { clearTimeout(lbCleanupTimer); lbCleanupTimer = null; }
   if (lbRankRaf) { cancelAnimationFrame(lbRankRaf); lbRankRaf = null; }
 
-  const listEl = $('#leaderboardList');
   const bannerEl = $('#lbMovementBanner');
   const modeDisplayName = lbMode === 'weekly'
     ? (lbWeeklySort === 'down' ? 'Weekly Profit (Down Most %)' : 'Weekly Profit (Most % Up)')
@@ -4173,6 +4218,11 @@ async function renderLeaderboard() {
       else if (pid === worstLoserPid) tagHtml = '<span class="lb-weekly-tag down">▼ Down Most</span>';
     }
 
+    const equippedTitleId = typeof getUserEquippedTitleId === 'function' ? getUserEquippedTitleId(pid) : null;
+    const equippedTitleHtml = equippedTitleId && typeof renderTitleBadgeHtml === 'function'
+      ? `<div class="lb-title-slot">${renderTitleBadgeHtml(equippedTitleId, true)}</div>`
+      : '';
+
     return `
       <div class="lb-row ${stateCls} ${isMe ? 'is-me' : ''}" data-lb-idx="${currIdx}" data-lb-prev="${prevIdx !== null ? prevIdx : ''}" data-lb-delta="${delta !== null ? delta : 'new'}">
         <div class="lb-rank-side">
@@ -4182,6 +4232,7 @@ async function renderLeaderboard() {
         <div class="avatar">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
         <div class="lb-info">
           <strong class="profile-link" data-profile="${escapeHtml(pid)}">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}${tagHtml}</strong>
+          ${equippedTitleHtml}
           <div class="muted tiny">${escapeHtml(subText)}</div>
         </div>
         <div class="lb-value ${valueCls}">${valueHtml}</div>
@@ -4318,8 +4369,11 @@ async function openProfileModal(userId) {
   body.innerHTML = '<p class="muted tiny">Loading profile...</p>';
   modal.classList.remove('hidden');
 
-  await loadProUserIds();
-  await fetchAdminModerationState();
+  await Promise.all([
+    loadProUserIds(),
+    fetchAdminModerationState(),
+    typeof loadTitleSystemState === 'function' ? loadTitleSystemState() : Promise.resolve()
+  ]);
   const { data: p } = await sb
     .from('profiles')
     .select('id, username, avatar_url, net_worth, time_played, is_premium')
@@ -4335,12 +4389,17 @@ async function openProfileModal(userId) {
   const isTargetBanned = Boolean(adminModStateCache.bans.get(p.id)?.banned);
   const isTargetPremium = isEffectivePremium(p);
   const canModerate = isDompinator() && currentUser && p.id !== currentUser.id;
+  const equippedTitleId = typeof getUserEquippedTitleId === 'function' ? getUserEquippedTitleId(p.id) : null;
+  const equippedTitleHtml = equippedTitleId && typeof renderTitleBadgeHtml === 'function'
+    ? `<div class="profile-modal-title-slot">${renderTitleBadgeHtml(equippedTitleId)}</div>`
+    : '';
 
   body.innerHTML = `
     <div class="profile-modal-hero">
       <div class="avatar" style="width:58px;height:58px;font-size:22px;">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
       <div>
         <h3 style="margin:0;">${escapeHtml(p.username || 'Unknown')}${tierBadgeHtml(p)}${isTargetBanned ? '<span class="banned-tag">BANNED</span>' : ''}</h3>
+        ${equippedTitleHtml}
         <div class="muted tiny">${tierLabel(p)}</div>
       </div>
     </div>
@@ -6829,6 +6888,13 @@ function startRealtime() {
       if (currentPage === 'feed') fetchFeaturedCoins().then(() => renderFeaturedSection());
       if (currentPage === 'live') loadLiveFeed();
       if (currentPage === 'pass') loadPassState().then(() => renderPassPage());
+      if (typeof loadTitleSystemState === 'function') {
+        loadTitleSystemState(true).then(() => {
+          if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+          if (currentPage === 'marketplace' && typeof renderMarketplacePage === 'function') renderMarketplacePage();
+          if (currentPage === 'global' && Date.now() > lbAnimatingUntil) renderLeaderboard();
+        });
+      }
       if (currentPage === 'notifications') loadRequests();
       else if (currentUser) updateNotificationsBadge();
       if (isDompinator() && currentPage === 'admin') loadAdminPage();
@@ -10736,6 +10802,10 @@ window.addEventListener('keydown', e => {
     closeMobileSidebar();
     return;
   }
+  if (!$('#crateOpenModal')?.classList.contains('hidden')) {
+    if (!titleSystemState.isSpinning) closeCrateModal();
+    return;
+  }
   if (commentGifPickerOpen) {
     setCommentGifPickerOpen(false);
     return;
@@ -10747,6 +10817,811 @@ window.addEventListener('keydown', e => {
   if (!$('#coinWatchModal')?.classList.contains('hidden')) closeCoinWatchModal(false);
   else if (!$('#dmModal')?.classList.contains('hidden')) hideModalSmooth($('#dmModal'));
 });
+
+// ============================================================
+// ---------- STORE · MARKETPLACE · SEASON 1 CRATES & TITLES --
+// ============================================================
+const TITLE_RARITIES = {
+  common:    { key: 'common',    label: 'Common',    order: 1 },
+  uncommon:  { key: 'uncommon',  label: 'Uncommon',  order: 2 },
+  epic:      { key: 'epic',      label: 'Epic',      order: 3 },
+  legendary: { key: 'legendary', label: 'Legendary', order: 4 },
+  mythic:    { key: 'mythic',    label: 'Mythic',    order: 5 }
+};
+
+const SEASON_1_TITLES = [
+  { id: 's1_creator',   name: 'Creator',                     rarity: 'common' },
+  { id: 's1_cool',      name: 'Cool',                        rarity: 'common' },
+  { id: 's1_dude',      name: 'Dude',                        rarity: 'common' },
+  { id: 's1_lol',       name: 'LOL',                         rarity: 'uncommon' },
+  { id: 's1_master',    name: 'Master',                      rarity: 'uncommon' },
+  { id: 's1_nugget',    name: 'Chicken Nugget',              rarity: 'epic' },
+  { id: 's1_insane',    name: 'Insane',                      rarity: 'epic' },
+  { id: 's1_artificial',name: 'Artificial',                  rarity: 'epic' },
+  { id: 's1_guardian',  name: 'Guardian',                    rarity: 'legendary' },
+  { id: 's1_angel',     name: 'Angel',                       rarity: 'legendary' },
+  { id: 's1_protector', name: 'Protector Of Worlds',         rarity: 'mythic' },
+  { id: 's1_agow',      name: 'Artificial Guardian Of Worlds', rarity: 'mythic' }
+];
+
+const SEASON_1_TITLE_MAP = new Map(SEASON_1_TITLES.map(t => [t.id, t]));
+
+const STORE_CRATES = [
+  {
+    id: 'default_1',
+    name: 'Default Crate 1',
+    price: 100,
+    badge: 'SEASON 1',
+    tagline: 'Standard Season 1 drop table with all 12 collectible Titles.',
+    ultra: false,
+    tierWeights: { common: 62, uncommon: 25, epic: 10, legendary: 2.5, mythic: 0.5 }
+  },
+  {
+    id: 'ultra_1',
+    name: 'ULTRA Crate 1',
+    price: 500,
+    badge: '2X EPIC · LEG · MYTHIC',
+    tagline: '2X higher drop chance on every Epic, Legendary & Mythic Title!',
+    ultra: true,
+    tierWeights: { common: 40, uncommon: 34, epic: 20, legendary: 5, mythic: 1 }
+  }
+];
+
+const titleSystemState = {
+  ownedIds: new Set(),
+  equippedByUser: new Map(), // userId -> titleId
+  lastSyncAt: 0,
+  loadedForUid: null,
+  selectedCrateId: 'default_1',
+  isOpening: false,
+  isSpinning: false,
+  spinRaf: null,
+  lastReveal: null // { crateId, item, isDuplicate }
+};
+
+function getTitleMeta(titleId) {
+  return SEASON_1_TITLE_MAP.get(String(titleId || '')) || null;
+}
+
+function getUserEquippedTitleId(userId) {
+  if (!userId) return null;
+  const tid = titleSystemState.equippedByUser.get(String(userId)) || null;
+  return tid && SEASON_1_TITLE_MAP.has(tid) ? tid : null;
+}
+
+function renderTitleBadgeHtml(titleId, compact = false) {
+  const item = getTitleMeta(titleId);
+  if (!item) return '';
+  const rar = TITLE_RARITIES[item.rarity] || TITLE_RARITIES.common;
+  return `<span class="user-title-badge rarity-${escapeHtml(rar.key)} ${compact ? 'compact' : ''}" title="${escapeHtml(rar.label)} Title">${escapeHtml(item.name)}</span>`;
+}
+
+function readLocalOwnedTitles(uid) {
+  try {
+    const raw = localStorage.getItem('grind_titles_owned_' + uid);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr.filter(id => SEASON_1_TITLE_MAP.has(id));
+    }
+  } catch (e) {}
+  return [];
+}
+
+function writeLocalOwnedTitles(uid, set) {
+  try {
+    localStorage.setItem('grind_titles_owned_' + uid, JSON.stringify(Array.from(set)));
+  } catch (e) {}
+}
+
+function readLocalEquippedTitle(uid) {
+  try {
+    const val = localStorage.getItem('grind_title_equipped_' + uid);
+    return val && SEASON_1_TITLE_MAP.has(val) ? val : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeLocalEquippedTitle(uid, titleId) {
+  try {
+    if (titleId) localStorage.setItem('grind_title_equipped_' + uid, titleId);
+    else localStorage.removeItem('grind_title_equipped_' + uid);
+  } catch (e) {}
+}
+
+async function loadTitleSystemState(force = false) {
+  if (!sb) return;
+  const now = Date.now();
+  const uid = currentUser?.id ? String(currentUser.id) : null;
+  if (!force && (now - titleSystemState.lastSyncAt) < 8000 && titleSystemState.loadedForUid === uid) {
+    return;
+  }
+
+  if (uid) {
+    readLocalOwnedTitles(uid).forEach(id => titleSystemState.ownedIds.add(id));
+    const localEq = readLocalEquippedTitle(uid);
+    if (localEq && !titleSystemState.equippedByUser.has(uid)) {
+      titleSystemState.equippedByUser.set(uid, localEq);
+    }
+  }
+
+  try {
+    const equipPromise = sb
+      .from('premium_requests')
+      .select('user_id, reason, created_at')
+      .like('reason', '__TITLE_EQUIP__:%')
+      .order('created_at', { ascending: true })
+      .limit(1500);
+
+    const ownedPromise = uid
+      ? sb
+          .from('premium_requests')
+          .select('reason')
+          .eq('user_id', uid)
+          .like('reason', '__CRATE_ITEM__:%')
+          .limit(300)
+      : Promise.resolve({ data: [] });
+
+    const [eqRes, ownRes] = await Promise.all([equipPromise, ownedPromise]);
+
+    const nextEquipped = new Map();
+    (eqRes?.data || []).forEach(r => {
+      const raw = String(r.reason || '');
+      if (!raw.startsWith('__TITLE_EQUIP__:')) return;
+      try {
+        const p = JSON.parse(raw.slice('__TITLE_EQUIP__:'.length));
+        const rUid = String(r.user_id || '');
+        if (!rUid) return;
+        const tid = p?.titleId ? String(p.titleId) : null;
+        if (tid && SEASON_1_TITLE_MAP.has(tid)) {
+          nextEquipped.set(rUid, tid);
+        } else {
+          nextEquipped.delete(rUid);
+        }
+      } catch (e) {}
+    });
+    titleSystemState.equippedByUser = nextEquipped;
+
+    if (uid) {
+      const owned = new Set(readLocalOwnedTitles(uid));
+      (ownRes?.data || []).forEach(r => {
+        const raw = String(r.reason || '');
+        if (!raw.startsWith('__CRATE_ITEM__:')) return;
+        try {
+          const p = JSON.parse(raw.slice('__CRATE_ITEM__:'.length));
+          if (p?.itemId && SEASON_1_TITLE_MAP.has(String(p.itemId))) {
+            owned.add(String(p.itemId));
+          }
+        } catch (e) {}
+      });
+      titleSystemState.ownedIds = owned;
+      writeLocalOwnedTitles(uid, owned);
+      const eqMine = nextEquipped.get(uid) || null;
+      writeLocalEquippedTitle(uid, eqMine);
+    }
+
+    titleSystemState.lastSyncAt = Date.now();
+    titleSystemState.loadedForUid = uid;
+  } catch (e) {}
+}
+
+async function equipUserTitle(titleId = null) {
+  if (!currentUser?.id || !sb) return;
+  const uid = String(currentUser.id);
+  const cleanId = titleId && SEASON_1_TITLE_MAP.has(String(titleId)) ? String(titleId) : null;
+  if (cleanId && !titleSystemState.ownedIds.has(cleanId)) {
+    toast('Unlock that title from a crate first!');
+    return;
+  }
+
+  if (cleanId) titleSystemState.equippedByUser.set(uid, cleanId);
+  else titleSystemState.equippedByUser.delete(uid);
+  writeLocalEquippedTitle(uid, cleanId);
+  titleSystemState.lastSyncAt = Date.now();
+
+  renderAccountIdentityAndTitles();
+  if (currentPage === 'marketplace') renderMarketplacePage();
+  if (currentPage === 'global') renderLeaderboard();
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__TITLE_EQUIP__:' + JSON.stringify({ titleId: cleanId, ts: Date.now() }),
+    status: 'denied'
+  });
+
+  if (error) {
+    toast('Title sync note: ' + error.message);
+    return;
+  }
+  const meta = cleanId ? getTitleMeta(cleanId) : null;
+  toast(meta ? `Equipped "${meta.name}"!` : 'Title unequipped');
+}
+
+function renderAccountIdentityAndTitles() {
+  if (!currentUser) return;
+  const uid = String(currentUser.id);
+  const avEl = $('#accountIdentityAvatar');
+  const nameEl = $('#accountIdentityName');
+  const slotEl = $('#accountIdentityTitleSlot');
+  const countEl = $('#accountTitlesCount');
+  const gridEl = $('#accountTitlesGrid');
+
+  if (avEl) {
+    avEl.innerHTML = currentUser.avatar_url
+      ? `<img src="${escapeHtml(currentUser.avatar_url)}">`
+      : escapeHtml((currentUser.username || 'G')[0].toUpperCase());
+  }
+  if (nameEl) {
+    nameEl.innerHTML = `${escapeHtml(currentUser.username || 'Trader')}${tierBadgeHtml(currentUser)}`;
+  }
+
+  const equippedId = getUserEquippedTitleId(uid);
+  if (slotEl) {
+    slotEl.innerHTML = equippedId
+      ? renderTitleBadgeHtml(equippedId)
+      : '<span class="muted tiny">No title equipped</span>';
+  }
+  if (countEl) {
+    countEl.textContent = `${titleSystemState.ownedIds.size} / ${SEASON_1_TITLES.length} unlocked`;
+  }
+  if (gridEl) {
+    const ownedItems = SEASON_1_TITLES.filter(t => titleSystemState.ownedIds.has(t.id));
+    if (!ownedItems.length) {
+      gridEl.innerHTML = '<div class="muted tiny">No titles unlocked yet — open Season 1 Crates in Store → Marketplace!</div>';
+    } else {
+      gridEl.innerHTML = `
+        <button type="button" class="account-title-opt ${!equippedId ? 'active' : ''}" data-acc-title="">
+          <span>None</span>
+        </button>
+        ${ownedItems.map(item => `
+          <button type="button" class="account-title-opt rarity-${escapeHtml(item.rarity)} ${equippedId === item.id ? 'active' : ''}" data-acc-title="${escapeHtml(item.id)}">
+            <span>${escapeHtml(item.name)}</span>
+            <small>${escapeHtml(TITLE_RARITIES[item.rarity]?.label || item.rarity)}</small>
+          </button>
+        `).join('')}
+      `;
+      $$('#accountTitlesGrid [data-acc-title]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const val = btn.dataset.accTitle || null;
+          equipUserTitle(val);
+        });
+      });
+    }
+  }
+}
+
+function getCrateItemChancePct(crate, rarity) {
+  const sameTierCount = SEASON_1_TITLES.filter(t => t.rarity === rarity).length || 1;
+  const tierWeight = Number(crate?.tierWeights?.[rarity] || 0);
+  return tierWeight / sameTierCount;
+}
+
+function rollItemFromCrate(crate) {
+  const weights = crate.tierWeights;
+  const tiers = Object.keys(weights);
+  const total = tiers.reduce((s, k) => s + Number(weights[k] || 0), 0);
+  let r = Math.random() * total;
+  let pickedTier = 'common';
+  for (const k of tiers) {
+    r -= Number(weights[k] || 0);
+    if (r <= 0) {
+      pickedTier = k;
+      break;
+    }
+  }
+  const pool = SEASON_1_TITLES.filter(t => t.rarity === pickedTier);
+  return pool[Math.floor(Math.random() * pool.length)] || SEASON_1_TITLES[0];
+}
+
+function buildCrateCaseArtSvg(isUltra) {
+  const accent = isUltra ? '#fbbf24' : '#38bdf8';
+  const accent2 = isUltra ? '#ef4444' : '#a855f7';
+  const baseDark = isUltra ? '#261714' : '#161b2e';
+  return `
+    <svg viewBox="0 0 120 96" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <defs>
+        <linearGradient id="crateBody_${isUltra ? 'u' : 'd'}" x1="0" y1="0" x2="120" y2="96" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stop-color="${baseDark}"/>
+          <stop offset="100%" stop-color="#0b0814"/>
+        </linearGradient>
+        <linearGradient id="crateTrim_${isUltra ? 'u' : 'd'}" x1="0" y1="0" x2="120" y2="0" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stop-color="${accent}"/>
+          <stop offset="100%" stop-color="${accent2}"/>
+        </linearGradient>
+      </defs>
+      <rect x="8" y="22" width="104" height="62" rx="10" fill="url(#crateBody_${isUltra ? 'u' : 'd'})" stroke="url(#crateTrim_${isUltra ? 'u' : 'd'})" stroke-width="2.5"/>
+      <path d="M14 22L24 10H96L106 22H14Z" fill="#1b152a" stroke="url(#crateTrim_${isUltra ? 'u' : 'd'})" stroke-width="2"/>
+      <line x1="8" y1="45" x2="112" y2="45" stroke="url(#crateTrim_${isUltra ? 'u' : 'd'})" stroke-width="2" stroke-opacity="0.7"/>
+      <rect x="46" y="37" width="28" height="17" rx="4" fill="#0d0917" stroke="${accent}" stroke-width="2"/>
+      <circle cx="60" cy="45.5" r="3" fill="${accent}"/>
+      <path d="M24 58H40M80 58H96" stroke="${accent2}" stroke-width="2.5" stroke-linecap="round" stroke-opacity="0.65"/>
+      <path d="M24 70H96" stroke="#ffffff" stroke-opacity="0.1" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  `;
+}
+
+function playCrateTickSound(speedRatio = 1) {
+  try {
+    const ctx = ensureGrindAudioCtx();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    const baseFreq = 680 + Math.min(1, Math.max(0, speedRatio)) * 420;
+    osc.frequency.setValueAtTime(baseFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(220, now + 0.032);
+    gain.gain.setValueAtTime(0.085, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.036);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.04);
+  } catch (e) {}
+}
+
+function playCrateLatchSound() {
+  try {
+    const ctx = ensureGrindAudioCtx();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    const now = ctx.currentTime;
+    [240, 420].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq, now + i * 0.06);
+      osc.frequency.exponentialRampToValueAtTime(freq * 1.4, now + i * 0.06 + 0.08);
+      gain.gain.setValueAtTime(0.06, now + i * 0.06);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.06 + 0.11);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + i * 0.06);
+      osc.stop(now + i * 0.06 + 0.12);
+    });
+  } catch (e) {}
+}
+
+function playCrateRevealSound(rarity) {
+  try {
+    const ctx = ensureGrindAudioCtx();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    const now = ctx.currentTime;
+    const chords = {
+      common:    [392.0, 493.88],
+      uncommon:  [440.0, 554.37, 659.25],
+      epic:      [392.0, 523.25, 659.25, 783.99],
+      legendary: [440.0, 554.37, 659.25, 880.0, 1108.73],
+      mythic:    [293.66, 440.0, 587.33, 739.99, 880.0, 1174.66]
+    };
+    const notes = chords[rarity] || chords.common;
+    notes.forEach((f, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = rarity === 'mythic' || rarity === 'legendary' ? 'triangle' : 'sine';
+      const t0 = now + idx * 0.055;
+      osc.frequency.setValueAtTime(f, t0);
+      gain.gain.setValueAtTime(0.001, t0);
+      gain.gain.linearRampToValueAtTime(rarity === 'mythic' ? 0.12 : 0.09, t0 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.65);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + 0.68);
+    });
+  } catch (e) {}
+}
+
+function renderMarketplacePage() {
+  if (!currentUser) return;
+  const uid = String(currentUser.id);
+  const equippedId = getUserEquippedTitleId(uid);
+  const equippedMeta = equippedId ? getTitleMeta(equippedId) : null;
+
+  if ($('#mktCashPill')) $('#mktCashPill').textContent = money(currentUser.cash || 0);
+  if ($('#mktUnlockedPill')) $('#mktUnlockedPill').textContent = `${titleSystemState.ownedIds.size} / ${SEASON_1_TITLES.length}`;
+  if ($('#mktEquippedPill')) {
+    $('#mktEquippedPill').innerHTML = equippedMeta
+      ? renderTitleBadgeHtml(equippedMeta.id, true)
+      : 'None';
+  }
+  if ($('#mktUnequipTitleBtn')) {
+    $('#mktUnequipTitleBtn').classList.toggle('hidden', !equippedId);
+  }
+
+  const cratesGrid = $('#marketplaceCratesGrid');
+  if (cratesGrid) {
+    cratesGrid.innerHTML = STORE_CRATES.map(cr => {
+      const selected = titleSystemState.selectedCrateId === cr.id;
+      const canAfford = Number(currentUser.cash || 0) >= cr.price;
+      return `
+        <div class="mkt-crate-card ${cr.ultra ? 'is-ultra' : ''} ${selected ? 'selected' : ''}" data-select-crate="${escapeHtml(cr.id)}">
+          <div class="mkt-crate-top">
+            <span class="mkt-crate-badge ${cr.ultra ? 'ultra' : ''}">${escapeHtml(cr.badge)}</span>
+            <span class="mkt-crate-price">${money(cr.price)}</span>
+          </div>
+          <div class="mkt-crate-art">${buildCrateCaseArtSvg(cr.ultra)}</div>
+          <div class="mkt-crate-info">
+            <h4>${escapeHtml(cr.name)}</h4>
+            <p class="muted tiny">${escapeHtml(cr.tagline)}</p>
+          </div>
+          <div class="mkt-crate-odds-chips">
+            <span class="mkt-odds-chip rarity-epic">Epic ${cr.tierWeights.epic}%</span>
+            <span class="mkt-odds-chip rarity-legendary">Legendary ${cr.tierWeights.legendary}%</span>
+            <span class="mkt-odds-chip rarity-mythic">Mythic ${cr.tierWeights.mythic}%</span>
+          </div>
+          <div class="mkt-crate-actions">
+            <button type="button" class="zoom-btn" data-inspect-crate="${escapeHtml(cr.id)}">${selected ? 'Inspecting' : 'Inspect Drops'}</button>
+            <button type="button" class="${cr.ultra ? 'pro-upgrade-cta mkt-ultra-btn' : 'primary-btn'}" data-open-crate="${escapeHtml(cr.id)}" ${!canAfford || titleSystemState.isOpening ? 'disabled' : ''}>
+              ${canAfford ? `Open · ${money(cr.price)}` : `Need ${money(cr.price)}`}
+            </button>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    $$('#marketplaceCratesGrid [data-inspect-crate]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        titleSystemState.selectedCrateId = btn.dataset.inspectCrate;
+        renderMarketplacePage();
+      });
+    });
+    $$('#marketplaceCratesGrid [data-select-crate]').forEach(card => {
+      card.addEventListener('click', () => {
+        titleSystemState.selectedCrateId = card.dataset.selectCrate;
+        renderMarketplacePage();
+      });
+    });
+    $$('#marketplaceCratesGrid [data-open-crate]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        openCrateWithAnimation(btn.dataset.openCrate);
+      });
+    });
+  }
+
+  const activeCrate = STORE_CRATES.find(c => c.id === titleSystemState.selectedCrateId) || STORE_CRATES[0];
+  if ($('#mktContentsEyebrow')) {
+    $('#mktContentsEyebrow').textContent = activeCrate.ultra ? 'ULTRA CRATE CONTENTS · 2X HIGHER TIERS' : 'DEFAULT CRATE CONTENTS';
+  }
+  if ($('#mktContentsTitle')) $('#mktContentsTitle').textContent = `${activeCrate.name} · Season 1 Titles`;
+  if ($('#mktContentsSub')) {
+    $('#mktContentsSub').textContent = activeCrate.ultra
+      ? 'Epic, Legendary, and Mythic drop rates are doubled compared to Default Crate 1.'
+      : 'All 12 Season 1 Titles can drop from this crate. Duplicates are not added.';
+  }
+  const openSelBtn = $('#mktOpenSelectedBtn');
+  if (openSelBtn) {
+    const canAfford = Number(currentUser.cash || 0) >= activeCrate.price;
+    openSelBtn.textContent = `Open ${activeCrate.name} · ${money(activeCrate.price)}`;
+    openSelBtn.disabled = !canAfford || titleSystemState.isOpening;
+    openSelBtn.onclick = () => openCrateWithAnimation(activeCrate.id);
+  }
+
+  const oddsBar = $('#mktOddsBar');
+  if (oddsBar) {
+    oddsBar.innerHTML = Object.entries(activeCrate.tierWeights).map(([rar, pct]) => `
+      <span class="mkt-odds-pill rarity-${escapeHtml(rar)}">
+        <i></i>${escapeHtml(TITLE_RARITIES[rar]?.label || rar)}: <strong>${pct}%</strong>
+      </span>
+    `).join('');
+  }
+
+  const contentsGrid = $('#mktContentsGrid');
+  if (contentsGrid) {
+    const sorted = [...SEASON_1_TITLES].sort((a, b) => (TITLE_RARITIES[b.rarity]?.order || 0) - (TITLE_RARITIES[a.rarity]?.order || 0));
+    contentsGrid.innerHTML = sorted.map(item => {
+      const rar = TITLE_RARITIES[item.rarity] || TITLE_RARITIES.common;
+      const owned = titleSystemState.ownedIds.has(item.id);
+      const chance = getCrateItemChancePct(activeCrate, item.rarity);
+      return `
+        <div class="mkt-item-card rarity-${escapeHtml(rar.key)} ${owned ? 'is-owned' : ''}">
+          <div class="mkt-item-top">
+            <span class="mkt-item-rarity">${escapeHtml(rar.label)}</span>
+            <span class="mkt-item-chance">${chance.toFixed(2)}%</span>
+          </div>
+          <div class="mkt-item-name">${escapeHtml(item.name)}</div>
+          <div class="mkt-item-foot">
+            ${owned ? '<span class="mkt-owned-tag">✓ Owned</span>' : '<span class="muted tiny">Title</span>'}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  const lockerGrid = $('#mktLockerGrid');
+  if (lockerGrid) {
+    const sorted = [...SEASON_1_TITLES].sort((a, b) => (TITLE_RARITIES[b.rarity]?.order || 0) - (TITLE_RARITIES[a.rarity]?.order || 0));
+    lockerGrid.innerHTML = sorted.map(item => {
+      const rar = TITLE_RARITIES[item.rarity] || TITLE_RARITIES.common;
+      const owned = titleSystemState.ownedIds.has(item.id);
+      const isEquipped = equippedId === item.id;
+      return `
+        <div class="mkt-item-card rarity-${escapeHtml(rar.key)} ${owned ? 'is-owned' : 'is-locked'} ${isEquipped ? 'is-equipped' : ''}">
+          <div class="mkt-item-top">
+            <span class="mkt-item-rarity">${escapeHtml(rar.label)}</span>
+            ${isEquipped ? '<span class="mkt-equipped-tag">Equipped</span>' : (owned ? '<span class="mkt-owned-tag">Unlocked</span>' : '<span class="muted tiny">Locked</span>')}
+          </div>
+          <div class="mkt-item-name">${escapeHtml(item.name)}</div>
+          <div class="mkt-item-foot">
+            ${owned
+              ? `<button type="button" class="${isEquipped ? 'zoom-btn' : 'primary-btn'} mkt-equip-btn" data-equip-title="${escapeHtml(isEquipped ? '' : item.id)}">${isEquipped ? 'Unequip' : 'Equip'}</button>`
+              : '<span class="muted tiny">Unbox in Crate 1</span>'}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    $$('#mktLockerGrid [data-equip-title]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        equipUserTitle(btn.dataset.equipTitle || null);
+      });
+    });
+  }
+}
+
+$('#mktUnequipTitleBtn')?.addEventListener('click', () => equipUserTitle(null));
+
+function closeCrateModal() {
+  if (titleSystemState.spinRaf) {
+    cancelAnimationFrame(titleSystemState.spinRaf);
+    titleSystemState.spinRaf = null;
+  }
+  titleSystemState.isSpinning = false;
+  titleSystemState.isOpening = false;
+  hideModalSmooth($('#crateOpenModal'));
+  renderMarketplacePage();
+}
+
+function showCrateRevealResult(crate, rolledItem, isDuplicate) {
+  titleSystemState.isSpinning = false;
+  if (titleSystemState.spinRaf) {
+    cancelAnimationFrame(titleSystemState.spinRaf);
+    titleSystemState.spinRaf = null;
+  }
+
+  const skipBtn = $('#crateSkipSpinBtn');
+  const closeBtn = $('#closeCrateModalBtn');
+  const caption = $('#crateSpinCaption');
+  const panel = $('#crateRevealPanel');
+  const tierEl = $('#crateRevealTier');
+  const nameEl = $('#crateRevealItemName');
+  const statusEl = $('#crateRevealStatus');
+  const equipBtn = $('#crateEquipRewardBtn');
+  const againBtn = $('#crateOpenAgainBtn');
+  const card = $('#crateOpenCard');
+
+  if (skipBtn) skipBtn.classList.add('hidden');
+  if (closeBtn) closeBtn.classList.remove('hidden');
+  if (caption) caption.classList.add('hidden');
+
+  const rar = TITLE_RARITIES[rolledItem.rarity] || TITLE_RARITIES.common;
+  if (card) {
+    card.dataset.revealRarity = rar.key;
+  }
+  if (tierEl) tierEl.textContent = rar.label.toUpperCase();
+  if (nameEl) nameEl.textContent = rolledItem.name;
+  if (statusEl) {
+    if (isDuplicate) {
+      statusEl.textContent = 'ALREADY OWNED · Duplicate not added ($0 cashback)';
+      statusEl.className = 'crate-reveal-status is-dup';
+    } else {
+      statusEl.textContent = 'NEW TITLE UNLOCKED!';
+      statusEl.className = 'crate-reveal-status is-new';
+    }
+  }
+  if (equipBtn && currentUser) {
+    const alreadyEquipped = getUserEquippedTitleId(currentUser.id) === rolledItem.id;
+    equipBtn.textContent = alreadyEquipped ? 'Already Equipped' : 'Equip Title';
+    equipBtn.disabled = alreadyEquipped;
+    equipBtn.onclick = async () => {
+      await equipUserTitle(rolledItem.id);
+      equipBtn.textContent = 'Equipped ✓';
+      equipBtn.disabled = true;
+    };
+  }
+  if (againBtn && currentUser) {
+    const canAgain = Number(currentUser.cash || 0) >= crate.price;
+    againBtn.textContent = `Open Another · ${money(crate.price)}`;
+    againBtn.disabled = !canAgain;
+    againBtn.onclick = () => openCrateWithAnimation(crate.id);
+  }
+  if (panel) {
+    panel.className = `crate-reveal-panel rarity-${rar.key}`;
+  }
+
+  playCrateRevealSound(rar.key);
+  renderMarketplacePage();
+  renderAccountIdentityAndTitles();
+}
+
+async function openCrateWithAnimation(crateId) {
+  if (!currentUser?.id || !sb || titleSystemState.isOpening || titleSystemState.isSpinning) return;
+  const crate = STORE_CRATES.find(c => c.id === crateId) || STORE_CRATES[0];
+
+  titleSystemState.isOpening = true;
+  if (currentPage === 'marketplace') renderMarketplacePage();
+
+  let liveCash = Number(currentUser.cash || 0);
+  try {
+    const { data: profRow } = await sb
+      .from('profiles')
+      .select('cash')
+      .eq('id', currentUser.id)
+      .maybeSingle();
+    if (profRow && profRow.cash != null) liveCash = Number(profRow.cash);
+  } catch (e) {}
+
+  if (liveCash < crate.price) {
+    titleSystemState.isOpening = false;
+    if (currentPage === 'marketplace') renderMarketplacePage();
+    toast(`You need ${money(crate.price)} to open ${crate.name}.`);
+    return;
+  }
+
+  const newCash = Math.round((liveCash - crate.price) * 100) / 100;
+  const { error: cashErr } = await sb
+    .from('profiles')
+    .update({ cash: newCash })
+    .eq('id', currentUser.id);
+
+  if (cashErr) {
+    titleSystemState.isOpening = false;
+    if (currentPage === 'marketplace') renderMarketplacePage();
+    toast('Purchase failed: ' + cashErr.message);
+    return;
+  }
+
+  currentUser.cash = newCash;
+  if ($('#topCash')) $('#topCash').textContent = money(newCash);
+  if ($('#moneyCash')) $('#moneyCash').textContent = money(newCash);
+  if ($('#mktCashPill')) $('#mktCashPill').textContent = money(newCash);
+  updateNetWorth();
+
+  const rolled = rollItemFromCrate(crate);
+  const isDuplicate = titleSystemState.ownedIds.has(rolled.id);
+
+  if (!isDuplicate) {
+    titleSystemState.ownedIds.add(rolled.id);
+    writeLocalOwnedTitles(currentUser.id, titleSystemState.ownedIds);
+    try {
+      await sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__CRATE_ITEM__:' + JSON.stringify({
+          itemId: rolled.id,
+          crateId: crate.id,
+          ts: Date.now()
+        }),
+        status: 'denied'
+      });
+    } catch (e) {}
+  }
+
+  titleSystemState.lastReveal = { crate, item: rolled, isDuplicate };
+  titleSystemState.isOpening = false;
+
+  // Build CSGO roulette reel (66 cards, winner anchored at index 52)
+  const WIN_INDEX = 52;
+  const TOTAL_CARDS = 66;
+  const reelCards = [];
+  for (let i = 0; i < TOTAL_CARDS; i++) {
+    reelCards.push(i === WIN_INDEX ? rolled : rollItemFromCrate(crate));
+  }
+
+  const modal = $('#crateOpenModal');
+  const card = $('#crateOpenCard');
+  const titleEl = $('#crateOpenTitle');
+  const eyebrowEl = $('#crateOpenEyebrow');
+  const reelEl = $('#crateReel');
+  const viewportEl = $('#crateSpinnerViewport');
+  const skipBtn = $('#crateSkipSpinBtn');
+  const closeBtn = $('#closeCrateModalBtn');
+  const caption = $('#crateSpinCaption');
+  const revealPanel = $('#crateRevealPanel');
+
+  if (!modal || !reelEl || !viewportEl) {
+    toast(`Unboxed: ${rolled.name}${isDuplicate ? ' (Already Owned)' : ''}`);
+    renderMarketplacePage();
+    return;
+  }
+
+  if (card) delete card.dataset.revealRarity;
+  if (eyebrowEl) eyebrowEl.textContent = crate.ultra ? 'ULTRA CRATE · 2X HIGHER TIERS' : 'SEASON 1 TITLE CRATE';
+  if (titleEl) titleEl.textContent = crate.name;
+  if (skipBtn) skipBtn.classList.remove('hidden');
+  if (closeBtn) closeBtn.classList.add('hidden');
+  if (caption) {
+    caption.classList.remove('hidden');
+    caption.textContent = 'Spinning crate...';
+  }
+  if (revealPanel) revealPanel.className = 'crate-reveal-panel hidden';
+
+  reelEl.innerHTML = reelCards.map((it, idx) => {
+    const r = TITLE_RARITIES[it.rarity] || TITLE_RARITIES.common;
+    return `
+      <div class="crate-reel-card rarity-${escapeHtml(r.key)} ${idx === WIN_INDEX ? 'is-target' : ''}">
+        <div class="crate-reel-tier">${escapeHtml(r.label)}</div>
+        <div class="crate-reel-name">${escapeHtml(it.name)}</div>
+        <div class="crate-reel-strip"></div>
+      </div>
+    `;
+  }).join('');
+
+  reelEl.style.transform = 'translate3d(0px, 0, 0)';
+  modal.classList.remove('hidden');
+  titleSystemState.isSpinning = true;
+  playCrateLatchSound();
+
+  const finishSpinNow = () => {
+    const firstCard = reelEl.querySelector('.crate-reel-card');
+    const cardW = firstCard ? firstCard.getBoundingClientRect().width : 138;
+    const gap = 10;
+    const step = cardW + gap;
+    const centerX = (viewportEl.clientWidth || 640) / 2;
+    const finalX = Math.max(0, (WIN_INDEX * step + cardW / 2) - centerX);
+    reelEl.style.transform = `translate3d(-${finalX.toFixed(1)}px, 0, 0)`;
+    showCrateRevealResult(crate, rolled, isDuplicate);
+  };
+
+  if (skipBtn) {
+    skipBtn.onclick = () => {
+      if (titleSystemState.isSpinning) finishSpinNow();
+    };
+  }
+
+  requestAnimationFrame(() => {
+    if (!titleSystemState.isSpinning) return;
+    const firstCard = reelEl.querySelector('.crate-reel-card');
+    const cardW = firstCard ? firstCard.getBoundingClientRect().width : 138;
+    const gap = 10;
+    const step = cardW + gap;
+    const centerX = (viewportEl.clientWidth || 640) / 2;
+    const jitter = (Math.random() - 0.5) * (cardW * 0.48);
+    const targetX = Math.max(0, (WIN_INDEX * step + cardW / 2 + jitter) - centerX);
+
+    const startTime = performance.now();
+    const duration = 5300;
+    let lastPassedIdx = Math.floor(centerX / step);
+
+    const tick = (now) => {
+      if (!titleSystemState.isSpinning) return;
+      const elapsed = now - startTime;
+      const t = Math.min(1, elapsed / duration);
+      // Quintic ease-out for long suspenseful CSGO slowdown
+      const eased = 1 - Math.pow(1 - t, 4.4);
+      const currX = targetX * eased;
+      reelEl.style.transform = `translate3d(-${currX.toFixed(2)}px, 0, 0)`;
+
+      const currentCenterIdx = Math.floor((currX + centerX) / step);
+      if (currentCenterIdx !== lastPassedIdx) {
+        lastPassedIdx = currentCenterIdx;
+        playCrateTickSound(1 - t);
+      }
+
+      if (t < 1) {
+        titleSystemState.spinRaf = requestAnimationFrame(tick);
+      } else {
+        titleSystemState.spinRaf = null;
+        if (caption) caption.textContent = `Landed on ${rolled.name}!`;
+        setTimeout(() => {
+          if (titleSystemState.isSpinning) showCrateRevealResult(crate, rolled, isDuplicate);
+        }, 320);
+      }
+    };
+
+    titleSystemState.spinRaf = requestAnimationFrame(tick);
+  });
+}
+
+$('#closeCrateModalBtn')?.addEventListener('click', closeCrateModal);
+$('#crateDoneBtn')?.addEventListener('click', closeCrateModal);
+$('#crateOpenModal')?.addEventListener('click', e => {
+  if (e.target === $('#crateOpenModal') && !titleSystemState.isSpinning) closeCrateModal();
+});
+
 
 
 
