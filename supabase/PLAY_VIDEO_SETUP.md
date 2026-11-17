@@ -20,7 +20,7 @@ Set these secrets in the Supabase project's Edge Function secrets:
 - `GITHUB_TOKEN`: the fine-grained token
 - `GITHUB_OWNER`: `Dompinator`
 - `GITHUB_REPO`: `Grind`
-- `GITHUB_BRANCH`: `main` (for production)
+- `GITHUB_BRANCH`: `play-media` (for production)
 
 Supabase provides `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and
 `SUPABASE_SERVICE_ROLE_KEY` to Edge Functions. Do not expose the service-role
