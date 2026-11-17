@@ -27,7 +27,7 @@ Deno.serve(async (req) => {
     const githubToken = Deno.env.get("GITHUB_TOKEN")!;
     const owner = Deno.env.get("GITHUB_OWNER") || "Dompinator";
     const repo = Deno.env.get("GITHUB_REPO") || "Grind";
-    const branch = Deno.env.get("GITHUB_BRANCH") || "main";
+    const branch = Deno.env.get("GITHUB_BRANCH") || "play-media";
     if (!supabaseUrl || !anonKey || !serviceKey || !githubToken) {
       return json({ error: "PLAY video storage is not configured yet." }, 503);
     }
