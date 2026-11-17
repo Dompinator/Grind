@@ -1,17 +1,8 @@
--- GRIND PLAY cleanup: removes ONLY uploaded video payload rows.
--- It preserves scene/creator shorts, PLAY likes, dislikes, comments, views,
--- earnings, follows, donations, premium requests, accounts, coins and all other data.
--- Review the target count before running the DELETE.
-
-SELECT count(*) AS uploaded_play_video_rows
-FROM public.premium_requests
-WHERE left(reason, 13) = '__PLAY_VID__:'
-  AND position('"kind":"video"' in reason) > 0;
-
--- Run this DELETE only after reviewing the count above.
+-- GRIND PLAY cleanup.
+-- Deletes ONLY uploaded PLAY video metadata rows that contain the legacy Base64
+-- video payload. It intentionally preserves scene-based shorts and every other
+-- PLAY interaction record (votes, comments, views, donations, follows, earnings).
+-- It does not touch any other table.
 DELETE FROM public.premium_requests
 WHERE left(reason, 13) = '__PLAY_VID__:'
   AND position('"kind":"video"' in reason) > 0;
-
--- Run separately after the DELETE if you want Postgres to reclaim reusable space:
--- VACUUM (ANALYZE) public.premium_requests;
