@@ -1860,10 +1860,13 @@ async function loadCoins() {
     return loadCoinsPromise;
   }
   loadCoinsPromise = (async () => {
-    do {
+    loadCoinsQueued = false;
+    await _loadCoinsFresh();
+    // At most one follow-up fetch for a burst of realtime events.
+    if (loadCoinsQueued) {
       loadCoinsQueued = false;
       await _loadCoinsFresh();
-    } while (loadCoinsQueued);
+    }
   })();
   try {
     await loadCoinsPromise;
@@ -1915,12 +1918,18 @@ async function _loadCoinsFresh() {
         .select('coin_id, created_at')
         .gte('created_at', startOfTodayIso)
         .limit(1000);
+      let previousPriceQ = sb.from('trades')
+        .select('coin_id, price_after, created_at')
+        .lt('created_at', startOfTodayIso)
+        .order('created_at', { ascending: false })
+        .limit(1000);
       if (srvResetTs > 0) {
         const srvIso = new Date(srvResetTs).toISOString();
         buyQ = buyQ.gt('created_at', srvIso);
         todayQ = todayQ.gt('created_at', srvIso);
+        previousPriceQ = previousPriceQ.gt('created_at', srvIso);
       }
-      const [{ data: buyRows }, { data: todayRows }] = await Promise.all([buyQ, todayQ]);
+      const [{ data: buyRows }, { data: todayRows }, { data: previousPriceRows }] = await Promise.all([buyQ, todayQ, previousPriceQ]);
       const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
       (buyRows || []).forEach(t => {
         if (!t.coin_id) return;
@@ -1934,23 +1943,13 @@ async function _loadCoinsFresh() {
       });
       const tradedTodayIds = [...new Set((todayRows || []).map(t => t.coin_id).filter(Boolean))];
       tradedTodayIds.forEach(id => tradedTodaySet.add(id));
-      if (tradedTodayIds.length > 0) {
-        const prevResults = await Promise.all(
-          tradedTodayIds.map(id =>
-            sb.from('trades')
-              .select('price_after')
-              .eq('coin_id', id)
-              .lt('created_at', startOfTodayIso)
-              .order('created_at', { ascending: false })
-              .limit(1)
-              .maybeSingle()
-          )
-        );
-        prevResults.forEach((r, idx) => {
-          const cid = tradedTodayIds[idx];
-          openPriceMap.set(cid, r.data && r.data.price_after != null ? Number(r.data.price_after) : 1);
-        });
-      }
+      (previousPriceRows || []).forEach(row => {
+        if (!row.coin_id || openPriceMap.has(row.coin_id)) return;
+        openPriceMap.set(row.coin_id, row.price_after != null ? Number(row.price_after) : 1);
+      });
+      tradedTodayIds.forEach(id => {
+        if (!openPriceMap.has(id)) openPriceMap.set(id, 1);
+      });
     } catch (e) {}
     coins = list.map(c => {
       const st = stats.get(c.id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
