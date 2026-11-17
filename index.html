@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=49">
+  <link rel="stylesheet" href="styles.css?v=50">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -54,7 +54,7 @@
           <button class="nav-btn" data-page="create"><span>＋</span> Create</button>
           <button class="nav-btn" data-page="money"><span>▣</span> Money</button>
           <button class="nav-btn" data-page="global"><span>⊕</span> Global</button>
-          <button class="nav-btn" data-page="ads"><span>▷</span> Ads</button>
+          <button class="nav-btn" data-page="play"><span>▶</span> Play</button>
           <button class="nav-btn" id="navGrindBot" data-page="grindbot"><span>⌘</span> GRIND-BOT <span id="navGrindBotTag" class="nav-tier-chip">PRO+</span></button>
           <button class="nav-btn" data-page="account"><span>◎</span> Account</button>
           <button class="nav-btn" data-page="report"><span>△</span> Report</button>
@@ -241,22 +241,59 @@
           </div>
         </section>
 
-        <!-- ADS -->
-        <section id="page-ads" class="page hidden">
-          <div class="ad-card">
-            <div id="adStage" class="ad-stage">
-              <p class="muted">Loading ad...</p>
-            </div>
-            <div class="ad-controls">
-              <div id="adStatusText" class="muted tiny"></div>
-              <div class="ad-actions">
-                <button class="zoom-btn hidden" id="adPlayBtn" type="button">Pause</button>
-                <button class="zoom-btn hidden" id="adMuteBtn" type="button">Mute</button>
-                <button class="primary-btn hidden" id="adSkipBtn" type="button" disabled>Skip in 60s</button>
-                <button class="buy-btn hidden" id="adClaimBtn" type="button" disabled>Wait until video ends ($1.00)</button>
-                <button class="primary-btn hidden" id="adBackBtn" type="button">Back to Feed</button>
+        <!-- PLAY (Shorts / Reels Feed) -->
+        <section id="page-play" class="page hidden">
+          <div class="play-shell">
+            <header class="play-topbar">
+              <div class="play-topbar-left">
+                <button type="button" class="zoom-btn play-back-btn" id="playBackBtn">← Back</button>
+                <div class="play-brand-chip">
+                  <span class="play-brand-icon">▶</span>
+                  <strong>Play</strong>
+                  <span class="play-earn-pill">$0.50 / like</span>
+                </div>
+              </div>
+              <div class="play-topbar-right">
+                <button type="button" class="zoom-btn" id="playRefreshBtn" title="Refresh feed">↻</button>
+                <button type="button" class="zoom-btn" id="playMuteAllBtn">🔊 Sound On</button>
+                <button type="button" class="primary-btn play-upload-btn" id="playUploadOpenBtn">＋ Upload</button>
+              </div>
+            </header>
+
+            <div class="play-stage-wrap">
+              <div id="playFeedTrack" class="play-feed-track"></div>
+              <div class="play-nav-arrows" aria-label="Scroll shorts">
+                <button type="button" class="play-arrow-btn" id="playPrevBtn" title="Previous short">▲</button>
+                <button type="button" class="play-arrow-btn" id="playNextBtn" title="Next short">▼</button>
               </div>
             </div>
+
+            <aside id="playCommentsDrawer" class="play-comments-drawer hidden" aria-label="Video comments">
+              <div class="play-comments-head">
+                <div>
+                  <div class="eyebrow purple-text">VIDEO COMMENTS</div>
+                  <h4 id="playCommentsTitle" style="margin:2px 0 0;">Comments</h4>
+                </div>
+                <button type="button" class="zoom-btn" id="playCloseCommentsBtn" aria-label="Close comments">✕</button>
+              </div>
+              <div id="playCommentsList" class="play-comments-list"></div>
+              <div id="playCommentGifPreview" class="comment-gif-preview hidden"></div>
+              <div id="playCommentGifPicker" class="comment-gif-picker hidden" role="region" aria-label="Choose a GIF">
+                <div class="comment-gif-picker-head">
+                  <strong>Choose a GIF</strong>
+                  <button type="button" class="zoom-btn" id="playCloseCommentGifBtn" aria-label="Close GIF picker">✕</button>
+                </div>
+                <input id="playCommentGifSearchInput" class="feed-search dm-coin-search" type="search" maxlength="120" placeholder="Search GIPHY GIFs or paste a giphy.com link...">
+                <div id="playCommentGifStatus" class="dm-gif-status hidden"></div>
+                <div id="playCommentGifGrid" class="dm-gif-grid"></div>
+                <div class="dm-giphy-attr">Powered by GIPHY</div>
+              </div>
+              <form id="playCommentForm" class="play-comment-form">
+                <button type="button" id="playCommentPlusBtn" class="dm-plus-btn comment-plus-btn" title="Add GIF" aria-label="Add GIF" aria-expanded="false">＋</button>
+                <input id="playCommentInput" type="text" maxlength="400" autocomplete="off" placeholder="Add a comment or GIF...">
+                <button type="submit" id="playCommentSendBtn" class="primary-btn">Post</button>
+              </form>
+            </aside>
           </div>
         </section>
 
@@ -286,6 +323,16 @@
                 <span class="muted tiny" id="accountTitlesCount">0 / 12 unlocked</span>
               </div>
               <div id="accountTitlesGrid" class="account-titles-grid"></div>
+            </div>
+            <div class="account-titles-box" id="accountPlayVideosSection" style="margin-top:14px;">
+              <div class="account-titles-head">
+                <div>
+                  <h4>Your Play Videos</h4>
+                  <p class="muted tiny">Shorts &amp; videos you published in Play ($0.50 earned per unique like).</p>
+                </div>
+                <span class="muted tiny" id="accountPlayVideosCount">0 videos</span>
+              </div>
+              <div id="accountPlayVideosGrid" class="account-play-videos-grid"></div>
             </div>
             <hr style="border-color:#3a2e4a;margin:20px 0">
             <div class="username-edit">
@@ -677,7 +724,7 @@
             <div>
               <div class="eyebrow purple-text">STORE · SEASON 1 CRATES</div>
               <h3>Marketplace</h3>
-              <p class="muted">Unbox Season 1 Title Crates. Duplicates are not added and give no cash back.</p>
+              <p class="muted">Unbox Season 1 Title Crates. Duplicate titles give 50% of the crate cost back!</p>
             </div>
             <div class="marketplace-summary-pills">
               <div class="mkt-pill"><span>CASH</span><strong id="mktCashPill">$15.00</strong></div>
@@ -1151,10 +1198,163 @@
     </div>
   </div>
 
+  <!-- PLAY UPLOAD CHOICE MODAL -->
+  <div id="playUploadChoiceModal" class="modal-backdrop hidden" style="z-index:116;" role="dialog" aria-modal="true" aria-labelledby="playUploadChoiceTitle">
+    <div class="modal-card play-choice-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow purple-text">PLAY STUDIO</div>
+          <h3 id="playUploadChoiceTitle">Share to Play</h3>
+          <p class="muted tiny" style="margin:2px 0 0;">Earn $0.50 for every like your video receives from other players.</p>
+        </div>
+        <button type="button" class="zoom-btn" id="closePlayChoiceBtn" aria-label="Close">✕</button>
+      </div>
+      <div class="play-choice-grid">
+        <button type="button" class="play-choice-btn" id="playChooseCreateBtn">
+          <span class="play-choice-icon">✦</span>
+          <strong>Create Short</strong>
+          <small class="muted tiny">Pick a background color, press ＋ to add GIFs &amp; Text, move them around &amp; add Music.</small>
+        </button>
+        <button type="button" class="play-choice-btn" id="playChooseUploadBtn">
+          <span class="play-choice-icon">⇪</span>
+          <strong>Upload Video</strong>
+          <small class="muted tiny">Upload a video clip (.mp4, .webm, .mov) from your device and attach Music.</small>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PLAY SHORT CREATOR STUDIO MODAL -->
+  <div id="playCreatorModal" class="modal-backdrop hidden" style="z-index:119;" role="dialog" aria-modal="true" aria-labelledby="playCreatorModalHeading">
+    <div class="modal-card play-creator-card">
+      <div class="play-creator-topbar">
+        <button type="button" class="zoom-btn" id="playCreatorCancelBtn">← Back</button>
+        <input id="playCreatorTitle" class="play-creator-title-input" maxlength="60" placeholder="Add a Short title (optional)...">
+        <button type="button" class="primary-btn play-finish-btn" id="playCreatorFinishBtn">Finish ✓</button>
+      </div>
+
+      <div class="play-creator-body">
+        <div class="play-editor-stage-col">
+          <div id="playEditorStage" class="play-editor-stage" style="background:#161222;">
+            <div id="playEditorEmptyHint" class="play-editor-empty-hint">Press <strong>＋</strong> to add a GIF or Text, then drag them anywhere!</div>
+          </div>
+          <div id="playEditorSelectionBar" class="play-editor-selection-bar hidden">
+            <span id="playSelLabel" class="tiny muted">Selected</span>
+            <div class="play-sel-controls">
+              <button type="button" class="zoom-btn" id="playSelScaleDownBtn" title="Smaller">A-</button>
+              <button type="button" class="zoom-btn" id="playSelScaleUpBtn" title="Larger">A+</button>
+              <input type="color" id="playSelTextColorInput" class="play-color-dot-input hidden" value="#ffffff" title="Text color">
+              <button type="button" class="zoom-btn hidden" id="playSelTextStyleBtn">Pill</button>
+              <button type="button" class="deny-btn" id="playSelDeleteBtn" style="padding:5px 10px;font-size:12px;">Delete</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="play-editor-tools-col">
+          <div class="play-tool-block">
+            <div class="eyebrow purple-text" style="margin-bottom:8px;">BACKGROUND COLOR</div>
+            <div class="play-bg-swatches" id="playBgSwatches">
+              <button type="button" class="play-bg-swatch active" data-bg="#161222" style="background:#161222" title="Obsidian"></button>
+              <button type="button" class="play-bg-swatch" data-bg="#2e1065" style="background:#2e1065" title="Deep Purple"></button>
+              <button type="button" class="play-bg-swatch" data-bg="#0f172a" style="background:#0f172a" title="Midnight"></button>
+              <button type="button" class="play-bg-swatch" data-bg="#064e3b" style="background:#064e3b" title="Emerald"></button>
+              <button type="button" class="play-bg-swatch" data-bg="#7f1d1d" style="background:#7f1d1d" title="Crimson"></button>
+              <button type="button" class="play-bg-swatch" data-bg="#78350f" style="background:#78350f" title="Gold Amber"></button>
+              <button type="button" class="play-bg-swatch" data-bg="#831843" style="background:#831843" title="Magenta"></button>
+              <button type="button" class="play-bg-swatch" data-bg="#f8fafc" style="background:#f8fafc" title="Clean White"></button>
+              <label class="play-custom-color-label" title="Custom color">
+                <span>🎨</span>
+                <input type="color" id="playBgColorInput" value="#161222" hidden>
+              </label>
+            </div>
+          </div>
+
+          <div class="play-tool-block">
+            <div class="play-tool-head-row">
+              <div class="eyebrow purple-text">ADD ELEMENTS</div>
+              <div class="play-plus-menu-wrap">
+                <button type="button" class="primary-btn play-editor-plus-btn" id="playEditorPlusBtn">＋ Add GIF / Text</button>
+                <div id="playEditorPlusMenu" class="play-editor-plus-menu hidden">
+                  <button type="button" id="playAddGifModeBtn">🎞 Add GIF (GIPHY)</button>
+                  <button type="button" id="playAddTextModeBtn">𝐓 Add Text</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="playEditorTextPanel" class="play-editor-subpanel hidden">
+              <label style="margin-bottom:8px;">Text overlay
+                <input id="playEditorTextInput" maxlength="90" placeholder="Type text to drop onto your video...">
+              </label>
+              <div class="play-text-add-row">
+                <label class="play-inline-color">Color <input type="color" id="playEditorNewTextColor" value="#ffffff"></label>
+                <button type="button" class="primary-btn" id="playEditorAddTextConfirmBtn">Place Text</button>
+              </div>
+            </div>
+
+            <div id="playEditorGifPanel" class="play-editor-subpanel hidden">
+              <input id="playEditorGifSearchInput" class="feed-search dm-coin-search" type="search" maxlength="120" placeholder="Search GIPHY GIFs or paste URL...">
+              <div id="playEditorGifStatus" class="dm-gif-status hidden"></div>
+              <div id="playEditorGifGrid" class="dm-gif-grid play-editor-gif-grid"></div>
+              <div class="dm-giphy-attr">Powered by GIPHY</div>
+            </div>
+          </div>
+
+          <div class="play-tool-block">
+            <div class="eyebrow purple-text" style="margin-bottom:8px;">MUSIC (FROM MUSIC FOLDER)</div>
+            <div class="play-music-picker-row">
+              <select id="playEditorMusicSelect" class="play-music-select">
+                <option value="">Loading Music folder...</option>
+              </select>
+              <button type="button" class="zoom-btn" id="playEditorMusicPreviewBtn">▶ Test</button>
+            </div>
+            <p class="muted tiny" style="margin:6px 0 0;">Tracks loaded from the GitHub <code>Music/</code> folder.</p>
+          </div>
+          <p id="playCreatorMsg" class="form-message" style="margin-top:4px;"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PLAY VIDEO FILE UPLOAD MODAL -->
+  <div id="playVideoFileModal" class="modal-backdrop hidden" style="z-index:119;" role="dialog" aria-modal="true" aria-labelledby="playVideoFileTitleHeading">
+    <div class="modal-card play-upload-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow purple-text">UPLOAD VIDEO</div>
+          <h3 id="playVideoFileTitleHeading">Post Video to Play</h3>
+          <p class="muted tiny" style="margin:2px 0 0;">Pick a short video clip from your device. Viewers can Like, Dislike &amp; Comment!</p>
+        </div>
+        <button type="button" class="zoom-btn" id="closePlayVideoFileBtn" aria-label="Close">✕</button>
+      </div>
+      <label>Title / Caption
+        <input id="playUploadTitleInput" maxlength="60" placeholder="Give your video a catchy title...">
+      </label>
+      <div class="play-file-drop">
+        <label class="upload-link play-file-pick-btn" for="playUploadFileInput">Choose Video File (.mp4, .webm, .mov)</label>
+        <input id="playUploadFileInput" type="file" accept="video/mp4,video/webm,video/quicktime,video/*" hidden>
+        <div id="playUploadFileName" class="muted tiny" style="margin-top:6px;">No video selected</div>
+        <video id="playUploadPreviewVideo" class="play-upload-preview hidden" controls playsinline muted></video>
+      </div>
+      <label style="margin-top:12px;">Background Music (optional · Music folder)
+        <div class="play-music-picker-row">
+          <select id="playUploadMusicSelect" class="play-music-select">
+            <option value="">Original Video Audio (No extra music)</option>
+          </select>
+          <button type="button" class="zoom-btn" id="playUploadMusicPreviewBtn">▶ Test</button>
+        </div>
+      </label>
+      <p id="playUploadMsg" class="form-message"></p>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px;">
+        <button type="button" class="zoom-btn" id="cancelPlayVideoFileBtn" style="padding:10px 16px;">Cancel</button>
+        <button type="button" class="primary-btn" id="publishPlayVideoFileBtn" disabled>Publish Video</button>
+      </div>
+    </div>
+  </div>
+
   <!-- REWARD BURST LAYER (Daily Login & Season Pass) -->
   <div id="rewardBurstLayer" class="reward-burst-layer" aria-hidden="true"></div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=50"></script>
+  <script src="app.js?v=51"></script>
 </body>
 </html>

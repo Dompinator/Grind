@@ -31,11 +31,9 @@ let chartZoom = 1.0;
 let currentPage = 'feed';
 let adsCache = null;
 let adsCacheTime = 0;
-let adTimerInterval = null;
-let activeAdToken = 0;
+let musicCache = null;
+let musicCacheTime = 0;
 let lastAdName = null;
-let adLocked = false;
-let adClaimed = false;
 let feedSearchQuery = '';
 let proUserIds = new Set();
 let watchlistIds = new Set();
@@ -1406,6 +1404,7 @@ function updateUIProfile() {
   renderThemeSettings();
   renderMusicSettings();
   if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+  if (typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
   if (currentPage === 'marketplace' && typeof renderMarketplacePage === 'function') renderMarketplacePage();
   updateNotificationsBadge();
   updatePassNavBadge();
@@ -1423,6 +1422,12 @@ function enterApp() {
       if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
       if (currentPage === 'marketplace' && typeof renderMarketplacePage === 'function') renderMarketplacePage();
       if (currentPage === 'global') renderLeaderboard();
+    });
+  }
+  if (typeof loadPlayData === 'function') {
+    loadPlayData(true).then(() => {
+      if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
+      if (typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
     });
   }
   showPage('feed');
@@ -1485,6 +1490,10 @@ $('#logoutBtn')?.addEventListener('click', async () => {
   $('#profileModal')?.classList.add('hidden');
   $('#featuredEditModal')?.classList.add('hidden');
   $('#dmModal')?.classList.add('hidden');
+  $('#playUploadChoiceModal')?.classList.add('hidden');
+  $('#playCreatorModal')?.classList.add('hidden');
+  $('#playVideoFileModal')?.classList.add('hidden');
+  if (typeof cleanupPlay === 'function') cleanupPlay();
   if (typeof closeCoinWatchModal === 'function') closeCoinWatchModal(true);
   if (typeof resetDmStateOnLogout === 'function') resetDmStateOnLogout();
   closeTierPromoOverlay(true);
@@ -1499,10 +1508,10 @@ function showPage(page) {
     openProUpgradeModal();
     return;
   }
-  const wasAds = currentPage === 'ads';
-  if (wasAds && page !== 'ads') cleanupAds();
+  const wasPlay = currentPage === 'play';
+  if (wasPlay && page !== 'play' && typeof cleanupPlay === 'function') cleanupPlay();
   currentPage = page;
-  $('#appView')?.classList.toggle('ads-fullscreen', page === 'ads');
+  $('#appView')?.classList.toggle('play-fullscreen', page === 'play');
   $$('.page').forEach(p => p.classList.add('hidden'));
   const target = $('#page-' + page);
   if (target) target.classList.remove('hidden');
@@ -1513,7 +1522,7 @@ function showPage(page) {
     create: 'Create currency',
     money: 'Your money',
     global: 'Global leaderboards',
-    ads: 'Ads',
+    play: 'Play',
     grindbot: 'GRIND-BOT',
     pass: `Season ${passState.season || 1} Pass`,
     marketplace: 'Marketplace',
@@ -1528,7 +1537,7 @@ function showPage(page) {
   if (page === 'live') loadLiveFeed();
   if (page === 'money') renderMoney();
   if (page === 'global') renderLeaderboard();
-  if (page === 'ads' && !(wasAds && adLocked)) startAdsPage();
+  if (page === 'play' && !wasPlay && typeof startPlayPage === 'function') startPlayPage();
   if (page === 'grindbot') renderGrindBotPage();
   if (page === 'marketplace' && typeof renderMarketplacePage === 'function') {
     loadTitleSystemState().then(() => renderMarketplacePage());
@@ -1544,6 +1553,11 @@ function showPage(page) {
     if (typeof loadTitleSystemState === 'function') {
       loadTitleSystemState().then(() => {
         if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+      });
+    }
+    if (typeof loadPlayData === 'function') {
+      loadPlayData().then(() => {
+        if (typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
       });
     }
   }
@@ -4372,7 +4386,8 @@ async function openProfileModal(userId) {
   await Promise.all([
     loadProUserIds(),
     fetchAdminModerationState(),
-    typeof loadTitleSystemState === 'function' ? loadTitleSystemState() : Promise.resolve()
+    typeof loadTitleSystemState === 'function' ? loadTitleSystemState() : Promise.resolve(),
+    typeof loadPlayData === 'function' ? loadPlayData() : Promise.resolve()
   ]);
   const { data: p } = await sb
     .from('profiles')
@@ -4386,6 +4401,7 @@ async function openProfileModal(userId) {
   }
 
   const userCoins = coins.filter(c => c.creator_id === p.id);
+  const userPlayVideos = typeof getPlayVideosForUser === 'function' ? getPlayVideosForUser(p.id) : [];
   const isTargetBanned = Boolean(adminModStateCache.bans.get(p.id)?.banned);
   const isTargetPremium = isEffectivePremium(p);
   const canModerate = isDompinator() && currentUser && p.id !== currentUser.id;
@@ -4426,6 +4442,14 @@ async function openProfileModal(userId) {
         </div>
       ` : '<p class="muted tiny">No created currencies yet.</p>'}
     </div>
+    <div style="margin-top:16px;">
+      <div class="eyebrow purple-text" style="margin-bottom:8px;">PLAY VIDEOS (${userPlayVideos.length})</div>
+      ${userPlayVideos.length ? `
+        <div class="profile-play-videos-grid">
+          ${userPlayVideos.map(v => typeof renderProfilePlayThumbHtml === 'function' ? renderProfilePlayThumbHtml(v) : '').join('')}
+        </div>
+      ` : '<p class="muted tiny">No Play videos uploaded yet.</p>'}
+    </div>
     ${currentUser && p.id !== currentUser.id ? `
       <button type="button" class="primary-btn dm-profile-btn" id="profileStartDmBtn">💬 Send Private DM</button>
     ` : ''}
@@ -4455,6 +4479,32 @@ async function openProfileModal(userId) {
   $$('[data-modal-coin]').forEach(el => el.addEventListener('click', () => {
     modal.classList.add('hidden');
     openCoin(el.dataset.modalCoin);
+  }));
+
+  $$('#profileModalBody [data-modal-play-vid]').forEach(el => el.addEventListener('click', () => {
+    const vidId = el.dataset.modalPlayVid;
+    modal.classList.add('hidden');
+    if (typeof openPlayAtVideo === 'function') openPlayAtVideo(vidId);
+  }));
+
+  $$('#profileModalBody [data-modal-del-vid]').forEach(btn => btn.addEventListener('click', async e => {
+    e.stopPropagation();
+    const vidId = btn.dataset.modalDelVid;
+    if (btn.dataset.armed !== '1') {
+      btn.dataset.armed = '1';
+      btn.textContent = 'Confirm?';
+      setTimeout(() => {
+        if (btn.isConnected && btn.dataset.armed === '1') {
+          btn.dataset.armed = '0';
+          btn.textContent = '🗑';
+        }
+      }, 3000);
+      return;
+    }
+    if (typeof deletePlayVideo === 'function') {
+      await deletePlayVideo(vidId);
+      openProfileModal(p.id);
+    }
   }));
 
   if (canModerate) {
@@ -4717,15 +4767,25 @@ $('#claimDailyBtn')?.addEventListener('click', async () => {
   else $('#dailyModal')?.classList.add('hidden');
 });
 
-// ---------- Ads ----------
+// ---------- Play (Shorts / Reels + Music/ & ads/ folders) ----------
 const AD_IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg', '.avif'];
 const AD_VIDEO_EXTS = ['.mp4', '.webm', '.mov', '.m4v'];
+const MUSIC_AUDIO_EXTS = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.webm'];
 
 function getAdType(filename) {
   const lower = String(filename || '').toLowerCase();
   if (AD_VIDEO_EXTS.some(ext => lower.endsWith(ext))) return 'video';
   if (AD_IMAGE_EXTS.some(ext => lower.endsWith(ext))) return 'image';
   return null;
+}
+
+function isMusicAudioFile(filename) {
+  const lower = String(filename || '').toLowerCase();
+  return MUSIC_AUDIO_EXTS.some(ext => lower.endsWith(ext));
+}
+
+function cleanMediaDisplayName(filename = '') {
+  return String(filename || '').replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'Track';
 }
 
 function detectGitHubRepo() {
@@ -4742,39 +4802,44 @@ function detectGitHubRepo() {
 async function loadAdsList(force = false) {
   if (!force && adsCache && Date.now() - adsCacheTime < 60000) return adsCache;
   let items = [];
+  const seen = new Set();
+  const addItem = (name, fallbackUrl = null) => {
+    const type = getAdType(name);
+    if (!type || seen.has(name)) return;
+    seen.add(name);
+    items.push({
+      name,
+      type,
+      url: 'ads/' + encodeURIComponent(name),
+      fallbackUrl
+    });
+  };
+
+  try {
+    const res = await fetch('/api/media/ads', { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data?.files)) data.files.forEach(n => addItem(n));
+    }
+  } catch (e) {}
+
   const repo = detectGitHubRepo();
   try {
-    const res = await fetch(`https://api.github.com/repos/${repo}/contents/ads`, { cache: "no-store" });
+    const res = await fetch(`https://api.github.com/repos/${repo}/contents/ads`, { cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data)) {
-        items = data
-          .filter(f => f.type === 'file' && getAdType(f.name))
-          .map(f => ({
-            name: f.name,
-            type: getAdType(f.name),
-            url: 'ads/' + encodeURIComponent(f.name),
-            fallbackUrl: f.download_url || null
-          }));
+        data.filter(f => f.type === 'file').forEach(f => addItem(f.name, f.download_url || null));
       }
     }
   } catch (e) {}
 
   if (!items.length) {
     try {
-      const res = await fetch('ads/manifest.json');
+      const res = await fetch('ads/manifest.json', { cache: 'no-store' });
       if (res.ok) {
         const list = await res.json();
-        if (Array.isArray(list)) {
-          items = list
-            .filter(name => getAdType(name))
-            .map(name => ({
-              name,
-              type: getAdType(name),
-              url: 'ads/' + encodeURIComponent(name),
-              fallbackUrl: null
-            }));
-        }
+        if (Array.isArray(list)) list.forEach(n => addItem(n));
       }
     } catch (e) {}
   }
@@ -4784,253 +4849,1591 @@ async function loadAdsList(force = false) {
   return items;
 }
 
-function cleanupAds() {
-  activeAdToken += 1;
-  adLocked = false;
-  if (adTimerInterval) {
-    clearInterval(adTimerInterval);
-    adTimerInterval = null;
+async function loadMusicList(force = false) {
+  if (!force && musicCache && Date.now() - musicCacheTime < 60000) return musicCache;
+  let items = [];
+  const seen = new Set();
+  const addTrack = (name, fallbackUrl = null) => {
+    if (!isMusicAudioFile(name) || seen.has(name)) return;
+    seen.add(name);
+    items.push({
+      name,
+      title: cleanMediaDisplayName(name),
+      url: 'Music/' + encodeURIComponent(name),
+      fallbackUrl
+    });
+  };
+
+  try {
+    const res = await fetch('/api/media/Music', { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data?.files)) data.files.forEach(n => addTrack(n));
+    }
+  } catch (e) {}
+
+  const repo = detectGitHubRepo();
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/contents/Music`, { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        data.filter(f => f.type === 'file').forEach(f => addTrack(f.name, f.download_url || null));
+      }
+    }
+  } catch (e) {}
+
+  if (!items.length) {
+    try {
+      const res = await fetch('Music/manifest.json', { cache: 'no-store' });
+      if (res.ok) {
+        const list = await res.json();
+        if (Array.isArray(list)) list.forEach(n => addTrack(n));
+      }
+    } catch (e) {}
   }
-  const vid = $('#adVideo');
-  if (vid) {
-    try { vid.pause(); } catch (e) {}
+
+  musicCache = items;
+  musicCacheTime = Date.now();
+  return items;
+}
+
+const PLAY_LIKE_PAYOUT = 0.50;
+const playState = {
+  videos: [],
+  videosById: new Map(),
+  votesByVideo: new Map(),      // videoId -> Map(userId -> 'like'|'dislike'|'none')
+  uniqueLikersByVideo: new Map(), // videoId -> Set(userId !== creator)
+  paidKeys: new Set(),          // `${videoId}_${likerId}`
+  commentsByVideo: new Map(),   // videoId -> Array
+  deletedIds: new Set(),
+  lastSyncAt: 0,
+  payingLikes: false,
+  deck: [],
+  activeSlideIndex: -1,
+  muted: false,
+  pausedByUser: false,
+  observer: null,
+  activeAudio: null,
+  previewAudio: null,
+  previewBtnEl: null,
+  openCommentsVideoId: null,
+  pendingCommentGif: null,
+  commentGifPickerOpen: false,
+  commentGifSearchQuery: ''
+};
+
+async function loadPlayData(force = false) {
+  if (!sb) return;
+  const now = Date.now();
+  if (!force && (now - playState.lastSyncAt) < 5000 && playState.videos.length) return;
+
+  try {
+    const srvResetTs = adminModStateCache.serverResetTs || 0;
+    const { data, error } = await sb
+      .from('premium_requests')
+      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .like('reason', '__PLAY_%')
+      .order('created_at', { ascending: true })
+      .limit(2500);
+
+    if (error || !Array.isArray(data)) return;
+
+    const videosMap = new Map();
+    const deletedIds = new Set();
+    const votesByVideo = new Map();
+    const uniqueLikersByVideo = new Map();
+    const paidKeys = new Set();
+    const commentsMapByVideo = new Map();
+    const deletedCommentIds = new Set();
+
+    data.forEach(r => {
+      const reason = String(r.reason || '');
+      const rowTs = r.created_at ? new Date(r.created_at).getTime() : 0;
+      const uid = String(r.user_id || '');
+      if (!uid) return;
+
+      if (reason.startsWith('__PLAY_VID__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_VID__:'.length));
+          if (!p?.id) return;
+          const vid = {
+            id: String(p.id),
+            user_id: uid,
+            kind: p.kind === 'video' ? 'video' : 'scene',
+            title: String(p.title || '').slice(0, 80),
+            bgColor: String(p.bgColor || '#161222'),
+            elements: Array.isArray(p.elements) ? p.elements.slice(0, 30) : [],
+            videoUrl: typeof p.videoUrl === 'string' && (p.videoUrl.startsWith('data:video/') || p.videoUrl.startsWith('https://')) ? p.videoUrl : '',
+            musicName: String(p.musicName || ''),
+            musicUrl: String(p.musicUrl || ''),
+            musicFallbackUrl: String(p.musicFallbackUrl || ''),
+            ts: Number(p.ts) || rowTs,
+            profile: r.profiles || { id: uid, username: 'Trader' }
+          };
+          if (vid.kind === 'video' && !vid.videoUrl) return;
+          videosMap.set(vid.id, vid);
+        } catch (e) {}
+      } else if (reason.startsWith('__PLAY_DEL__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_DEL__:'.length));
+          if (!p?.videoId) return;
+          const target = videosMap.get(String(p.videoId));
+          const isAdmin = (r.profiles?.username || '').toLowerCase() === 'dompinator';
+          if (target && (target.user_id === uid || isAdmin)) {
+            deletedIds.add(String(p.videoId));
+          }
+        } catch (e) {}
+      } else if (reason.startsWith('__PLAY_VOTE__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_VOTE__:'.length));
+          const vidId = String(p?.videoId || '');
+          if (!vidId) return;
+          let vm = votesByVideo.get(vidId);
+          if (!vm) { vm = new Map(); votesByVideo.set(vidId, vm); }
+          const v = p.vote === 'like' || p.vote === 'dislike' ? p.vote : 'none';
+          vm.set(uid, v);
+          if (v === 'like') {
+            let ls = uniqueLikersByVideo.get(vidId);
+            if (!ls) { ls = new Set(); uniqueLikersByVideo.set(vidId, ls); }
+            ls.add(uid);
+          }
+        } catch (e) {}
+      } else if (reason.startsWith('__PLAY_LIKE_PAID__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_LIKE_PAID__:'.length));
+          if (srvResetTs > 0 && rowTs > 0 && rowTs <= srvResetTs) return;
+          if (p?.key) paidKeys.add(String(p.key));
+        } catch (e) {}
+      } else if (reason.startsWith('__PLAY_CMT__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_CMT__:'.length));
+          const vidId = String(p?.videoId || '');
+          const cleanGif = typeof sanitizeGifUrl === 'function' ? sanitizeGifUrl(p?.gif_url) : '';
+          const cleanText = String(p?.text || '').trim();
+          if (!vidId || !p?.id || (!cleanText && !cleanGif)) return;
+          let arr = commentsMapByVideo.get(vidId);
+          if (!arr) { arr = []; commentsMapByVideo.set(vidId, arr); }
+          arr.push({
+            id: String(p.id),
+            videoId: vidId,
+            user_id: uid,
+            text: cleanText,
+            gif_url: cleanGif,
+            gif_title: String(p.gif_title || 'GIF').slice(0, 80),
+            ts: Number(p.ts) || rowTs,
+            profile: r.profiles || { id: uid, username: 'Trader' }
+          });
+        } catch (e) {}
+      } else if (reason.startsWith('__PLAY_CMT_DEL__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_CMT_DEL__:'.length));
+          if (p?.commentId) deletedCommentIds.add(String(p.commentId));
+        } catch (e) {}
+      }
+    });
+
+    deletedIds.forEach(id => videosMap.delete(id));
+    commentsMapByVideo.forEach((arr, vidId) => {
+      commentsMapByVideo.set(vidId, arr.filter(c => !deletedCommentIds.has(c.id)));
+    });
+
+    const list = Array.from(videosMap.values()).sort((a, b) => b.ts - a.ts);
+    playState.videos = list;
+    playState.videosById = videosMap;
+    playState.deletedIds = deletedIds;
+    playState.votesByVideo = votesByVideo;
+    playState.uniqueLikersByVideo = uniqueLikersByVideo;
+    playState.paidKeys = paidKeys;
+    playState.commentsByVideo = commentsMapByVideo;
+    playState.lastSyncAt = Date.now();
+  } catch (e) {}
+}
+
+function getPlayVoteSummary(videoId) {
+  const vm = playState.votesByVideo.get(String(videoId));
+  let likes = 0;
+  let dislikes = 0;
+  let myVote = 'none';
+  if (vm) {
+    vm.forEach((v, uid) => {
+      if (v === 'like') likes += 1;
+      else if (v === 'dislike') dislikes += 1;
+      if (currentUser && uid === String(currentUser.id)) myVote = v;
+    });
+  }
+  const uniqueLikers = playState.uniqueLikersByVideo.get(String(videoId));
+  const vid = playState.videosById.get(String(videoId));
+  let paidLikersCount = 0;
+  if (uniqueLikers && vid) {
+    uniqueLikers.forEach(uid => {
+      if (uid !== String(vid.user_id)) paidLikersCount += 1;
+    });
+  }
+  const commentsCount = (playState.commentsByVideo.get(String(videoId)) || []).length;
+  return { likes, dislikes, myVote, paidLikersCount, commentsCount };
+}
+
+function getPlayVideosForUser(userId) {
+  const target = String(userId || '');
+  return (playState.videos || []).filter(v => String(v.user_id) === target);
+}
+
+async function syncPlayLikeEarnings() {
+  if (!sb || !currentUser?.id || playState.payingLikes) return;
+  const uid = String(currentUser.id);
+  const myVideos = getPlayVideosForUser(uid);
+  if (!myVideos.length) return;
+
+  const unpaid = [];
+  myVideos.forEach(v => {
+    const likers = playState.uniqueLikersByVideo.get(v.id);
+    if (!likers) return;
+    likers.forEach(likerId => {
+      if (likerId === uid) return;
+      const key = `${v.id}_${likerId}`;
+      const localKey = `grind_play_paid_${uid}_${key}`;
+      if (playState.paidKeys.has(key)) return;
+      try {
+        if (localStorage.getItem(localKey) === '1') return;
+      } catch (e) {}
+      unpaid.push({ key, localKey, videoId: v.id, likerId });
+    });
+  });
+
+  if (!unpaid.length) return;
+  playState.payingLikes = true;
+  try {
+    let liveCash = Number(currentUser.cash || 0);
+    try {
+      const { data: prof } = await sb.from('profiles').select('cash').eq('id', uid).maybeSingle();
+      if (prof && prof.cash != null) liveCash = Number(prof.cash);
+    } catch (e) {}
+
+    const earned = Math.round(unpaid.length * PLAY_LIKE_PAYOUT * 100) / 100;
+    const newCash = Math.round((liveCash + earned) * 100) / 100;
+    const { error } = await sb.from('profiles').update({ cash: newCash }).eq('id', uid);
+    if (error) return;
+
+    currentUser.cash = newCash;
+    if ($('#topCash')) $('#topCash').textContent = money(newCash);
+    if ($('#moneyCash')) $('#moneyCash').textContent = money(newCash);
+
+    const rows = unpaid.map(item => {
+      playState.paidKeys.add(item.key);
+      try { localStorage.setItem(item.localKey, '1'); } catch (e) {}
+      return {
+        user_id: uid,
+        reason: '__PLAY_LIKE_PAID__:' + JSON.stringify({
+          key: item.key,
+          videoId: item.videoId,
+          likerId: item.likerId,
+          amount: PLAY_LIKE_PAYOUT,
+          ts: Date.now()
+        }),
+        status: 'denied'
+      };
+    });
+    try { await sb.from('premium_requests').insert(rows); } catch (e) {}
+
+    updateNetWorth();
+    if (typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
+    toast(`▶ +${money(earned)} earned from ${unpaid.length} new Play like${unpaid.length === 1 ? '' : 's'}!`);
+    $('.cash-pill')?.classList.add('cash-pulse');
+    setTimeout(() => $('.cash-pill')?.classList.remove('cash-pulse'), 620);
+  } finally {
+    playState.payingLikes = false;
   }
 }
 
-async function startAdsPage() {
-  cleanupAds();
-  const stage = $('#adStage');
-  const statusEl = $('#adStatusText');
-  const playBtn = $('#adPlayBtn');
-  const muteBtn = $('#adMuteBtn');
-  const skipBtn = $('#adSkipBtn');
-  const claimBtn = $('#adClaimBtn');
-  const backBtn = $('#adBackBtn');
-  if (!stage) return;
-
-  playBtn?.classList.add('hidden');
-  muteBtn?.classList.add('hidden');
-  skipBtn?.classList.add('hidden');
-  claimBtn?.classList.add('hidden');
-  backBtn?.classList.add('hidden');
-  if (statusEl) statusEl.textContent = 'Finding an ad...';
-  stage.innerHTML = '<p class="muted">Loading random ad...</p>';
-
-  const list = await loadAdsList(true);
-  loadRandomAd(list);
+function stopActivePlayMedia() {
+  if (playState.activeAudio) {
+    try { playState.activeAudio.pause(); } catch (e) {}
+    playState.activeAudio = null;
+  }
+  $$('#playFeedTrack video').forEach(v => {
+    try { v.pause(); } catch (e) {}
+  });
 }
 
-function loadRandomAd(preloadedList) {
-  cleanupAds();
-  const token = activeAdToken;
-  const list = preloadedList || adsCache || [];
-  const stage = $('#adStage');
-  const statusEl = $('#adStatusText');
-  const playBtn = $('#adPlayBtn');
-  const muteBtn = $('#adMuteBtn');
-  const skipBtn = $('#adSkipBtn');
-  const claimBtn = $('#adClaimBtn');
-  const backBtn = $('#adBackBtn');
-  if (!stage) return;
+function stopMusicPreviewAudio() {
+  if (playState.previewAudio) {
+    try { playState.previewAudio.pause(); } catch (e) {}
+    playState.previewAudio = null;
+  }
+  if (playState.previewBtnEl) {
+    playState.previewBtnEl.textContent = '▶ Test';
+    playState.previewBtnEl = null;
+  }
+}
 
-  playBtn?.classList.add('hidden');
-  muteBtn?.classList.add('hidden');
-  skipBtn?.classList.add('hidden');
-  claimBtn?.classList.add('hidden');
-  backBtn?.classList.add('hidden');
+function cleanupPlay() {
+  stopActivePlayMedia();
+  stopMusicPreviewAudio();
+  if (playState.observer) {
+    try { playState.observer.disconnect(); } catch (e) {}
+    playState.observer = null;
+  }
+  playState.activeSlideIndex = -1;
+  playState.openCommentsVideoId = null;
+  $('#playCommentsDrawer')?.classList.add('hidden');
+  setPlayCommentGifPickerOpen(false);
+}
 
-  if (!list.length) {
-    stage.innerHTML = `
-      <div>
+function renderPlaySceneElementsHtml(elements = []) {
+  return (Array.isArray(elements) ? elements : []).map(el => {
+    const x = Math.min(94, Math.max(6, Number(el.x ?? 50)));
+    const y = Math.min(92, Math.max(8, Number(el.y ?? 50)));
+    const scale = Math.min(2.6, Math.max(0.45, Number(el.scale ?? 1)));
+    if (el.type === 'gif' && el.gifUrl) {
+      const cleanUrl = typeof sanitizeGifUrl === 'function' ? sanitizeGifUrl(el.gifUrl) : '';
+      if (!cleanUrl) return '';
+      return `
+        <div class="play-canvas-item is-gif" style="left:${x}%;top:${y}%;transform:translate(-50%,-50%) scale(${scale});">
+          <img src="${escapeHtml(cleanUrl)}" alt="GIF" loading="lazy" draggable="false">
+        </div>`;
+    }
+    if (el.type === 'text' && el.text) {
+      const styleCls = el.style === 'plain' ? 'style-plain' : (el.style === 'outline' ? 'style-outline' : 'style-pill');
+      const color = /^#[0-9a-fA-F]{3,8}$/.test(String(el.color || '')) ? el.color : '#ffffff';
+      return `
+        <div class="play-canvas-item is-text ${styleCls}" style="left:${x}%;top:${y}%;transform:translate(-50%,-50%) scale(${scale});color:${escapeHtml(color)};">
+          ${escapeHtml(el.text)}
+        </div>`;
+    }
+    return '';
+  }).join('');
+}
+
+function buildPlayDeck(videos, adsList, focusVideoId = null) {
+  const deck = [];
+  const cleanVideos = [...(videos || [])];
+  if (focusVideoId) {
+    const idx = cleanVideos.findIndex(v => v.id === String(focusVideoId));
+    if (idx > 0) {
+      const [chosen] = cleanVideos.splice(idx, 1);
+      cleanVideos.unshift(chosen);
+    }
+  }
+
+  const ads = [...(adsList || [])];
+  for (let i = ads.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [ads[i], ads[j]] = [ads[j], ads[i]];
+  }
+
+  if (!cleanVideos.length) {
+    ads.forEach((ad, i) => deck.push({ slideType: 'ad', id: `ad_${i}_${ad.name}`, ad }));
+    return deck;
+  }
+
+  let adCursor = 0;
+  let nextAdAt = 2 + Math.floor(Math.random() * 2); // appear randomly every 2-3 videos
+  cleanVideos.forEach((vid, idx) => {
+    deck.push({ slideType: 'video', id: vid.id, video: vid });
+    if (ads.length && (idx + 1) === nextAdAt) {
+      const ad = ads[adCursor % ads.length];
+      adCursor += 1;
+      deck.push({ slideType: 'ad', id: `ad_${idx}_${ad.name}`, ad });
+      nextAdAt += 2 + Math.floor(Math.random() * 3);
+    }
+  });
+  return deck;
+}
+
+function syncPlayMuteUi() {
+  const btn = $('#playMuteAllBtn');
+  if (btn) btn.textContent = playState.muted ? '🔇 Muted' : '🔊 Sound On';
+  $$('#playFeedTrack video').forEach(v => { v.muted = playState.muted; });
+  if (playState.activeAudio) playState.activeAudio.muted = playState.muted;
+}
+
+function activatePlaySlide(index) {
+  const slides = $$('#playFeedTrack .play-slide');
+  if (!slides.length || index < 0 || index >= slides.length) return;
+  if (playState.activeSlideIndex === index) return;
+
+  stopActivePlayMedia();
+  playState.activeSlideIndex = index;
+  playState.pausedByUser = false;
+
+  const slideEl = slides[index];
+  slides.forEach((s, i) => s.classList.toggle('is-active', i === index));
+
+  const item = playState.deck[index];
+  if (!item) return;
+
+  const vidEl = slideEl.querySelector('video.play-media-video');
+  const musicUrl = item.slideType === 'video' ? item.video.musicUrl : '';
+  const musicFallback = item.slideType === 'video' ? item.video.musicFallbackUrl : '';
+
+  if (vidEl) {
+    vidEl.currentTime = 0;
+    vidEl.muted = musicUrl ? true : playState.muted;
+    vidEl.play().catch(() => {
+      vidEl.muted = true;
+      vidEl.play().catch(() => {});
+    });
+  }
+
+  if (musicUrl) {
+    const audio = new Audio(musicUrl);
+    audio.loop = true;
+    audio.muted = playState.muted;
+    audio.volume = 0.52;
+    audio.onerror = () => {
+      if (musicFallback && !audio.dataset.fallbackTried) {
+        audio.dataset.fallbackTried = '1';
+        audio.src = musicFallback;
+        audio.play().catch(() => {});
+      }
+    };
+    playState.activeAudio = audio;
+    audio.play().catch(() => {});
+  }
+}
+
+function toggleActiveSlidePause(slideEl) {
+  if (!slideEl) return;
+  const idx = Number(slideEl.dataset.slideIdx);
+  if (idx !== playState.activeSlideIndex) return;
+  playState.pausedByUser = !playState.pausedByUser;
+  const vidEl = slideEl.querySelector('video.play-media-video');
+  const pauseBadge = slideEl.querySelector('.play-pause-badge');
+  if (playState.pausedByUser) {
+    if (vidEl) try { vidEl.pause(); } catch (e) {}
+    if (playState.activeAudio) try { playState.activeAudio.pause(); } catch (e) {}
+    pauseBadge?.classList.remove('hidden');
+  } else {
+    if (vidEl) vidEl.play().catch(() => {});
+    if (playState.activeAudio) playState.activeAudio.play().catch(() => {});
+    pauseBadge?.classList.add('hidden');
+  }
+}
+
+function renderPlayFeed(focusVideoId = null) {
+  const track = $('#playFeedTrack');
+  if (!track) return;
+
+  stopActivePlayMedia();
+  if (playState.observer) {
+    try { playState.observer.disconnect(); } catch (e) {}
+    playState.observer = null;
+  }
+  playState.activeSlideIndex = -1;
+
+  if (!playState.deck.length) {
+    track.innerHTML = `
+      <div class="play-empty-slide">
         <div class="empty-icon">▶</div>
-        <h3>No ads in the ads/ folder yet</h3>
-        <p class="muted">Add .mp4 or image files into the <code>ads/</code> folder on GitHub to display ads here.</p>
+        <h3>No Play Videos Yet</h3>
+        <p class="muted" style="max-width:340px;">Be the first to Create a Short or Upload a video! Every like you receive from other traders earns you <strong>$0.50</strong>.</p>
+        <button type="button" class="primary-btn" id="playEmptyUploadBtn">＋ Create or Upload Short</button>
       </div>`;
-    if (statusEl) statusEl.textContent = '';
-    backBtn?.classList.remove('hidden');
+    $('#playEmptyUploadBtn')?.addEventListener('click', openPlayUploadChoiceModal);
     return;
   }
 
-  let pool = list;
-  if (list.length > 1 && lastAdName) {
-    pool = list.filter(a => a.name !== lastAdName);
-  }
-  const ad = pool[Math.floor(Math.random() * pool.length)];
-  lastAdName = ad.name;
-
-  if (ad.type === 'image') {
-    adLocked = true;
-    let remaining = 60;
-    stage.innerHTML = `<img id="adImageEl" src="${escapeHtml(ad.url)}" alt="Ad">`;
-    const imgEl = $('#adImageEl');
-    if (imgEl && ad.fallbackUrl) {
-      imgEl.onerror = () => {
-        if (imgEl.dataset.fallbackTried) return;
-        imgEl.dataset.fallbackTried = '1';
-        imgEl.src = ad.fallbackUrl;
-      };
+  track.innerHTML = playState.deck.map((item, idx) => {
+    if (item.slideType === 'ad') {
+      const ad = item.ad;
+      return `
+        <article class="play-slide play-slide-ad" data-slide-idx="${idx}">
+          <div class="play-phone-frame">
+            <div class="play-media-surface" data-play-tap="${idx}">
+              ${ad.type === 'video'
+                ? `<video class="play-media-video" src="${escapeHtml(ad.url)}" playsinline loop preload="metadata" data-fallback-src="${escapeHtml(ad.fallbackUrl || '')}"></video>`
+                : `<img class="play-media-img" src="${escapeHtml(ad.url)}" alt="${escapeHtml(ad.name)}" data-fallback-src="${escapeHtml(ad.fallbackUrl || '')}">`}
+              <div class="play-pause-badge hidden">❚❚</div>
+              <div class="play-scrim-bottom"></div>
+              <div class="play-meta-bottom">
+                <span class="play-ad-pill">SPONSORED · AD</span>
+                <div class="play-video-title">${escapeHtml(cleanMediaDisplayName(ad.name))}</div>
+                <div class="muted tiny">Scroll up or down anytime to keep browsing Play.</div>
+              </div>
+            </div>
+          </div>
+        </article>`;
     }
 
-    if (skipBtn) {
-      skipBtn.classList.remove('hidden');
-      skipBtn.disabled = true;
-      skipBtn.textContent = `Skip in ${remaining}s`;
-    }
-    if (statusEl) statusEl.textContent = `Watch this image ad for ${remaining} seconds before leaving.`;
+    const v = item.video;
+    const sum = getPlayVoteSummary(v.id);
+    const prof = v.profile || { id: v.user_id, username: 'Trader' };
+    const uname = prof.username || 'Trader';
+    const equippedTid = typeof getUserEquippedTitleId === 'function' ? getUserEquippedTitleId(v.user_id) : null;
+    const titleHtml = equippedTid && typeof renderTitleBadgeHtml === 'function' ? renderTitleBadgeHtml(equippedTid, true) : '';
+    const canDel = currentUser && (String(currentUser.id) === String(v.user_id) || isDompinator());
 
-    adTimerInterval = setInterval(() => {
-      if (token !== activeAdToken || currentPage !== 'ads') {
-        clearInterval(adTimerInterval);
-        adTimerInterval = null;
+    return `
+      <article class="play-slide" data-slide-idx="${idx}" data-video-id="${escapeHtml(v.id)}">
+        <div class="play-phone-frame">
+          <div class="play-media-surface" data-play-tap="${idx}" style="background:${v.kind === 'scene' ? escapeHtml(v.bgColor) : '#090710'};">
+            ${v.kind === 'video'
+              ? `<video class="play-media-video" src="${escapeHtml(v.videoUrl)}" playsinline loop preload="metadata"></video>`
+              : `<div class="play-scene-layer">${renderPlaySceneElementsHtml(v.elements)}</div>`}
+            <div class="play-pause-badge hidden">❚❚</div>
+            <div class="play-scrim-bottom"></div>
+            <div class="play-meta-bottom">
+              <div class="play-creator-row" data-play-profile="${escapeHtml(v.user_id)}">
+                <div class="avatar play-creator-av">${prof.avatar_url ? `<img src="${escapeHtml(prof.avatar_url)}">` : escapeHtml(uname[0].toUpperCase())}</div>
+                <div class="play-creator-meta">
+                  <div class="play-creator-name">${escapeHtml(uname)}${tierBadgeHtml(prof)}</div>
+                  ${titleHtml ? `<div class="play-creator-title">${titleHtml}</div>` : ''}
+                </div>
+              </div>
+              ${v.title ? `<div class="play-video-title">${escapeHtml(v.title)}</div>` : ''}
+              ${v.musicName ? `<div class="play-music-chip">♫ ${escapeHtml(cleanMediaDisplayName(v.musicName))}</div>` : ''}
+            </div>
+          </div>
+
+          <div class="play-action-rail">
+            <button type="button" class="play-rail-btn ${sum.myVote === 'like' ? 'is-liked' : ''}" data-play-vote="like" data-vid="${escapeHtml(v.id)}" title="Like ($0.50 to creator)">
+              <span class="play-rail-icon">♥</span>
+              <span class="play-rail-count">${sum.likes}</span>
+            </button>
+            <button type="button" class="play-rail-btn ${sum.myVote === 'dislike' ? 'is-disliked' : ''}" data-play-vote="dislike" data-vid="${escapeHtml(v.id)}" title="Dislike">
+              <span class="play-rail-icon">👎</span>
+              <span class="play-rail-count">${sum.dislikes}</span>
+            </button>
+            <button type="button" class="play-rail-btn" data-play-comment="${escapeHtml(v.id)}" title="Comments">
+              <span class="play-rail-icon">💬</span>
+              <span class="play-rail-count">${sum.commentsCount}</span>
+            </button>
+            ${canDel ? `
+              <button type="button" class="play-rail-btn is-danger" data-play-delete="${escapeHtml(v.id)}" title="Delete video">
+                <span class="play-rail-icon">🗑</span>
+                <span class="play-rail-count">Del</span>
+              </button>
+            ` : ''}
+          </div>
+        </div>
+      </article>`;
+  }).join('');
+
+  // Wire image/video GitHub raw fallbacks for ads
+  $$('#playFeedTrack [data-fallback-src]').forEach(el => {
+    const fb = el.dataset.fallbackSrc;
+    if (!fb) return;
+    el.addEventListener('error', () => {
+      if (el.dataset.fbTried) return;
+      el.dataset.fbTried = '1';
+      el.src = fb;
+      if (el.tagName === 'VIDEO') el.play().catch(() => {});
+    });
+  });
+
+  // Tap to pause/play
+  $$('#playFeedTrack [data-play-tap]').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.closest('[data-play-profile]')) return;
+      toggleActiveSlidePause(el.closest('.play-slide'));
+    });
+  });
+
+  // Creator profile click
+  $$('#playFeedTrack [data-play-profile]').forEach(el => {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      openProfileModal(el.dataset.playProfile);
+    });
+  });
+
+  // Vote buttons
+  $$('#playFeedTrack [data-play-vote]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      handlePlayVote(btn.dataset.vid, btn.dataset.playVote);
+    });
+  });
+
+  // Comment drawer buttons
+  $$('#playFeedTrack [data-play-comment]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openPlayCommentsDrawer(btn.dataset.playComment);
+    });
+  });
+
+  // Delete video buttons
+  $$('#playFeedTrack [data-play-delete]').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const vidId = btn.dataset.playDelete;
+      if (btn.dataset.armed !== '1') {
+        btn.dataset.armed = '1';
+        const lbl = btn.querySelector('.play-rail-count');
+        if (lbl) lbl.textContent = 'Sure?';
+        setTimeout(() => {
+          if (btn.isConnected && btn.dataset.armed === '1') {
+            btn.dataset.armed = '0';
+            if (lbl) lbl.textContent = 'Del';
+          }
+        }, 3000);
         return;
       }
-      if (document.hidden) return;
-      remaining -= 1;
-      if (remaining <= 0) {
-        clearInterval(adTimerInterval);
-        adTimerInterval = null;
-        adLocked = false;
-        if (skipBtn) {
-          skipBtn.disabled = false;
-          skipBtn.textContent = 'Skip Ad → Feed';
-        }
-        if (statusEl) statusEl.textContent = 'Time is up! You can return to Feed now.';
-      } else {
-        if (skipBtn) skipBtn.textContent = `Skip in ${remaining}s`;
-        if (statusEl) statusEl.textContent = `Watch this image ad for ${remaining} seconds before leaving.`;
-      }
-    }, 1000);
-  } else {
-    adLocked = true;
-    adClaimed = false;
-    let maxWatchedTime = 0;
+      await deletePlayVideo(vidId);
+    });
+  });
 
-    stage.innerHTML = `<video id="adVideo" src="${escapeHtml(ad.url)}" playsinline autoplay disablePictureInPicture controlsList="nodownload noplaybackrate"></video>`;
-    const video = $('#adVideo');
-    if (video) {
-      video.defaultPlaybackRate = 1;
-      video.playbackRate = 1;
-      video.addEventListener('contextmenu', e => e.preventDefault());
-      video.addEventListener('ratechange', () => {
-        if (video.playbackRate !== 1) video.playbackRate = 1;
-      });
-      video.onerror = () => {
-        if (ad.fallbackUrl && !video.dataset.fallbackTried) {
-          video.dataset.fallbackTried = '1';
-          video.src = ad.fallbackUrl;
-          video.play().catch(() => {});
-          return;
+  const slides = $$('#playFeedTrack .play-slide');
+  if ('IntersectionObserver' in window) {
+    playState.observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
+          const idx = Number(entry.target.dataset.slideIdx);
+          if (Number.isFinite(idx)) activatePlaySlide(idx);
         }
-        adLocked = false;
-        playBtn?.classList.add('hidden');
-        muteBtn?.classList.add('hidden');
-        if (statusEl) statusEl.textContent = `Could not play "${ad.name}". Make sure it is a valid video file.`;
-        claimBtn?.classList.add('hidden');
-        backBtn?.classList.remove('hidden');
-      };
+      });
+    }, { root: track, threshold: [0.6] });
+    slides.forEach(s => playState.observer.observe(s));
+  }
+
+  track.scrollTop = 0;
+  requestAnimationFrame(() => activatePlaySlide(0));
+}
+
+async function startPlayPage(focusVideoId = null) {
+  cleanupPlay();
+  const track = $('#playFeedTrack');
+  if (track) {
+    track.innerHTML = '<div class="play-empty-slide"><p class="muted">Loading Play feed...</p></div>';
+  }
+  const [adsList] = await Promise.all([
+    loadAdsList(false),
+    loadPlayData(true),
+    loadMusicList(false)
+  ]);
+  syncPlayLikeEarnings();
+  if (currentPage !== 'play') return;
+  playState.deck = buildPlayDeck(playState.videos, adsList, focusVideoId);
+  renderPlayFeed(focusVideoId);
+}
+
+function openPlayAtVideo(videoId) {
+  if (currentPage === 'play') {
+    startPlayPage(videoId);
+    return;
+  }
+  currentPage = 'play';
+  $('#appView')?.classList.add('play-fullscreen');
+  $$('.page').forEach(p => p.classList.add('hidden'));
+  $('#page-play')?.classList.remove('hidden');
+  $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === 'play'));
+  $('#pageTitle').textContent = 'Play';
+  if (typeof syncPremiumAmbientMusic === 'function') syncPremiumAmbientMusic();
+  startPlayPage(videoId);
+}
+
+async function handlePlayVote(videoId, voteType) {
+  if (!sb || !currentUser?.id || !videoId) return;
+  const uid = String(currentUser.id);
+  const prevSum = getPlayVoteSummary(videoId);
+  const nextVote = prevSum.myVote === voteType ? 'none' : voteType;
+
+  let vm = playState.votesByVideo.get(videoId);
+  if (!vm) { vm = new Map(); playState.votesByVideo.set(videoId, vm); }
+  vm.set(uid, nextVote);
+  if (nextVote === 'like') {
+    let ls = playState.uniqueLikersByVideo.get(videoId);
+    if (!ls) { ls = new Set(); playState.uniqueLikersByVideo.set(videoId, ls); }
+    ls.add(uid);
+  }
+
+  // Update visible buttons immediately without recreating video element
+  const slideEl = document.querySelector(`#playFeedTrack .play-slide[data-video-id="${CSS.escape(videoId)}"]`);
+  if (slideEl) {
+    const newSum = getPlayVoteSummary(videoId);
+    const likeBtn = slideEl.querySelector('[data-play-vote="like"]');
+    const dislikeBtn = slideEl.querySelector('[data-play-vote="dislike"]');
+    if (likeBtn) {
+      likeBtn.classList.toggle('is-liked', newSum.myVote === 'like');
+      const c = likeBtn.querySelector('.play-rail-count');
+      if (c) c.textContent = String(newSum.likes);
     }
-
-    if (claimBtn) {
-      claimBtn.classList.remove('hidden');
-      claimBtn.disabled = true;
-      claimBtn.dataset.ready = '0';
-      claimBtn.textContent = 'Wait until video ends ($1.00)';
+    if (dislikeBtn) {
+      dislikeBtn.classList.toggle('is-disliked', newSum.myVote === 'dislike');
+      const c = dislikeBtn.querySelector('.play-rail-count');
+      if (c) c.textContent = String(newSum.dislikes);
     }
-    if (statusEl) statusEl.textContent = 'Watch the full video to claim your $1.00 reward.';
+  }
 
-    if (video) {
-      const syncVideoBtns = () => {
-        if (playBtn) playBtn.textContent = video.paused ? 'Play' : 'Pause';
-        if (muteBtn) muteBtn.textContent = video.muted ? 'Unmute' : 'Mute';
-      };
-      if (playBtn) {
-        playBtn.classList.remove('hidden');
-        playBtn.onclick = () => {
-          if (video.paused) video.play().catch(() => {});
-          else video.pause();
-        };
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_VOTE__:' + JSON.stringify({ videoId, vote: nextVote, ts: Date.now() }),
+    status: 'denied'
+  });
+  if (error) {
+    toast('Vote failed: ' + error.message);
+  }
+}
+
+async function deletePlayVideo(videoId) {
+  if (!sb || !currentUser?.id || !videoId) return;
+  const vid = playState.videosById.get(String(videoId));
+  if (!vid) return;
+  if (String(vid.user_id) !== String(currentUser.id) && !isDompinator()) {
+    toast('You can only delete your own videos.');
+    return;
+  }
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_DEL__:' + JSON.stringify({ videoId: String(videoId), ts: Date.now() }),
+    status: 'denied'
+  });
+  if (error) {
+    toast('Could not delete video: ' + error.message);
+    return;
+  }
+  playState.deletedIds.add(String(videoId));
+  playState.videos = playState.videos.filter(v => v.id !== String(videoId));
+  playState.videosById.delete(String(videoId));
+  toast('Video deleted');
+  if (typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
+  if (currentPage === 'play') {
+    const ads = await loadAdsList(false);
+    playState.deck = buildPlayDeck(playState.videos, ads);
+    renderPlayFeed();
+  }
+}
+
+function renderProfilePlayThumbHtml(v) {
+  const sum = getPlayVoteSummary(v.id);
+  const canDel = currentUser && (String(currentUser.id) === String(v.user_id) || isDompinator());
+  return `
+    <div class="profile-play-thumb-card" data-modal-play-vid="${escapeHtml(v.id)}">
+      <div class="profile-play-thumb-stage" style="background:${v.kind === 'scene' ? escapeHtml(v.bgColor) : '#0d0917'};">
+        ${v.kind === 'video'
+          ? `<video src="${escapeHtml(v.videoUrl)}" muted playsinline preload="metadata"></video><span class="play-thumb-kind-tag">VIDEO</span>`
+          : `<div class="play-scene-layer play-scene-thumb">${renderPlaySceneElementsHtml(v.elements)}</div><span class="play-thumb-kind-tag">SHORT</span>`}
+      </div>
+      <div class="profile-play-thumb-meta">
+        <div class="profile-play-thumb-title">${escapeHtml(v.title || 'Untitled Short')}</div>
+        <div class="profile-play-thumb-stats">
+          <span>♥ ${sum.likes}</span>
+          <span>👎 ${sum.dislikes}</span>
+          <span>💬 ${sum.commentsCount}</span>
+          ${canDel ? `<button type="button" class="zoom-btn play-thumb-del-btn" data-modal-del-vid="${escapeHtml(v.id)}" title="Delete video">🗑</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderAccountPlayVideos() {
+  const grid = $('#accountPlayVideosGrid');
+  const countEl = $('#accountPlayVideosCount');
+  if (!grid || !currentUser) return;
+  const mine = getPlayVideosForUser(currentUser.id);
+  if (countEl) countEl.textContent = `${mine.length} video${mine.length === 1 ? '' : 's'}`;
+  if (!mine.length) {
+    grid.innerHTML = `<div class="muted tiny">No Play videos yet. Go to <strong>Play → Upload</strong> to Create a Short or Upload a Video and earn $0.50 per like!</div>`;
+    return;
+  }
+  grid.innerHTML = mine.map(v => {
+    const sum = getPlayVoteSummary(v.id);
+    const earned = Math.round(sum.paidLikersCount * PLAY_LIKE_PAYOUT * 100) / 100;
+    return `
+      <div class="account-play-video-card">
+        <div class="account-play-thumb" data-acc-watch-vid="${escapeHtml(v.id)}" style="background:${v.kind === 'scene' ? escapeHtml(v.bgColor) : '#0d0917'};">
+          ${v.kind === 'video'
+            ? `<video src="${escapeHtml(v.videoUrl)}" muted playsinline preload="metadata"></video>`
+            : `<div class="play-scene-layer play-scene-thumb">${renderPlaySceneElementsHtml(v.elements)}</div>`}
+        </div>
+        <div class="account-play-meta">
+          <div class="account-play-title">${escapeHtml(v.title || 'Untitled Short')}</div>
+          <div class="muted tiny">♥ ${sum.likes} · 👎 ${sum.dislikes} · 💬 ${sum.commentsCount} · Earned <strong style="color:var(--green);">${money(earned)}</strong></div>
+          <div class="account-play-actions">
+            <button type="button" class="zoom-btn" data-acc-watch-vid="${escapeHtml(v.id)}">▶ Watch</button>
+            <button type="button" class="deny-btn" data-acc-del-vid="${escapeHtml(v.id)}" style="padding:5px 11px;font-size:12px;">Delete</button>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  $$('#accountPlayVideosGrid [data-acc-watch-vid]').forEach(el => {
+    el.addEventListener('click', () => openPlayAtVideo(el.dataset.accWatchVid));
+  });
+  $$('#accountPlayVideosGrid [data-acc-del-vid]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const vidId = btn.dataset.accDelVid;
+      if (btn.dataset.armed !== '1') {
+        btn.dataset.armed = '1';
+        btn.textContent = 'Confirm Delete';
+        setTimeout(() => {
+          if (btn.isConnected && btn.dataset.armed === '1') {
+            btn.dataset.armed = '0';
+            btn.textContent = 'Delete';
+          }
+        }, 3200);
+        return;
       }
-      if (muteBtn) {
-        muteBtn.classList.remove('hidden');
-        muteBtn.onclick = () => {
-          video.muted = !video.muted;
-          syncVideoBtns();
-        };
-      }
-      video.addEventListener('play', syncVideoBtns);
-      video.addEventListener('pause', syncVideoBtns);
-      video.addEventListener('volumechange', syncVideoBtns);
+      await deletePlayVideo(vidId);
+    });
+  });
+}
 
-      video.play().then(syncVideoBtns).catch(() => {
-        video.muted = true;
-        syncVideoBtns();
-        video.play().then(syncVideoBtns).catch(() => syncVideoBtns());
-      });
+// ---------- Play Comments Drawer + GIPHY ----------
+function setPlayCommentGifPickerOpen(open) {
+  playState.commentGifPickerOpen = Boolean(open);
+  const picker = $('#playCommentGifPicker');
+  const plusBtn = $('#playCommentPlusBtn');
+  if (picker) picker.classList.toggle('hidden', !playState.commentGifPickerOpen);
+  if (plusBtn) {
+    plusBtn.classList.toggle('active', playState.commentGifPickerOpen);
+    plusBtn.setAttribute('aria-expanded', playState.commentGifPickerOpen ? 'true' : 'false');
+  }
+  if (playState.commentGifPickerOpen) {
+    loadPlayCommentGifs(playState.commentGifSearchQuery);
+    setTimeout(() => $('#playCommentGifSearchInput')?.focus(), 40);
+  }
+}
 
-      video.addEventListener('timeupdate', () => {
-        if (token !== activeAdToken) return;
-        if (video.playbackRate !== 1) video.playbackRate = 1;
-        if (!video.seeking && video.currentTime > maxWatchedTime) {
-          maxWatchedTime = video.currentTime;
-        }
-        if (video.duration && adLocked) {
-          const left = Math.max(0, Math.ceil(video.duration - video.currentTime));
-          if (statusEl) statusEl.textContent = `Watch until the end to claim $1.00 (${left}s left)`;
-        }
-      });
+function renderPlayCommentGifPreview() {
+  const box = $('#playCommentGifPreview');
+  if (!box) return;
+  if (!playState.pendingCommentGif) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  box.classList.remove('hidden');
+  box.innerHTML = `
+    <div class="comment-gif-preview-chip">
+      <img src="${escapeHtml(playState.pendingCommentGif.previewUrl)}" alt="${escapeHtml(playState.pendingCommentGif.title)}">
+      <div><strong>GIF Ready</strong><span class="muted tiny">Will post with your comment</span></div>
+      <button type="button" class="zoom-btn" id="playRemoveCommentGifBtn" aria-label="Remove selected GIF">✕</button>
+    </div>`;
+  $('#playRemoveCommentGifBtn')?.addEventListener('click', () => {
+    playState.pendingCommentGif = null;
+    renderPlayCommentGifPreview();
+  });
+}
 
-      video.addEventListener('seeking', () => {
-        if (video.currentTime > maxWatchedTime + 1.0) {
-          video.currentTime = maxWatchedTime;
-        }
-      });
+async function loadPlayCommentGifs(query = '') {
+  const grid = $('#playCommentGifGrid');
+  const statusEl = $('#playCommentGifStatus');
+  if (!grid || typeof fetchGiphyGifs !== 'function') return;
+  grid.innerHTML = '<p class="muted tiny" style="grid-column:1/-1;padding:12px 4px;text-align:center;">Loading GIFs from GIPHY...</p>';
+  const res = await fetchGiphyGifs(query, 24);
+  if (statusEl) {
+    if (res.error) { statusEl.textContent = res.error; statusEl.classList.remove('hidden'); }
+    else { statusEl.textContent = ''; statusEl.classList.add('hidden'); }
+  }
+  if (!res.gifs.length) {
+    grid.innerHTML = '<p class="muted tiny" style="grid-column:1/-1;padding:14px 6px;text-align:center;">No GIFs found — try another search or paste a giphy.com link.</p>';
+    return;
+  }
+  grid.innerHTML = res.gifs.map((g, idx) => `
+    <button type="button" class="dm-gif-tile" data-play-cmt-gif-idx="${idx}" title="${escapeHtml(g.title)}">
+      <img src="${escapeHtml(g.previewUrl)}" alt="${escapeHtml(g.title)}" loading="lazy">
+    </button>
+  `).join('');
+  $$('#playCommentGifGrid [data-play-cmt-gif-idx]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const picked = res.gifs[Number(btn.dataset.playCmtGifIdx)];
+      if (!picked) return;
+      playState.pendingCommentGif = picked;
+      setPlayCommentGifPickerOpen(false);
+      renderPlayCommentGifPreview();
+      $('#playCommentInput')?.focus();
+    });
+  });
+}
 
-      video.addEventListener('ended', () => {
-        if (token !== activeAdToken) return;
-        adLocked = false;
-        syncVideoBtns();
-        if (claimBtn) {
-          claimBtn.disabled = false;
-          claimBtn.textContent = 'Claim $1.00 Reward';
-          claimBtn.dataset.ready = '1';
-        }
-        if (statusEl) statusEl.textContent = 'Video finished! Claim your $1.00 reward to return to Feed.';
+function renderPlayCommentsDrawerList() {
+  const listEl = $('#playCommentsList');
+  const titleEl = $('#playCommentsTitle');
+  const vidId = playState.openCommentsVideoId;
+  if (!listEl || !vidId) return;
+  const cmts = playState.commentsByVideo.get(vidId) || [];
+  if (titleEl) titleEl.textContent = `Comments (${cmts.length})`;
+
+  const slideCountEl = document.querySelector(`#playFeedTrack .play-slide[data-video-id="${CSS.escape(vidId)}"] [data-play-comment] .play-rail-count`);
+  if (slideCountEl) slideCountEl.textContent = String(cmts.length);
+
+  if (!cmts.length) {
+    listEl.innerHTML = '<div class="empty-state" style="padding:26px 12px;"><p class="muted tiny">No comments yet. Say something!</p></div>';
+    return;
+  }
+  listEl.innerHTML = cmts.map(c => {
+    const prof = c.profile || { id: c.user_id, username: 'Trader' };
+    const uname = prof.username || 'Trader';
+    const vid = playState.videosById.get(vidId);
+    const canDel = currentUser && (String(c.user_id) === String(currentUser.id) || (vid && String(vid.user_id) === String(currentUser.id)) || isDompinator());
+    return `
+      <div class="play-cmt-row">
+        <div class="avatar" style="width:30px;height:30px;font-size:12px;" data-play-cmt-prof="${escapeHtml(c.user_id)}">${prof.avatar_url ? `<img src="${escapeHtml(prof.avatar_url)}">` : escapeHtml(uname[0].toUpperCase())}</div>
+        <div class="play-cmt-body">
+          <div class="play-cmt-meta">
+            <strong class="profile-link" data-play-cmt-prof="${escapeHtml(c.user_id)}">${escapeHtml(uname)}${tierBadgeHtml(prof)}</strong>
+            <span class="muted tiny">${typeof timeAgo === 'function' ? timeAgo(c.ts) : ''}</span>
+            ${canDel ? `<button type="button" class="zoom-btn play-cmt-del" data-play-cmt-del="${escapeHtml(c.id)}" style="margin-left:auto;padding:2px 7px;font-size:11px;">✕</button>` : ''}
+          </div>
+          ${c.text ? `<div class="play-cmt-text">${escapeHtml(c.text)}</div>` : ''}
+          ${c.gif_url ? `<div class="comment-gif-wrap"><img src="${escapeHtml(c.gif_url)}" alt="${escapeHtml(c.gif_title || 'GIF')}" loading="lazy"></div>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+
+  $$('#playCommentsList [data-play-cmt-prof]').forEach(el => {
+    el.addEventListener('click', () => openProfileModal(el.dataset.playCmtProf));
+  });
+  $$('#playCommentsList [data-play-cmt-del]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!sb || !currentUser?.id) return;
+      const cmtId = btn.dataset.playCmtDel;
+      await sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__PLAY_CMT_DEL__:' + JSON.stringify({ videoId: vidId, commentId: cmtId, ts: Date.now() }),
+        status: 'denied'
       });
+      await loadPlayData(true);
+      renderPlayCommentsDrawerList();
+    });
+  });
+}
+
+function openPlayCommentsDrawer(videoId) {
+  playState.openCommentsVideoId = String(videoId);
+  playState.pendingCommentGif = null;
+  renderPlayCommentGifPreview();
+  setPlayCommentGifPickerOpen(false);
+  $('#playCommentsDrawer')?.classList.remove('hidden');
+  renderPlayCommentsDrawerList();
+}
+
+$('#playCloseCommentsBtn')?.addEventListener('click', () => {
+  playState.openCommentsVideoId = null;
+  $('#playCommentsDrawer')?.classList.add('hidden');
+  setPlayCommentGifPickerOpen(false);
+});
+$('#playCommentPlusBtn')?.addEventListener('click', () => {
+  setPlayCommentGifPickerOpen(!playState.commentGifPickerOpen);
+});
+$('#playCloseCommentGifBtn')?.addEventListener('click', () => setPlayCommentGifPickerOpen(false));
+let playCommentGifTimer = null;
+$('#playCommentGifSearchInput')?.addEventListener('input', e => {
+  playState.commentGifSearchQuery = e.target.value;
+  clearTimeout(playCommentGifTimer);
+  playCommentGifTimer = setTimeout(() => {
+    if (playState.commentGifPickerOpen) loadPlayCommentGifs(playState.commentGifSearchQuery);
+  }, 320);
+});
+$('#playCommentForm')?.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (!sb || !currentUser?.id || !playState.openCommentsVideoId) return;
+  const input = $('#playCommentInput');
+  const sendBtn = $('#playCommentSendBtn');
+  const text = (input?.value || '').trim();
+  const gif = playState.pendingCommentGif;
+  if (!text && !gif) return toast('Write a comment or pick a GIF!');
+  if (sendBtn) sendBtn.disabled = true;
+
+  const payload = {
+    id: 'pcmt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    videoId: playState.openCommentsVideoId,
+    text: text.slice(0, 400),
+    ts: Date.now()
+  };
+  if (gif) {
+    payload.gif_url = typeof sanitizeGifUrl === 'function' ? sanitizeGifUrl(gif.gifUrl) : gif.gifUrl;
+    payload.gif_title = String(gif.title || 'GIF').slice(0, 80);
+  }
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_CMT__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+  if (sendBtn) sendBtn.disabled = false;
+  if (error) return toast('Comment error: ' + error.message);
+
+  playSound('commenting');
+  if (input) input.value = '';
+  playState.pendingCommentGif = null;
+  renderPlayCommentGifPreview();
+  setPlayCommentGifPickerOpen(false);
+  await loadPlayData(true);
+  renderPlayCommentsDrawerList();
+});
+
+// Play Topbar & Scroll Controls
+$('#playBackBtn')?.addEventListener('click', () => showPage('feed'));
+$('#playRefreshBtn')?.addEventListener('click', () => startPlayPage());
+$('#playMuteAllBtn')?.addEventListener('click', () => {
+  playState.muted = !playState.muted;
+  syncPlayMuteUi();
+});
+$('#playPrevBtn')?.addEventListener('click', () => {
+  const track = $('#playFeedTrack');
+  if (!track) return;
+  const targetIdx = Math.max(0, playState.activeSlideIndex - 1);
+  const slide = track.querySelector(`.play-slide[data-slide-idx="${targetIdx}"]`);
+  if (slide) slide.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+$('#playNextBtn')?.addEventListener('click', () => {
+  const track = $('#playFeedTrack');
+  if (!track) return;
+  const targetIdx = Math.min(Math.max(0, playState.deck.length - 1), playState.activeSlideIndex + 1);
+  const slide = track.querySelector(`.play-slide[data-slide-idx="${targetIdx}"]`);
+  if (slide) slide.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+// ---------- Play Upload Choice + Short Creator Studio + Video File Upload ----------
+const playEditorState = {
+  bgColor: '#161222',
+  elements: [], // { id, type:'gif'|'text', x, y, scale, gifUrl, text, color, style }
+  selectedId: null,
+  musicName: '',
+  musicUrl: '',
+  musicFallbackUrl: '',
+  gifQuery: '',
+  saving: false
+};
+
+async function populateMusicSelect(selectEl, emptyLabel = 'No Music') {
+  if (!selectEl) return;
+  const tracks = await loadMusicList(true);
+  selectEl.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>` +
+    tracks.map((t, i) => `<option value="${escapeHtml(t.name)}" data-idx="${i}">♫ ${escapeHtml(t.title)}</option>`).join('');
+}
+
+function playSelectedMusicPreview(selectEl, btnEl) {
+  const name = selectEl?.value || '';
+  if (playState.previewAudio && playState.previewBtnEl === btnEl) {
+    stopMusicPreviewAudio();
+    return;
+  }
+  stopMusicPreviewAudio();
+  if (!name) return toast('Pick a track from the Music folder first!');
+  const track = (musicCache || []).find(t => t.name === name);
+  if (!track) return;
+  const audio = new Audio(track.url);
+  audio.loop = true;
+  audio.volume = 0.55;
+  audio.onerror = () => {
+    if (track.fallbackUrl && !audio.dataset.fbTried) {
+      audio.dataset.fbTried = '1';
+      audio.src = track.fallbackUrl;
+      audio.play().catch(() => {});
+    }
+  };
+  playState.previewAudio = audio;
+  playState.previewBtnEl = btnEl;
+  if (btnEl) btnEl.textContent = '■ Stop';
+  audio.play().catch(() => toast('Tap again to preview track'));
+}
+
+function openPlayUploadChoiceModal() {
+  if (!currentUser) return toast('Please sign in first.');
+  stopActivePlayMedia();
+  $('#playUploadChoiceModal')?.classList.remove('hidden');
+}
+
+$('#playUploadOpenBtn')?.addEventListener('click', openPlayUploadChoiceModal);
+$('#closePlayChoiceBtn')?.addEventListener('click', () => hideModalSmooth($('#playUploadChoiceModal')));
+$('#playUploadChoiceModal')?.addEventListener('click', e => {
+  if (e.target === $('#playUploadChoiceModal')) hideModalSmooth($('#playUploadChoiceModal'));
+});
+
+function renderEditorSelectionBar() {
+  const bar = $('#playEditorSelectionBar');
+  const lbl = $('#playSelLabel');
+  const colorInp = $('#playSelTextColorInput');
+  const styleBtn = $('#playSelTextStyleBtn');
+  const item = playEditorState.elements.find(el => el.id === playEditorState.selectedId) || null;
+  if (!bar) return;
+  if (!item) {
+    bar.classList.add('hidden');
+    return;
+  }
+  bar.classList.remove('hidden');
+  if (lbl) lbl.textContent = item.type === 'gif' ? 'GIF Element' : 'Text Element';
+  if (colorInp) {
+    colorInp.classList.toggle('hidden', item.type !== 'text');
+    if (item.type === 'text') colorInp.value = item.color || '#ffffff';
+  }
+  if (styleBtn) {
+    styleBtn.classList.toggle('hidden', item.type !== 'text');
+    if (item.type === 'text') {
+      styleBtn.textContent = item.style === 'plain' ? 'Clean' : (item.style === 'outline' ? 'Glow' : 'Pill');
     }
   }
 }
 
-$('#adSkipBtn')?.addEventListener('click', () => {
-  if ($('#adSkipBtn').disabled) return;
-  showPage('feed');
+function renderPlayEditorStage() {
+  const stage = $('#playEditorStage');
+  if (!stage) return;
+  stage.style.background = playEditorState.bgColor || '#161222';
+  const itemsHtml = playEditorState.elements.map(el => {
+    const selCls = el.id === playEditorState.selectedId ? 'is-selected' : '';
+    const posStyle = `left:${el.x}%;top:${el.y}%;transform:translate(-50%,-50%) scale(${el.scale || 1});`;
+    if (el.type === 'gif') {
+      return `
+        <div class="play-canvas-item is-gif is-editable ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}">
+          <img src="${escapeHtml(el.gifUrl)}" alt="GIF" draggable="false">
+        </div>`;
+    }
+    const styleCls = el.style === 'plain' ? 'style-plain' : (el.style === 'outline' ? 'style-outline' : 'style-pill');
+    return `
+      <div class="play-canvas-item is-text is-editable ${styleCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}color:${escapeHtml(el.color || '#ffffff')};">
+        ${escapeHtml(el.text)}
+      </div>`;
+  }).join('');
+
+  stage.innerHTML = (playEditorState.elements.length ? '' : '<div id="playEditorEmptyHint" class="play-editor-empty-hint">Press <strong>＋ Add GIF / Text</strong>, then drag elements anywhere!</div>') + itemsHtml;
+
+  $$('#playEditorStage [data-edit-el]').forEach(domEl => {
+    domEl.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const elId = domEl.dataset.editEl;
+      playEditorState.selectedId = elId;
+      $$('#playEditorStage [data-edit-el]').forEach(n => n.classList.toggle('is-selected', n.dataset.editEl === elId));
+      renderEditorSelectionBar();
+
+      const item = playEditorState.elements.find(it => it.id === elId);
+      if (!item) return;
+      const rect = stage.getBoundingClientRect();
+      const startClientX = e.clientX;
+      const startClientY = e.clientY;
+      const startX = item.x;
+      const startY = item.y;
+
+      try { domEl.setPointerCapture(e.pointerId); } catch (err) {}
+
+      const onMove = ev => {
+        if (!rect.width || !rect.height) return;
+        const dxPct = ((ev.clientX - startClientX) / rect.width) * 100;
+        const dyPct = ((ev.clientY - startClientY) / rect.height) * 100;
+        item.x = Math.min(94, Math.max(6, Math.round((startX + dxPct) * 10) / 10));
+        item.y = Math.min(92, Math.max(8, Math.round((startY + dyPct) * 10) / 10));
+        domEl.style.left = item.x + '%';
+        domEl.style.top = item.y + '%';
+      };
+      const onUp = () => {
+        domEl.removeEventListener('pointermove', onMove);
+        domEl.removeEventListener('pointerup', onUp);
+        domEl.removeEventListener('pointercancel', onUp);
+      };
+      domEl.addEventListener('pointermove', onMove);
+      domEl.addEventListener('pointerup', onUp);
+      domEl.addEventListener('pointercancel', onUp);
+    });
+  });
+
+  renderEditorSelectionBar();
+}
+
+$('#playEditorStage')?.addEventListener('pointerdown', e => {
+  if (e.target === $('#playEditorStage')) {
+    playEditorState.selectedId = null;
+    renderPlayEditorStage();
+  }
 });
 
-$('#adBackBtn')?.addEventListener('click', () => {
-  showPage('feed');
-});
-
-$('#adClaimBtn')?.addEventListener('click', async () => {
-  const btn = $('#adClaimBtn');
-  if (!btn || btn.disabled || btn.dataset.ready !== '1' || adClaimed || !currentUser || !sb) return;
-  adClaimed = true;
-  btn.disabled = true;
-  btn.textContent = 'Claiming...';
-
-  const newCash = Number(currentUser.cash || 0) + 1;
-  const { error } = await sb.from('profiles').update({ cash: newCash }).eq('id', currentUser.id);
-  if (error) {
-    adClaimed = false;
-    btn.disabled = false;
-    btn.textContent = 'Claim $1.00 Reward';
-    toast('Error claiming reward: ' + error.message);
+async function loadPlayEditorGifs(query = '') {
+  const grid = $('#playEditorGifGrid');
+  const statusEl = $('#playEditorGifStatus');
+  if (!grid || typeof fetchGiphyGifs !== 'function') return;
+  grid.innerHTML = '<p class="muted tiny" style="grid-column:1/-1;padding:12px 4px;text-align:center;">Loading GIFs...</p>';
+  const res = await fetchGiphyGifs(query, 24);
+  if (statusEl) {
+    if (res.error) { statusEl.textContent = res.error; statusEl.classList.remove('hidden'); }
+    else { statusEl.textContent = ''; statusEl.classList.add('hidden'); }
+  }
+  if (!res.gifs.length) {
+    grid.innerHTML = '<p class="muted tiny" style="grid-column:1/-1;padding:12px 4px;text-align:center;">No GIFs found.</p>';
     return;
   }
+  grid.innerHTML = res.gifs.map((g, i) => `
+    <button type="button" class="dm-gif-tile" data-editor-gif-idx="${i}" title="${escapeHtml(g.title)}">
+      <img src="${escapeHtml(g.previewUrl)}" alt="${escapeHtml(g.title)}" loading="lazy">
+    </button>
+  `).join('');
+  $$('#playEditorGifGrid [data-editor-gif-idx]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const picked = res.gifs[Number(btn.dataset.editorGifIdx)];
+      if (!picked) return;
+      const newId = 'el_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
+      playEditorState.elements.push({
+        id: newId,
+        type: 'gif',
+        x: 50,
+        y: 48,
+        scale: 1,
+        gifUrl: picked.gifUrl
+      });
+      playEditorState.selectedId = newId;
+      $('#playEditorGifPanel')?.classList.add('hidden');
+      renderPlayEditorStage();
+    });
+  });
+}
 
-  currentUser.cash = newCash;
-  updateUIProfile();
-  await updateNetWorth();
-  toast('Claimed $1.00 reward!');
-  showPage('feed');
+async function openPlayCreatorStudio() {
+  $('#playUploadChoiceModal')?.classList.add('hidden');
+  playEditorState.bgColor = '#161222';
+  playEditorState.elements = [];
+  playEditorState.selectedId = null;
+  playEditorState.gifQuery = '';
+  playEditorState.saving = false;
+  if ($('#playCreatorTitle')) $('#playCreatorTitle').value = '';
+  if ($('#playBgColorInput')) $('#playBgColorInput').value = '#161222';
+  if ($('#playCreatorMsg')) $('#playCreatorMsg').textContent = '';
+  if ($('#playCreatorFinishBtn')) {
+    $('#playCreatorFinishBtn').disabled = false;
+    $('#playCreatorFinishBtn').textContent = 'Finish ✓';
+  }
+  $$('#playBgSwatches .play-bg-swatch').forEach(b => b.classList.toggle('active', b.dataset.bg === '#161222'));
+  $('#playEditorPlusMenu')?.classList.add('hidden');
+  $('#playEditorTextPanel')?.classList.add('hidden');
+  $('#playEditorGifPanel')?.classList.add('hidden');
+  renderPlayEditorStage();
+  $('#playCreatorModal')?.classList.remove('hidden');
+  await populateMusicSelect($('#playEditorMusicSelect'), 'No Music');
+}
+
+function closePlayCreatorStudio() {
+  stopMusicPreviewAudio();
+  hideModalSmooth($('#playCreatorModal'));
+}
+
+$('#playChooseCreateBtn')?.addEventListener('click', openPlayCreatorStudio);
+$('#playCreatorCancelBtn')?.addEventListener('click', closePlayCreatorStudio);
+
+$$('#playBgSwatches .play-bg-swatch').forEach(btn => {
+  btn.addEventListener('click', () => {
+    playEditorState.bgColor = btn.dataset.bg || '#161222';
+    if ($('#playBgColorInput')) $('#playBgColorInput').value = playEditorState.bgColor;
+    $$('#playBgSwatches .play-bg-swatch').forEach(b => b.classList.toggle('active', b === btn));
+    if ($('#playEditorStage')) $('#playEditorStage').style.background = playEditorState.bgColor;
+  });
+});
+$('#playBgColorInput')?.addEventListener('input', e => {
+  playEditorState.bgColor = e.target.value || '#161222';
+  $$('#playBgSwatches .play-bg-swatch').forEach(b => b.classList.remove('active'));
+  if ($('#playEditorStage')) $('#playEditorStage').style.background = playEditorState.bgColor;
+});
+
+$('#playEditorPlusBtn')?.addEventListener('click', e => {
+  e.stopPropagation();
+  $('#playEditorPlusMenu')?.classList.toggle('hidden');
+});
+$('#playAddGifModeBtn')?.addEventListener('click', () => {
+  $('#playEditorPlusMenu')?.classList.add('hidden');
+  $('#playEditorTextPanel')?.classList.add('hidden');
+  $('#playEditorGifPanel')?.classList.remove('hidden');
+  loadPlayEditorGifs(playEditorState.gifQuery);
+  setTimeout(() => $('#playEditorGifSearchInput')?.focus(), 40);
+});
+$('#playAddTextModeBtn')?.addEventListener('click', () => {
+  $('#playEditorPlusMenu')?.classList.add('hidden');
+  $('#playEditorGifPanel')?.classList.add('hidden');
+  $('#playEditorTextPanel')?.classList.remove('hidden');
+  setTimeout(() => $('#playEditorTextInput')?.focus(), 40);
+});
+
+let playEditorGifTimer = null;
+$('#playEditorGifSearchInput')?.addEventListener('input', e => {
+  playEditorState.gifQuery = e.target.value;
+  clearTimeout(playEditorGifTimer);
+  playEditorGifTimer = setTimeout(() => loadPlayEditorGifs(playEditorState.gifQuery), 320);
+});
+
+$('#playEditorAddTextConfirmBtn')?.addEventListener('click', () => {
+  const inp = $('#playEditorTextInput');
+  const txt = (inp?.value || '').trim();
+  if (!txt) return toast('Enter some text first!');
+  const color = $('#playEditorNewTextColor')?.value || '#ffffff';
+  const newId = 'el_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
+  playEditorState.elements.push({
+    id: newId,
+    type: 'text',
+    x: 50,
+    y: 45,
+    scale: 1,
+    text: txt.slice(0, 90),
+    color,
+    style: 'pill'
+  });
+  playEditorState.selectedId = newId;
+  if (inp) inp.value = '';
+  $('#playEditorTextPanel')?.classList.add('hidden');
+  renderPlayEditorStage();
+});
+
+$('#playSelScaleDownBtn')?.addEventListener('click', () => {
+  const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
+  if (!it) return;
+  it.scale = Math.max(0.5, Math.round(((it.scale || 1) - 0.15) * 100) / 100);
+  renderPlayEditorStage();
+});
+$('#playSelScaleUpBtn')?.addEventListener('click', () => {
+  const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
+  if (!it) return;
+  it.scale = Math.min(2.4, Math.round(((it.scale || 1) + 0.15) * 100) / 100);
+  renderPlayEditorStage();
+});
+$('#playSelTextColorInput')?.addEventListener('input', e => {
+  const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
+  if (!it || it.type !== 'text') return;
+  it.color = e.target.value;
+  renderPlayEditorStage();
+});
+$('#playSelTextStyleBtn')?.addEventListener('click', () => {
+  const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
+  if (!it || it.type !== 'text') return;
+  const order = ['pill', 'outline', 'plain'];
+  it.style = order[(order.indexOf(it.style || 'pill') + 1) % order.length];
+  renderPlayEditorStage();
+});
+$('#playSelDeleteBtn')?.addEventListener('click', () => {
+  if (!playEditorState.selectedId) return;
+  playEditorState.elements = playEditorState.elements.filter(el => el.id !== playEditorState.selectedId);
+  playEditorState.selectedId = null;
+  renderPlayEditorStage();
+});
+$('#playEditorMusicPreviewBtn')?.addEventListener('click', () => {
+  playSelectedMusicPreview($('#playEditorMusicSelect'), $('#playEditorMusicPreviewBtn'));
+});
+
+$('#playCreatorFinishBtn')?.addEventListener('click', async () => {
+  if (!sb || !currentUser?.id || playEditorState.saving) return;
+  const msgEl = $('#playCreatorMsg');
+  const finishBtn = $('#playCreatorFinishBtn');
+  if (!playEditorState.elements.length) {
+    if (msgEl) msgEl.textContent = 'Press ＋ to add at least one GIF or Text first!';
+    return;
+  }
+  playEditorState.saving = true;
+  if (msgEl) msgEl.textContent = '';
+  if (finishBtn) {
+    finishBtn.disabled = true;
+    finishBtn.textContent = 'Publishing...';
+  }
+
+  const musicName = $('#playEditorMusicSelect')?.value || '';
+  const track = musicName ? (musicCache || []).find(t => t.name === musicName) : null;
+  const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  const payload = {
+    id: newVidId,
+    kind: 'scene',
+    title: ($('#playCreatorTitle')?.value || '').trim().slice(0, 60),
+    bgColor: playEditorState.bgColor || '#161222',
+    elements: playEditorState.elements.map(({ id, type, x, y, scale, gifUrl, text, color, style }) => ({
+      id, type, x, y, scale,
+      ...(gifUrl ? { gifUrl } : {}),
+      ...(text ? { text, color, style } : {})
+    })),
+    musicName: track ? track.name : '',
+    musicUrl: track ? track.url : '',
+    musicFallbackUrl: track ? (track.fallbackUrl || '') : '',
+    ts: Date.now()
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_VID__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+  playEditorState.saving = false;
+  if (finishBtn) {
+    finishBtn.disabled = false;
+    finishBtn.textContent = 'Finish ✓';
+  }
+  if (error) {
+    if (msgEl) msgEl.textContent = 'Publish error: ' + error.message;
+    return;
+  }
+  playSound('upload');
+  closePlayCreatorStudio();
+  toast('Short published to Play!');
+  await loadPlayData(true);
+  renderAccountPlayVideos();
+  openPlayAtVideo(newVidId);
+});
+
+// Video File Upload Modal
+let pendingUploadVideoDataUrl = '';
+let pendingUploadBusy = false;
+
+function readFileAsDataUrlPromise(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ''));
+    r.onerror = () => reject(new Error('Could not read video file'));
+    r.readAsDataURL(file);
+  });
+}
+
+async function compressPlayVideoFile(file, onProgress) {
+  const objectUrl = URL.createObjectURL(file);
+  const vid = document.createElement('video');
+  vid.muted = true;
+  vid.playsInline = true;
+  vid.src = objectUrl;
+
+  await new Promise((res, rej) => {
+    vid.onloadedmetadata = () => res();
+    vid.onerror = () => rej(new Error('Unsupported video format'));
+  });
+
+  const maxDur = Math.min(Number(vid.duration || 12), 18);
+  const scaleW = Math.min(420, vid.videoWidth || 360);
+  const scaleH = Math.max(240, Math.round((vid.videoHeight || 640) * (scaleW / (vid.videoWidth || 360))));
+  const canvas = document.createElement('canvas');
+  canvas.width = scaleW;
+  canvas.height = Math.min(760, scaleH);
+  const ctx = canvas.getContext('2d');
+  const stream = canvas.captureStream(24);
+  const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+    ? 'video/webm;codecs=vp8'
+    : 'video/webm';
+  const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 600000 });
+  const chunks = [];
+  recorder.ondataavailable = ev => { if (ev.data && ev.data.size > 0) chunks.push(ev.data); };
+
+  return new Promise((resolve, reject) => {
+    recorder.onstop = async () => {
+      URL.revokeObjectURL(objectUrl);
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      if (blob.size > 2.6 * 1024 * 1024) {
+        reject(new Error('Video is too large after compression. Please pick a shorter clip (under 15s).'));
+        return;
+      }
+      const dataUrl = await readFileAsDataUrlPromise(blob);
+      resolve(dataUrl);
+    };
+    recorder.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Compression failed'));
+    };
+
+    vid.currentTime = 0;
+    recorder.start(250);
+    vid.play().catch(reject);
+
+    const drawLoop = () => {
+      if (vid.paused || vid.ended || vid.currentTime >= maxDur) {
+        try { vid.pause(); } catch (e) {}
+        if (recorder.state !== 'inactive') recorder.stop();
+        return;
+      }
+      ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+      if (onProgress && maxDur > 0) onProgress(Math.min(99, Math.round((vid.currentTime / maxDur) * 100)));
+      requestAnimationFrame(drawLoop);
+    };
+    requestAnimationFrame(drawLoop);
+  });
+}
+
+async function openPlayVideoFileModal() {
+  $('#playUploadChoiceModal')?.classList.add('hidden');
+  pendingUploadVideoDataUrl = '';
+  pendingUploadBusy = false;
+  if ($('#playUploadTitleInput')) $('#playUploadTitleInput').value = '';
+  if ($('#playUploadFileInput')) $('#playUploadFileInput').value = '';
+  if ($('#playUploadFileName')) $('#playUploadFileName').textContent = 'No video selected';
+  if ($('#playUploadMsg')) $('#playUploadMsg').textContent = '';
+  const prev = $('#playUploadPreviewVideo');
+  if (prev) { prev.src = ''; prev.classList.add('hidden'); }
+  const pubBtn = $('#publishPlayVideoFileBtn');
+  if (pubBtn) { pubBtn.disabled = true; pubBtn.textContent = 'Publish Video'; }
+  $('#playVideoFileModal')?.classList.remove('hidden');
+  await populateMusicSelect($('#playUploadMusicSelect'), 'Original Video Audio (No extra music)');
+}
+
+function closePlayVideoFileModal() {
+  stopMusicPreviewAudio();
+  const prev = $('#playUploadPreviewVideo');
+  if (prev) { try { prev.pause(); } catch (e) {} prev.src = ''; }
+  hideModalSmooth($('#playVideoFileModal'));
+}
+
+$('#playChooseUploadBtn')?.addEventListener('click', openPlayVideoFileModal);
+$('#closePlayVideoFileBtn')?.addEventListener('click', closePlayVideoFileModal);
+$('#cancelPlayVideoFileBtn')?.addEventListener('click', closePlayVideoFileModal);
+$('#playUploadMusicPreviewBtn')?.addEventListener('click', () => {
+  playSelectedMusicPreview($('#playUploadMusicSelect'), $('#playUploadMusicPreviewBtn'));
+});
+
+$('#playUploadFileInput')?.addEventListener('change', async e => {
+  const file = e.target.files?.[0];
+  const msgEl = $('#playUploadMsg');
+  const nameEl = $('#playUploadFileName');
+  const pubBtn = $('#publishPlayVideoFileBtn');
+  const prev = $('#playUploadPreviewVideo');
+  pendingUploadVideoDataUrl = '';
+  if (pubBtn) pubBtn.disabled = true;
+  if (!file) return;
+  if (msgEl) msgEl.textContent = '';
+  if (nameEl) nameEl.textContent = `${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`;
+
+  try {
+    pendingUploadBusy = true;
+    if (file.size <= 2.2 * 1024 * 1024) {
+      pendingUploadVideoDataUrl = await readFileAsDataUrlPromise(file);
+    } else {
+      if (typeof MediaRecorder === 'undefined') {
+        throw new Error('Please choose a smaller video clip under 2.2 MB.');
+      }
+      if (nameEl) nameEl.textContent = `Optimizing ${file.name} for Play... 0%`;
+      pendingUploadVideoDataUrl = await compressPlayVideoFile(file, pct => {
+        if (nameEl) nameEl.textContent = `Optimizing ${file.name} for Play... ${pct}%`;
+      });
+      if (nameEl) nameEl.textContent = `${file.name} · Ready!`;
+    }
+    if (prev && pendingUploadVideoDataUrl) {
+      prev.src = pendingUploadVideoDataUrl;
+      prev.classList.remove('hidden');
+    }
+    if (pubBtn && pendingUploadVideoDataUrl) pubBtn.disabled = false;
+  } catch (err) {
+    if (msgEl) msgEl.textContent = err?.message || 'Could not process video file.';
+  } finally {
+    pendingUploadBusy = false;
+  }
+});
+
+$('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
+  if (!sb || !currentUser?.id || pendingUploadBusy || !pendingUploadVideoDataUrl) return;
+  const pubBtn = $('#publishPlayVideoFileBtn');
+  const msgEl = $('#playUploadMsg');
+  pubBtn.disabled = true;
+  pubBtn.textContent = 'Publishing...';
+  if (msgEl) msgEl.textContent = '';
+
+  const musicName = $('#playUploadMusicSelect')?.value || '';
+  const track = musicName ? (musicCache || []).find(t => t.name === musicName) : null;
+  const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  const payload = {
+    id: newVidId,
+    kind: 'video',
+    title: ($('#playUploadTitleInput')?.value || '').trim().slice(0, 60),
+    videoUrl: pendingUploadVideoDataUrl,
+    musicName: track ? track.name : '',
+    musicUrl: track ? track.url : '',
+    musicFallbackUrl: track ? (track.fallbackUrl || '') : '',
+    ts: Date.now()
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_VID__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+
+  pubBtn.disabled = false;
+  pubBtn.textContent = 'Publish Video';
+  if (error) {
+    if (msgEl) msgEl.textContent = 'Upload failed: ' + error.message;
+    return;
+  }
+  playSound('upload');
+  closePlayVideoFileModal();
+  toast('Video published to Play!');
+  await loadPlayData(true);
+  renderAccountPlayVideos();
+  openPlayAtVideo(newVidId);
 });
 
 // ---------- Username (Account menu) ----------
@@ -6895,6 +8298,13 @@ function startRealtime() {
           if (currentPage === 'global' && Date.now() > lbAnimatingUntil) renderLeaderboard();
         });
       }
+      if (typeof loadPlayData === 'function') {
+        loadPlayData(true).then(() => {
+          if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
+          if (currentPage === 'account' && typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
+          if (playState.openCommentsVideoId && typeof renderPlayCommentsDrawerList === 'function') renderPlayCommentsDrawerList();
+        });
+      }
       if (currentPage === 'notifications') loadRequests();
       else if (currentUser) updateNotificationsBadge();
       if (isDompinator() && currentPage === 'admin') loadAdminPage();
@@ -7852,24 +9262,24 @@ function generateLocalGrindBotReply(question, userHoldings = [], isPremium = fal
 
   if (!hasGrindTopic(q)) {
     if (isPremium) return null;
-    return `I'm **GRIND-BOT** — you can say hi anytime, and I can help with **anything inside the GRIND game** (net worth, stock tactics, Battle Pass, Daily Login, Ads, creating coins, or market coins).\n\nNon-GRIND questions require **Premium** tier!\n\nTry asking:\n• "How do I raise my net worth fast?"\n• "What coins should I invest in right now?"\n• "How does the bonding curve or Battle Pass work?"`;
+    return `I'm **GRIND-BOT** — you can say hi anytime, and I can help with **anything inside the GRIND game** (net worth, stock tactics, Battle Pass, Daily Login, Play Shorts, Marketplace Crates, creating coins, or market coins).\n\nNon-GRIND questions require **Premium** tier!\n\nTry asking:\n• "How do I raise my net worth fast?"\n• "What coins should I invest in right now?"\n• "How does the bonding curve or Battle Pass work?"`;
   }
 
   const lower = q.toLowerCase();
   const featSet = new Set((featuredCoinIdsCache || []).filter(Boolean).map(String));
 
-  // Game mechanics & overall GRIND help (Pass, Daily, Ads, Curve, Create, Tiers, Leaderboard)
+  // Game mechanics & overall GRIND help (Pass, Daily, Play, Curve, Create, Tiers, Leaderboard)
   if (/\b(battle\s*pass|pass|season|play[\s-]?time|2x track|live[\s-]?post)\b/i.test(lower) && !/\b(invest|buy|net[\s-]?worth|coin|pick)\b/i.test(lower)) {
     const lv = Math.min(20, Math.floor(getEffectivePassSeconds() / PASS_STEP_SECONDS));
     return `**Season ${passState.season || 1} Battle Pass Guide (Your Level: ${lv}/20):**\n• Every **5 minutes** of Pass Play Time unlocks 1 level (up to Level 20 at 100m).\n• **Top Row (Free Track):** Cash bonuses ($5–$60), **Coin Live Post** at Level 10, and **Free PRO upgrade** at Level 20.\n• **Bottom Row (PRO Track — 2X):** PRO & Premium players get **double** every cash tier ($10–$120), **+2 Coin Live Posts** at Level 10, and a **$120 PRO Finale** bonus at Level 20.\n• Season resets only reset **Pass Play Time** — your **Time Played Leaderboard** stays untouched!`;
   }
 
   if (/\b(daily|streak|ads?|watch ad|bonding curve|curve|how does.*game work|how to play)\b/i.test(lower) && !/\b(net[\s-]?worth|invest|buy|best coin)\b/i.test(lower)) {
-    return `**GRIND Core Mechanics Guide:**\n• **Bonding Curve (CURVE_K = 0.30):** Coins start at **$1.00**. Every buy adds \`+$0.30 × $amount\` to the price; sells reverse the exact curve. You profit when other traders buy *after* you.\n• **Daily Login & Ads:** Check **Daily Login** every day for cash streaks (**2X cash** for PRO/Premium, plus PRO on Day 7), and watch **Ads** for **$1.00** per video.\n• **Tiers:** **Member** (1 coin), **PRO** (2 coins, 2X Daily, 2X Pass track, GRIND-BOT), **Premium** (3 coins, Blue Star, all PRO perks).`;
+    return `**GRIND Core Mechanics Guide:**\n• **Bonding Curve (CURVE_K = 0.30):** Coins start at **$1.00**. Every buy adds \`+$0.30 × $amount\` to the price; sells reverse the exact curve. You profit when other traders buy *after* you.\n• **Daily Login & Play:** Check **Daily Login** every day for cash streaks (**2X cash** for PRO/Premium, plus PRO on Day 7), and post Shorts/Videos in **Play** to earn **$0.50 per like**!\n• **Tiers:** **Member** (1 coin), **PRO** (2 coins, 2X Daily, 2X Pass track, GRIND-BOT), **Premium** (3 coins, Blue Star, all PRO perks).`;
   }
 
   if (!coins.length) {
-    return `There are **0 active coins** in the GRIND market right now.\n\n**Best way to grow your Net Worth (${money(netWorth)}) right now:**\n• You have **${money(cash)}** cash ready.\n• Launch a coin in **Create** ($1.00 start) — it adds directly to your portfolio value and attracts the first wave of buyers on the LIVE feed.\n• Claim **Battle Pass (2X PRO)**, **Daily Login**, and **$1.00 Ads** while building capital.`;
+    return `There are **0 active coins** in the GRIND market right now.\n\n**Best way to grow your Net Worth (${money(netWorth)}) right now:**\n• You have **${money(cash)}** cash ready.\n• Launch a coin in **Create** ($1.00 start) — it adds directly to your portfolio value and attracts the first wave of buyers on the LIVE feed.\n• Claim **Battle Pass (2X PRO)**, **Daily Login**, and post Shorts in **Play** ($0.50/like) while building capital.`;
   }
 
   // Score every active coin using live curve & demand data
@@ -8008,7 +9418,7 @@ function generateLocalGrindBotReply(question, userHoldings = [], isPremium = fal
       sections.push(`**Suggested Cash Split for your ${money(cash)}:**\n• Put **${money(leg1)}** into **$${topMomentum.coin.ticker}** and keep **${money(cash - leg1)}** cash ready for new launches.`);
     }
   } else {
-    sections.push(`**Cash Builder Note:** With **${money(cash)}** cash, grab **Season Pass** rewards (every 5m), **Daily Login**, or **Ads ($1.00)** to build buying power before taking bigger swings.`);
+    sections.push(`**Cash Builder Note:** With **${money(cash)}** cash, grab **Season Pass** rewards (every 5m), **Daily Login**, or post Shorts in **Play** ($0.50/like) to build buying power before taking bigger swings.`);
   }
 
   if (coldCoins.length) {
@@ -8023,7 +9433,7 @@ function generateLocalGrindBotReply(question, userHoldings = [], isPremium = fal
     const myCreatedCount = coins.filter(c => currentUser && String(c.creator_id) === String(currentUser.id)).length;
     const nwTips = [
       `• **1. Claim Free + PRO 2X Battle Pass Rewards (Currently Lv ${lv}/20):** Every 5m of Play Time unlocks cash up to $60 Free + **$120 PRO 2X** per tier — pure zero-risk Net Worth growth.`,
-      `• **2. Never Miss Daily Login & Ads:** Daily Login gives **2X cash** for PRO/Premium (up to +$30 on Day 7), and each **Ad** pays an instant **$1.00** risk-free.`,
+      `• **2. Never Miss Daily Login & Play:** Daily Login gives **2X cash** for PRO/Premium (up to +$30 on Day 7), and Shorts in **Play** pay creators **$0.50 per like**!`,
       `• **3. Ride Early Inflows, Scale Out in Quarters:** Enter low-price or high-24h-buy coins early, then sell **1/4** or **1/2** after surges so other traders' buys lock into your Net Worth.`,
       myCreatedCount === 0
         ? `• **4. Launch Your Own Coin & Promote It:** Use **Create** to launch a coin and use your Level 10 **Coin Live Post** in **LIVE** to attract early buyers!`
@@ -8967,7 +10377,7 @@ function shouldPlayPremiumAmbientMusic() {
   if (!currentUser || currentUser.is_banned) return false;
   if ($('#appView')?.classList.contains('hidden')) return false;
   if (!isUserMusicEnabled()) return false;
-  if (currentPage === 'ads') return false;
+  if (currentPage === 'play') return false;
   return isPremiumMusicTheme(getActiveThemeId());
 }
 
@@ -9197,7 +10607,7 @@ function renderMusicSettings() {
   const activeTheme = getActiveThemeId();
   const activeTrack = getPremiumMusicTrackForTheme(activeTheme);
   const onPremiumTheme = Boolean(activeTrack);
-  const pausedForAds = currentPage === 'ads';
+  const pausedForPlay = currentPage === 'play';
 
   toggleBtn.classList.toggle('active', enabled);
   toggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
@@ -9208,15 +10618,15 @@ function renderMusicSettings() {
     titleEl.textContent = activeTrack ? activeTrack.title : 'Obsidian Lounge — Soothing Ambient';
   }
 
-  const activelyPlaying = Boolean(enabled && onPremiumTheme && !pausedForAds && ambientPlaying);
+  const activelyPlaying = Boolean(enabled && onPremiumTheme && !pausedForPlay && ambientPlaying);
   eqBars?.classList.toggle('playing', activelyPlaying);
 
   if (pill) {
     pill.classList.remove('playing', 'ready');
     if (!enabled) {
       pill.textContent = 'Muted';
-    } else if (pausedForAds) {
-      pill.textContent = 'Paused (Ads)';
+    } else if (pausedForPlay) {
+      pill.textContent = 'Paused (Play)';
       pill.classList.add('ready');
     } else if (activelyPlaying) {
       pill.textContent = 'Playing';
@@ -10806,6 +12216,27 @@ window.addEventListener('keydown', e => {
     if (!titleSystemState.isSpinning) closeCrateModal();
     return;
   }
+  if (!$('#playCreatorModal')?.classList.contains('hidden')) {
+    closePlayCreatorStudio();
+    return;
+  }
+  if (!$('#playVideoFileModal')?.classList.contains('hidden')) {
+    closePlayVideoFileModal();
+    return;
+  }
+  if (!$('#playUploadChoiceModal')?.classList.contains('hidden')) {
+    hideModalSmooth($('#playUploadChoiceModal'));
+    return;
+  }
+  if (playState.commentGifPickerOpen) {
+    setPlayCommentGifPickerOpen(false);
+    return;
+  }
+  if (playState.openCommentsVideoId) {
+    playState.openCommentsVideoId = null;
+    $('#playCommentsDrawer')?.classList.add('hidden');
+    return;
+  }
   if (commentGifPickerOpen) {
     setCommentGifPickerOpen(false);
     return;
@@ -10816,6 +12247,7 @@ window.addEventListener('keydown', e => {
   }
   if (!$('#coinWatchModal')?.classList.contains('hidden')) closeCoinWatchModal(false);
   else if (!$('#dmModal')?.classList.contains('hidden')) hideModalSmooth($('#dmModal'));
+  else if (currentPage === 'play') showPage('feed');
 });
 
 // ============================================================
@@ -11290,8 +12722,8 @@ function renderMarketplacePage() {
   if ($('#mktContentsTitle')) $('#mktContentsTitle').textContent = `${activeCrate.name} · Season 1 Titles`;
   if ($('#mktContentsSub')) {
     $('#mktContentsSub').textContent = activeCrate.ultra
-      ? 'Epic, Legendary, and Mythic drop rates are doubled compared to Default Crate 1.'
-      : 'All 12 Season 1 Titles can drop from this crate. Duplicates are not added.';
+      ? 'Epic, Legendary, and Mythic drop rates are doubled compared to Default Crate 1. Duplicate titles refund 50%!'
+      : 'All 12 Season 1 Titles can drop from this crate. Duplicate titles refund 50% of the crate cost!';
   }
   const openSelBtn = $('#mktOpenSelectedBtn');
   if (openSelBtn) {
@@ -11372,15 +12804,31 @@ function closeCrateModal() {
   }
   titleSystemState.isSpinning = false;
   titleSystemState.isOpening = false;
+  if (titleSystemState.lastReveal?.finalCash != null && currentUser) {
+    const settled = titleSystemState.lastReveal.finalCash;
+    currentUser.cash = settled;
+    if ($('#topCash')) $('#topCash').textContent = money(settled);
+    if ($('#moneyCash')) $('#moneyCash').textContent = money(settled);
+    if ($('#mktCashPill')) $('#mktCashPill').textContent = money(settled);
+    updateNetWorth();
+  }
   hideModalSmooth($('#crateOpenModal'));
   renderMarketplacePage();
 }
 
-function showCrateRevealResult(crate, rolledItem, isDuplicate) {
+function showCrateRevealResult(crate, rolledItem, isDuplicate, refund = 0, finalCash = null) {
   titleSystemState.isSpinning = false;
   if (titleSystemState.spinRaf) {
     cancelAnimationFrame(titleSystemState.spinRaf);
     titleSystemState.spinRaf = null;
+  }
+
+  if (finalCash != null && currentUser) {
+    currentUser.cash = finalCash;
+    if ($('#topCash')) $('#topCash').textContent = money(finalCash);
+    if ($('#moneyCash')) $('#moneyCash').textContent = money(finalCash);
+    if ($('#mktCashPill')) $('#mktCashPill').textContent = money(finalCash);
+    updateNetWorth();
   }
 
   const skipBtn = $('#crateSkipSpinBtn');
@@ -11406,8 +12854,12 @@ function showCrateRevealResult(crate, rolledItem, isDuplicate) {
   if (nameEl) nameEl.textContent = rolledItem.name;
   if (statusEl) {
     if (isDuplicate) {
-      statusEl.textContent = 'ALREADY OWNED · Duplicate not added ($0 cashback)';
+      statusEl.textContent = `ALREADY OWNED · +${money(refund)} (50% crate cashback)`;
       statusEl.className = 'crate-reveal-status is-dup';
+      if (refund > 0) {
+        $('.cash-pill')?.classList.add('cash-pulse');
+        setTimeout(() => $('.cash-pill')?.classList.remove('cash-pulse'), 620);
+      }
     } else {
       statusEl.textContent = 'NEW TITLE UNLOCKED!';
       statusEl.className = 'crate-reveal-status is-new';
@@ -11462,10 +12914,15 @@ async function openCrateWithAnimation(crateId) {
     return;
   }
 
+  const rolled = rollItemFromCrate(crate);
+  const isDuplicate = titleSystemState.ownedIds.has(rolled.id);
+  const refund = isDuplicate ? Math.round((crate.price * 0.5) * 100) / 100 : 0;
   const newCash = Math.round((liveCash - crate.price) * 100) / 100;
+  const finalCash = Math.round((newCash + refund) * 100) / 100;
+
   const { error: cashErr } = await sb
     .from('profiles')
-    .update({ cash: newCash })
+    .update({ cash: finalCash })
     .eq('id', currentUser.id);
 
   if (cashErr) {
@@ -11480,9 +12937,6 @@ async function openCrateWithAnimation(crateId) {
   if ($('#moneyCash')) $('#moneyCash').textContent = money(newCash);
   if ($('#mktCashPill')) $('#mktCashPill').textContent = money(newCash);
   updateNetWorth();
-
-  const rolled = rollItemFromCrate(crate);
-  const isDuplicate = titleSystemState.ownedIds.has(rolled.id);
 
   if (!isDuplicate) {
     titleSystemState.ownedIds.add(rolled.id);
@@ -11500,7 +12954,7 @@ async function openCrateWithAnimation(crateId) {
     } catch (e) {}
   }
 
-  titleSystemState.lastReveal = { crate, item: rolled, isDuplicate };
+  titleSystemState.lastReveal = { crate, item: rolled, isDuplicate, refund, finalCash };
   titleSystemState.isOpening = false;
 
   // Build CSGO roulette reel (66 cards, winner anchored at index 52)
@@ -11563,7 +13017,7 @@ async function openCrateWithAnimation(crateId) {
     const centerX = (viewportEl.clientWidth || 640) / 2;
     const finalX = Math.max(0, (WIN_INDEX * step + cardW / 2) - centerX);
     reelEl.style.transform = `translate3d(-${finalX.toFixed(1)}px, 0, 0)`;
-    showCrateRevealResult(crate, rolled, isDuplicate);
+    showCrateRevealResult(crate, rolled, isDuplicate, refund, finalCash);
   };
 
   if (skipBtn) {
@@ -11607,7 +13061,7 @@ async function openCrateWithAnimation(crateId) {
         titleSystemState.spinRaf = null;
         if (caption) caption.textContent = `Landed on ${rolled.name}!`;
         setTimeout(() => {
-          if (titleSystemState.isSpinning) showCrateRevealResult(crate, rolled, isDuplicate);
+          if (titleSystemState.isSpinning) showCrateRevealResult(crate, rolled, isDuplicate, refund, finalCash);
         }, 320);
       }
     };
