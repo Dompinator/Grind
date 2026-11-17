@@ -1,5 +1,5 @@
 // ============================================================
-// GRIND v0.5 — Multiplayer · Premium · English
+// GRIND v0.7 — Multiplayer · Premium · English
 // ============================================================
 const SUPABASE_URL = 'https://zcrkywpyjrofphxnxtlc.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_PKSD898kwnfs6msIDiW9_g_yeoTBduD';
@@ -1427,6 +1427,7 @@ function enterApp() {
   if (typeof loadPlayData === 'function') {
     loadPlayData(true).then(() => {
       if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
+      if (typeof syncPlayDonations === 'function') syncPlayDonations();
       if (typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
     });
   }
@@ -4929,17 +4930,33 @@ function parsePlayAspectRatio(val, fallback = 9 / 16) {
 }
 
 const PLAY_LIKE_PAYOUT = 0.50;
+const PLAY_VIDEO_FILTERS = {
+  none: 'none',
+  vivid: 'saturate(1.42) contrast(1.08)',
+  warm: 'sepia(0.28) saturate(1.3) brightness(1.04)',
+  cool: 'hue-rotate(15deg) saturate(1.15) contrast(1.06)',
+  noir: 'grayscale(1) contrast(1.22)',
+  retro: 'sepia(0.45) contrast(1.12) brightness(0.95)'
+};
+
+function getPlayVideoFilterCss(name = 'none') {
+  return PLAY_VIDEO_FILTERS[String(name || 'none')] || 'none';
+}
+
 const playState = {
   videos: [],
   adsList: [],
   videosById: new Map(),
-  votesByVideo: new Map(),      // videoId -> Map(userId -> 'like'|'dislike'|'none')
+  votesByVideo: new Map(),        // videoId -> Map(userId -> 'like'|'dislike'|'none')
   uniqueLikersByVideo: new Map(), // videoId -> Set(userId !== creator)
-  paidKeys: new Set(),          // `${videoId}_${likerId}`
-  commentsByVideo: new Map(),   // videoId -> Array
+  paidKeys: new Set(),            // `${videoId}_${likerId}`
+  donations: [],                  // all __PLAY_DONATE__ rows
+  paidDonateIds: new Set(),       // donation IDs already credited to recipient
+  commentsByVideo: new Map(),     // videoId -> Array
   deletedIds: new Set(),
   lastSyncAt: 0,
   payingLikes: false,
+  payingDonations: false,
   deck: [],
   activeSlideIndex: -1,
   muted: false,
@@ -4975,6 +4992,8 @@ async function loadPlayData(force = false) {
     const votesByVideo = new Map();
     const uniqueLikersByVideo = new Map();
     const paidKeys = new Set();
+    const donations = [];
+    const paidDonateIds = new Set();
     const commentsMapByVideo = new Map();
     const deletedCommentIds = new Set();
 
@@ -4995,8 +5014,14 @@ async function loadPlayData(force = false) {
             title: String(p.title || '').slice(0, 80),
             bgColor: String(p.bgColor || '#161222'),
             aspectRatio: p.aspectRatio || (p.videoWidth && p.videoHeight ? (Number(p.videoWidth) / Number(p.videoHeight)) : '9:16'),
-            elements: Array.isArray(p.elements) ? p.elements.slice(0, 30) : [],
+            elements: Array.isArray(p.elements) ? p.elements.slice(0, 32) : [],
             videoUrl: typeof p.videoUrl === 'string' && (p.videoUrl.startsWith('data:video/') || p.videoUrl.startsWith('https://')) ? p.videoUrl : '',
+            videoFilter: String(p.videoFilter || 'none'),
+            playbackRate: Math.min(2.5, Math.max(0.5, Number(p.playbackRate || 1))),
+            muteOriginal: Boolean(p.muteOriginal),
+            linkedCoinId: p.linkedCoinId ? String(p.linkedCoinId) : '',
+            linkedCoinName: p.linkedCoinName ? String(p.linkedCoinName).slice(0, 40) : '',
+            linkedCoinTicker: p.linkedCoinTicker ? String(p.linkedCoinTicker).slice(0, 14) : '',
             musicName: String(p.musicName || ''),
             musicUrl: String(p.musicUrl || ''),
             musicFallbackUrl: String(p.musicFallbackUrl || ''),
@@ -5036,6 +5061,32 @@ async function loadPlayData(force = false) {
           const p = JSON.parse(reason.slice('__PLAY_LIKE_PAID__:'.length));
           if (srvResetTs > 0 && rowTs > 0 && rowTs <= srvResetTs) return;
           if (p?.key) paidKeys.add(String(p.key));
+        } catch (e) {}
+      } else if (reason.startsWith('__PLAY_DONATE__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_DONATE__:'.length));
+          const amt = Number(p?.amount || 0);
+          if (!p?.id || !p?.toUserId || !Number.isFinite(amt) || amt <= 0) return;
+          const dts = Number(p.ts) || rowTs;
+          if (srvResetTs > 0 && dts > 0 && dts <= srvResetTs) return;
+          donations.push({
+            id: String(p.id),
+            fromUserId: uid,
+            fromProfile: r.profiles || { id: uid, username: 'Trader' },
+            toUserId: String(p.toUserId),
+            toUsername: String(p.toUsername || 'Creator'),
+            videoId: p.videoId ? String(p.videoId) : '',
+            videoTitle: String(p.videoTitle || '').slice(0, 80),
+            amount: Math.round(amt * 100) / 100,
+            note: String(p.note || '').slice(0, 120),
+            ts: dts
+          });
+        } catch (e) {}
+      } else if (reason.startsWith('__PLAY_DONATE_PAID__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_DONATE_PAID__:'.length));
+          if (srvResetTs > 0 && rowTs > 0 && rowTs <= srvResetTs) return;
+          if (p?.donationId) paidDonateIds.add(String(p.donationId));
         } catch (e) {}
       } else if (reason.startsWith('__PLAY_CMT__:')) {
         try {
@@ -5077,6 +5128,8 @@ async function loadPlayData(force = false) {
     playState.votesByVideo = votesByVideo;
     playState.uniqueLikersByVideo = uniqueLikersByVideo;
     playState.paidKeys = paidKeys;
+    playState.donations = donations.sort((a, b) => b.ts - a.ts);
+    playState.paidDonateIds = paidDonateIds;
     playState.commentsByVideo = commentsMapByVideo;
     playState.lastSyncAt = Date.now();
   } catch (e) {}
@@ -5178,6 +5231,61 @@ async function syncPlayLikeEarnings() {
   }
 }
 
+async function syncPlayDonations() {
+  if (!sb || !currentUser?.id || playState.payingDonations) return;
+  const uid = String(currentUser.id);
+  const unpaid = (playState.donations || []).filter(d => {
+    if (String(d.toUserId) !== uid || String(d.fromUserId) === uid) return false;
+    if (playState.paidDonateIds.has(d.id)) return false;
+    try {
+      if (localStorage.getItem(`grind_donate_paid_${uid}_${d.id}`) === '1') return false;
+    } catch (e) {}
+    return true;
+  });
+  if (!unpaid.length) return;
+
+  playState.payingDonations = true;
+  try {
+    let liveCash = Number(currentUser.cash || 0);
+    try {
+      const { data: prof } = await sb.from('profiles').select('cash').eq('id', uid).maybeSingle();
+      if (prof && prof.cash != null) liveCash = Number(prof.cash);
+    } catch (e) {}
+
+    const earned = Math.round(unpaid.reduce((sum, d) => sum + Number(d.amount || 0), 0) * 100) / 100;
+    if (earned <= 0) return;
+    const newCash = Math.round((liveCash + earned) * 100) / 100;
+    const { error } = await sb.from('profiles').update({ cash: newCash }).eq('id', uid);
+    if (error) return;
+
+    currentUser.cash = newCash;
+    if ($('#topCash')) $('#topCash').textContent = money(newCash);
+    if ($('#moneyCash')) $('#moneyCash').textContent = money(newCash);
+
+    const rows = unpaid.map(d => {
+      playState.paidDonateIds.add(d.id);
+      try { localStorage.setItem(`grind_donate_paid_${uid}_${d.id}`, '1'); } catch (e) {}
+      return {
+        user_id: uid,
+        reason: '__PLAY_DONATE_PAID__:' + JSON.stringify({
+          donationId: d.id,
+          amount: d.amount,
+          ts: Date.now()
+        }),
+        status: 'denied'
+      };
+    });
+    try { await sb.from('premium_requests').insert(rows); } catch (e) {}
+
+    updateNetWorth();
+    toast(`💛 Received ${money(earned)} in video donations!`);
+    $('.cash-pill')?.classList.add('cash-pulse');
+    setTimeout(() => $('.cash-pill')?.classList.remove('cash-pulse'), 620);
+  } finally {
+    playState.payingDonations = false;
+  }
+}
+
 function stopActivePlayMedia() {
   if (playState.activeAudio) {
     try { playState.activeAudio.pause(); } catch (e) {}
@@ -5217,19 +5325,37 @@ function renderPlaySceneElementsHtml(elements = []) {
     const x = Math.min(94, Math.max(6, Number(el.x ?? 50)));
     const y = Math.min(92, Math.max(8, Number(el.y ?? 50)));
     const scale = Math.min(2.6, Math.max(0.45, Number(el.scale ?? 1)));
+    const rot = Math.min(180, Math.max(-180, Number(el.rot ?? 0)));
+    const opacity = Math.min(1, Math.max(0.25, Number(el.opacity ?? 1)));
+    const animCls = ['pulse', 'float', 'spin'].includes(el.anim) ? ` play-anim-${el.anim}` : '';
+    const transformStyle = `left:${x}%;top:${y}%;opacity:${opacity};transform:translate(-50%,-50%) scale(${scale}) rotate(${rot}deg);`;
+
     if (el.type === 'gif' && el.gifUrl) {
       const cleanUrl = typeof sanitizeGifUrl === 'function' ? sanitizeGifUrl(el.gifUrl) : '';
       if (!cleanUrl) return '';
       return `
-        <div class="play-canvas-item is-gif" style="left:${x}%;top:${y}%;transform:translate(-50%,-50%) scale(${scale});">
+        <div class="play-canvas-item is-gif${animCls}" style="${transformStyle}">
           <img src="${escapeHtml(cleanUrl)}" alt="GIF" loading="lazy" draggable="false">
+        </div>`;
+    }
+    if (el.type === 'photo' && el.photoUrl && String(el.photoUrl).startsWith('data:image/')) {
+      return `
+        <div class="play-canvas-item is-photo${animCls}" style="${transformStyle}">
+          <img src="${escapeHtml(el.photoUrl)}" alt="Photo" loading="lazy" draggable="false">
+        </div>`;
+    }
+    if (el.type === 'sticker' && el.emoji) {
+      return `
+        <div class="play-canvas-item is-sticker${animCls}" style="${transformStyle}">
+          <span>${escapeHtml(el.emoji)}</span>
         </div>`;
     }
     if (el.type === 'text' && el.text) {
       const styleCls = el.style === 'plain' ? 'style-plain' : (el.style === 'outline' ? 'style-outline' : 'style-pill');
+      const fontCls = ['impact', 'mono', 'serif'].includes(el.font) ? ` play-font-${el.font}` : ' play-font-sans';
       const color = /^#[0-9a-fA-F]{3,8}$/.test(String(el.color || '')) ? el.color : '#ffffff';
       return `
-        <div class="play-canvas-item is-text ${styleCls}" style="left:${x}%;top:${y}%;transform:translate(-50%,-50%) scale(${scale});color:${escapeHtml(color)};">
+        <div class="play-canvas-item is-text ${styleCls}${fontCls}${animCls}" style="${transformStyle}color:${escapeHtml(color)};">
           ${escapeHtml(el.text)}
         </div>`;
     }
@@ -5300,7 +5426,10 @@ function buildInitialPlayDeck(videos, adsList, focusVideoId = null, batchSize = 
 function syncPlayMuteUi() {
   const btn = $('#playMuteAllBtn');
   if (btn) btn.textContent = playState.muted ? '🔇 Muted' : '🔊 Sound On';
-  $$('#playFeedTrack video').forEach(v => { v.muted = playState.muted; });
+  $$('#playFeedTrack video').forEach(v => {
+    const forceMute = v.dataset.forceMute === '1';
+    v.muted = forceMute || playState.muted;
+  });
   if (playState.activeAudio) playState.activeAudio.muted = playState.muted;
 }
 
@@ -5322,10 +5451,13 @@ function activatePlaySlide(index) {
   const vidEl = slideEl.querySelector('video.play-media-video');
   const musicUrl = item.slideType === 'video' ? item.video.musicUrl : '';
   const musicFallback = item.slideType === 'video' ? item.video.musicFallbackUrl : '';
+  const muteOrig = item.slideType === 'video' ? Boolean(item.video.muteOriginal) : false;
+  const speed = item.slideType === 'video' ? Math.min(2.5, Math.max(0.5, Number(item.video.playbackRate || 1))) : 1;
 
   if (vidEl) {
     vidEl.currentTime = 0;
-    vidEl.muted = musicUrl ? true : playState.muted;
+    try { vidEl.playbackRate = speed; } catch (e) {}
+    vidEl.muted = Boolean(musicUrl) || muteOrig || playState.muted;
     vidEl.play().catch(() => {
       vidEl.muted = true;
       vidEl.play().catch(() => {});
@@ -5403,26 +5535,35 @@ function createPlaySlideHtml(item, idx) {
   const titleHtml = equippedTid && typeof renderTitleBadgeHtml === 'function' ? renderTitleBadgeHtml(equippedTid, true) : '';
   const canDel = currentUser && (String(currentUser.id) === String(v.user_id) || isDompinator());
   const arNum = parsePlayAspectRatio(v.aspectRatio, 9 / 16);
+  const filterCss = getPlayVideoFilterCss(v.videoFilter);
+  const forceMute = Boolean(v.musicUrl) || Boolean(v.muteOriginal);
+  const speedTag = v.kind === 'video' && Number(v.playbackRate || 1) !== 1 ? `<span class="play-speed-pill">${Number(v.playbackRate)}x</span>` : '';
 
   return `
     <article class="play-slide" data-slide-idx="${idx}" data-video-id="${escapeHtml(v.id)}">
       <div class="play-phone-frame">
         <div class="play-media-surface" data-play-tap="${idx}" style="--play-ar-num:${arNum.toFixed(4)};aspect-ratio:${arNum.toFixed(4)};background:${v.kind === 'scene' ? escapeHtml(v.bgColor) : '#090710'};">
           ${v.kind === 'video'
-            ? `<video class="play-media-video" src="${escapeHtml(v.videoUrl)}" playsinline loop preload="metadata"></video>`
+            ? `<video class="play-media-video" src="${escapeHtml(v.videoUrl)}" playsinline loop preload="metadata" data-force-mute="${forceMute ? '1' : '0'}" style="filter:${escapeHtml(filterCss)};"></video>`
             : `<div class="play-scene-layer">${renderPlaySceneElementsHtml(v.elements)}</div>`}
           <div class="play-pause-badge hidden">❚❚</div>
           <div class="play-scrim-bottom"></div>
           <div class="play-meta-bottom">
-            <div class="play-creator-row" data-play-profile="${escapeHtml(v.user_id)}">
-              <div class="avatar play-creator-av">${prof.avatar_url ? `<img src="${escapeHtml(prof.avatar_url)}">` : escapeHtml(uname[0].toUpperCase())}</div>
+            <div class="play-creator-row">
+              <div class="avatar play-creator-av" data-play-profile="${escapeHtml(v.user_id)}">${prof.avatar_url ? `<img src="${escapeHtml(prof.avatar_url)}">` : escapeHtml(uname[0].toUpperCase())}</div>
               <div class="play-creator-meta">
-                <div class="play-creator-name">${escapeHtml(uname)}${tierBadgeHtml(prof)}</div>
+                <div class="play-creator-name">
+                  <span class="play-creator-name-text" data-play-profile="${escapeHtml(v.user_id)}">${escapeHtml(uname)}${tierBadgeHtml(prof)}</span>
+                  <button type="button" class="play-donate-plus-btn" data-play-donate="${escapeHtml(v.id)}" data-donate-user="${escapeHtml(v.user_id)}" title="Donate to ${escapeHtml(uname)}" aria-label="Donate to ${escapeHtml(uname)}">＋</button>
+                </div>
                 ${titleHtml ? `<div class="play-creator-title">${titleHtml}</div>` : ''}
               </div>
             </div>
-            ${v.title ? `<div class="play-video-title">${escapeHtml(v.title)}</div>` : ''}
-            ${v.musicName ? `<div class="play-music-chip">♫ ${escapeHtml(cleanMediaDisplayName(v.musicName))}</div>` : ''}
+            ${v.title ? `<div class="play-video-title">${escapeHtml(v.title)} ${speedTag}</div>` : (speedTag ? `<div>${speedTag}</div>` : '')}
+            <div class="play-chips-row">
+              ${v.musicName ? `<div class="play-music-chip">♫ ${escapeHtml(cleanMediaDisplayName(v.musicName))}</div>` : ''}
+              ${v.linkedCoinId ? `<button type="button" class="play-linked-coin-chip" data-play-coin="${escapeHtml(v.linkedCoinId)}">◈ ${escapeHtml(v.linkedCoinName || 'Coin')} ($${escapeHtml(v.linkedCoinTicker || 'COIN')}) →</button>` : ''}
+            </div>
           </div>
         </div>
 
@@ -5495,7 +5636,7 @@ function wirePlaySlideInteractions(slideEl) {
   // Tap to pause/play
   slideEl.querySelectorAll('[data-play-tap]').forEach(el => {
     el.addEventListener('click', e => {
-      if (e.target.closest('[data-play-profile]')) return;
+      if (e.target.closest('[data-play-profile],[data-play-donate],[data-play-coin]')) return;
       toggleActiveSlidePause(slideEl);
     });
   });
@@ -5505,6 +5646,22 @@ function wirePlaySlideInteractions(slideEl) {
     el.addEventListener('click', e => {
       e.stopPropagation();
       openProfileModal(el.dataset.playProfile);
+    });
+  });
+
+  // Yellow '+' Donation button click
+  slideEl.querySelectorAll('[data-play-donate]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openPlayDonateModal(btn.dataset.playDonate, btn.dataset.donateUser);
+    });
+  });
+
+  // Linked coin click
+  slideEl.querySelectorAll('[data-play-coin]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      if (btn.dataset.playCoin) openCoin(btn.dataset.playCoin);
     });
   });
 
@@ -5611,7 +5768,7 @@ function renderPlayFeed(focusVideoId = null) {
   requestAnimationFrame(() => activatePlaySlide(0));
 }
 
-async function startPlayPage(focusVideoId = null) {
+async function startPlayPage(focusVideoId = null, openComments = false) {
   cleanupPlay();
   const track = $('#playFeedTrack');
   if (track) {
@@ -5623,14 +5780,18 @@ async function startPlayPage(focusVideoId = null) {
     loadMusicList(false)
   ]);
   syncPlayLikeEarnings();
+  syncPlayDonations();
   if (currentPage !== 'play') return;
   playState.deck = buildInitialPlayDeck(playState.videos, adsList, focusVideoId, 10);
   renderPlayFeed(focusVideoId);
+  if (openComments && focusVideoId) {
+    openPlayCommentsDrawer(focusVideoId);
+  }
 }
 
-function openPlayAtVideo(videoId) {
+function openPlayAtVideo(videoId, openComments = false) {
   if (currentPage === 'play') {
-    startPlayPage(videoId);
+    startPlayPage(videoId, openComments);
     return;
   }
   currentPage = 'play';
@@ -5640,7 +5801,7 @@ function openPlayAtVideo(videoId) {
   $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === 'play'));
   $('#pageTitle').textContent = 'Play';
   if (typeof syncPremiumAmbientMusic === 'function') syncPremiumAmbientMusic();
-  startPlayPage(videoId);
+  startPlayPage(videoId, openComments);
 }
 
 async function handlePlayVote(videoId, voteType) {
@@ -5998,18 +6159,264 @@ $('#playNextBtn')?.addEventListener('click', () => {
   if (slide) slide.scrollIntoView({ behavior: 'smooth', block: 'start' });
 });
 
+// ---------- Creator Donation Modal (Play & Live yellow '+' button) ----------
+const playDonateState = {
+  videoId: '',
+  videoTitle: '',
+  toUserId: '',
+  toUsername: 'Creator',
+  toProfile: null,
+  busy: false
+};
+
+async function openPlayDonateModal(videoId, targetUserId) {
+  if (!currentUser?.id) return toast('Please sign in first.');
+  const vid = videoId ? playState.videosById.get(String(videoId)) : null;
+  const uid = String(targetUserId || vid?.user_id || '');
+  if (!uid) return toast('Creator not found.');
+  if (uid === String(currentUser.id)) {
+    return toast('You cannot donate to your own video!');
+  }
+
+  let prof = vid?.profile || null;
+  if (!prof || !prof.username) {
+    try {
+      const { data } = await sb.from('profiles').select('id, username, avatar_url, is_premium').eq('id', uid).maybeSingle();
+      if (data) prof = data;
+    } catch (e) {}
+  }
+  prof = prof || { id: uid, username: 'Creator' };
+
+  playDonateState.videoId = vid ? vid.id : String(videoId || '');
+  playDonateState.videoTitle = vid?.title || (vid?.kind === 'video' ? 'Uploaded Video' : 'Play Short');
+  playDonateState.toUserId = uid;
+  playDonateState.toUsername = prof.username || 'Creator';
+  playDonateState.toProfile = prof;
+  playDonateState.busy = false;
+
+  const av = prof.avatar_url
+    ? `<img src="${escapeHtml(prof.avatar_url)}" alt="">`
+    : escapeHtml((prof.username || 'C')[0].toUpperCase());
+  const recEl = $('#playDonateRecipientCard');
+  if (recEl) {
+    recEl.innerHTML = `
+      <div class="avatar" style="width:44px;height:44px;font-size:16px;">${av}</div>
+      <div style="min-width:0;flex:1;">
+        <div style="font-weight:800;font-size:15px;">${escapeHtml(prof.username || 'Creator')}${tierBadgeHtml(prof)}</div>
+        <div class="muted tiny">Video: ${escapeHtml(playDonateState.videoTitle)}</div>
+      </div>`;
+  }
+  if ($('#playDonateAmountInput')) $('#playDonateAmountInput').value = '5';
+  if ($('#playDonateNoteInput')) $('#playDonateNoteInput').value = '';
+  if ($('#playDonateMsg')) $('#playDonateMsg').textContent = '';
+  if ($('#playDonateCashAvail')) $('#playDonateCashAvail').textContent = `Available cash: ${money(currentUser.cash || 0)}`;
+  $$('#playDonateQuickBtns .play-donate-chip').forEach(b => b.classList.toggle('active', b.dataset.donateAmt === '5'));
+  const sendBtn = $('#confirmPlayDonateBtn');
+  if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = '＋ Send Donation'; }
+  $('#playDonateModal')?.classList.remove('hidden');
+}
+
+function closePlayDonateModal() {
+  hideModalSmooth($('#playDonateModal'));
+}
+
+$('#closePlayDonateBtn')?.addEventListener('click', closePlayDonateModal);
+$('#cancelPlayDonateBtn')?.addEventListener('click', closePlayDonateModal);
+$('#playDonateModal')?.addEventListener('click', e => {
+  if (e.target === $('#playDonateModal')) closePlayDonateModal();
+});
+$$('#playDonateQuickBtns .play-donate-chip').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const val = btn.dataset.donateAmt || '5';
+    if ($('#playDonateAmountInput')) $('#playDonateAmountInput').value = val;
+    $$('#playDonateQuickBtns .play-donate-chip').forEach(b => b.classList.toggle('active', b === btn));
+  });
+});
+$('#playDonateAmountInput')?.addEventListener('input', e => {
+  const v = String(e.target.value || '');
+  $$('#playDonateQuickBtns .play-donate-chip').forEach(b => b.classList.toggle('active', b.dataset.donateAmt === v));
+});
+
+$('#confirmPlayDonateBtn')?.addEventListener('click', async () => {
+  if (!sb || !currentUser?.id || playDonateState.busy) return;
+  const msgEl = $('#playDonateMsg');
+  const sendBtn = $('#confirmPlayDonateBtn');
+  if (msgEl) msgEl.textContent = '';
+
+  const amount = Math.round(Number($('#playDonateAmountInput')?.value || 0) * 100) / 100;
+  const note = ($('#playDonateNoteInput')?.value || '').trim().slice(0, 120);
+  if (!Number.isFinite(amount) || amount < 0.5) {
+    if (msgEl) msgEl.textContent = 'Minimum donation is $0.50.';
+    return;
+  }
+  if (playDonateState.toUserId === String(currentUser.id)) {
+    if (msgEl) msgEl.textContent = 'You cannot donate to yourself.';
+    return;
+  }
+
+  playDonateState.busy = true;
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = 'Sending...'; }
+
+  let liveCash = Number(currentUser.cash || 0);
+  try {
+    const { data: prof } = await sb.from('profiles').select('cash').eq('id', currentUser.id).maybeSingle();
+    if (prof && prof.cash != null) liveCash = Number(prof.cash);
+  } catch (e) {}
+
+  if (amount > liveCash) {
+    playDonateState.busy = false;
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = '＋ Send Donation'; }
+    if (msgEl) msgEl.textContent = `Not enough cash (${money(liveCash)} available).`;
+    return;
+  }
+
+  const nextCash = Math.round((liveCash - amount) * 100) / 100;
+  const { error: cashErr } = await sb.from('profiles').update({ cash: nextCash }).eq('id', currentUser.id);
+  if (cashErr) {
+    playDonateState.busy = false;
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = '＋ Send Donation'; }
+    if (msgEl) msgEl.textContent = 'Donation failed: ' + cashErr.message;
+    return;
+  }
+
+  const donateId = 'pdon_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  const payload = {
+    id: donateId,
+    toUserId: playDonateState.toUserId,
+    toUsername: playDonateState.toUsername,
+    videoId: playDonateState.videoId,
+    videoTitle: playDonateState.videoTitle,
+    amount,
+    note,
+    ts: Date.now()
+  };
+
+  const { error: reqErr } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_DONATE__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+
+  playDonateState.busy = false;
+  if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = '＋ Send Donation'; }
+
+  if (reqErr) {
+    // Roll back cash if log insert fails
+    try { await sb.from('profiles').update({ cash: liveCash }).eq('id', currentUser.id); } catch (e) {}
+    if (msgEl) msgEl.textContent = 'Donation error: ' + reqErr.message;
+    return;
+  }
+
+  currentUser.cash = nextCash;
+  if ($('#topCash')) $('#topCash').textContent = money(nextCash);
+  if ($('#moneyCash')) $('#moneyCash').textContent = money(nextCash);
+  updateNetWorth();
+  playSound('buy');
+  closePlayDonateModal();
+  toast(`💛 Donated ${money(amount)} to ${playDonateState.toUsername}!`);
+  await loadPlayData(true);
+  if (currentPage === 'live') loadLiveFeed();
+});
+
 // ---------- Play Upload Choice + Short Creator Studio + Video File Upload ----------
+const PLAY_STICKERS = ['🔥', '🚀', '💎', '👑', '💰', '📈', '⚡', '🎯', '😂', '🥳', '❤️', '👀', '🤯', '🏆', '🎵', '✨'];
 const playEditorState = {
   bgColor: '#161222',
   aspectRatio: '9:16',
-  elements: [], // { id, type:'gif'|'text', x, y, scale, gifUrl, text, color, style }
+  elements: [], // { id, type:'gif'|'text'|'sticker'|'photo', x, y, scale, rot, opacity, anim, gifUrl, photoUrl, emoji, text, color, style, font }
+  history: [],
   selectedId: null,
   musicName: '',
   musicUrl: '',
   musicFallbackUrl: '',
+  linkedCoinId: '',
   gifQuery: '',
   saving: false
 };
+
+function snapshotPlayEditorState() {
+  return JSON.stringify({
+    bgColor: playEditorState.bgColor,
+    aspectRatio: playEditorState.aspectRatio,
+    elements: playEditorState.elements
+  });
+}
+
+function pushPlayEditorHistory() {
+  const snap = snapshotPlayEditorState();
+  if (playEditorState.history[playEditorState.history.length - 1] === snap) return;
+  playEditorState.history.push(snap);
+  if (playEditorState.history.length > 25) playEditorState.history.shift();
+  const undoBtn = $('#playCreatorUndoBtn');
+  if (undoBtn) undoBtn.disabled = playEditorState.history.length === 0;
+}
+
+function undoPlayEditor() {
+  if (!playEditorState.history.length) return;
+  try {
+    const prev = JSON.parse(playEditorState.history.pop());
+    playEditorState.bgColor = prev.bgColor || '#161222';
+    playEditorState.aspectRatio = prev.aspectRatio || '9:16';
+    playEditorState.elements = Array.isArray(prev.elements) ? prev.elements : [];
+    playEditorState.selectedId = null;
+    syncPlayEditorAspectUi();
+    renderPlayEditorStage();
+  } catch (e) {}
+  const undoBtn = $('#playCreatorUndoBtn');
+  if (undoBtn) undoBtn.disabled = playEditorState.history.length === 0;
+}
+
+function populatePlayCoinSelect(selectEl, emptyLabel = 'No Linked Coin (optional)') {
+  if (!selectEl) return;
+  const list = Array.isArray(coins) ? coins : [];
+  selectEl.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>` +
+    list.map(c => `<option value="${escapeHtml(c.id)}">◈ ${escapeHtml(c.name)} ($${escapeHtml(c.ticker)})</option>`).join('');
+}
+
+function compressPlayCanvasImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read photo'));
+    reader.onload = ev => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Invalid image file'));
+      img.onload = () => {
+        const maxSide = 420;
+        const ratio = Math.min(1, maxSide / Math.max(img.width || 1, img.height || 1));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(40, Math.round(img.width * ratio));
+        canvas.height = Math.max(40, Math.round(img.height * ratio));
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.74));
+      };
+      img.src = String(ev.target?.result || '');
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderPlayStickerGrid() {
+  const grid = $('#playEditorStickerGrid');
+  if (!grid) return;
+  grid.innerHTML = PLAY_STICKERS.map(em => `
+    <button type="button" class="play-sticker-btn" data-add-sticker="${escapeHtml(em)}">${escapeHtml(em)}</button>
+  `).join('');
+  grid.querySelectorAll('[data-add-sticker]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const em = btn.dataset.addSticker;
+      if (!em) return;
+      pushPlayEditorHistory();
+      const newId = 'el_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
+      playEditorState.elements.push({
+        id: newId, type: 'sticker', x: 50, y: 48, scale: 1.2, rot: 0, opacity: 1, anim: 'none', emoji: em
+      });
+      playEditorState.selectedId = newId;
+      $('#playEditorStickerPanel')?.classList.add('hidden');
+      renderPlayEditorStage();
+    });
+  });
+}
 
 function syncPlayEditorAspectUi() {
   const ratioKey = playEditorState.aspectRatio || '9:16';
@@ -6073,6 +6480,9 @@ function renderEditorSelectionBar() {
   const lbl = $('#playSelLabel');
   const colorInp = $('#playSelTextColorInput');
   const styleBtn = $('#playSelTextStyleBtn');
+  const fontBtn = $('#playSelTextFontBtn');
+  const animBtn = $('#playSelAnimBtn');
+  const opBtn = $('#playSelOpacityBtn');
   const item = playEditorState.elements.find(el => el.id === playEditorState.selectedId) || null;
   if (!bar) return;
   if (!item) {
@@ -6080,7 +6490,13 @@ function renderEditorSelectionBar() {
     return;
   }
   bar.classList.remove('hidden');
-  if (lbl) lbl.textContent = item.type === 'gif' ? 'GIF Element' : 'Text Element';
+  const labels = { gif: 'GIF Layer', photo: 'Photo Layer', sticker: 'Sticker', text: 'Text Layer' };
+  if (lbl) lbl.textContent = labels[item.type] || 'Layer';
+  if (animBtn) {
+    const aMap = { none: '✨ Still', pulse: '💓 Pulse', float: '🎈 Float', spin: '🌀 Spin' };
+    animBtn.textContent = aMap[item.anim || 'none'] || '✨ Still';
+  }
+  if (opBtn) opBtn.textContent = `${Math.round(Number(item.opacity ?? 1) * 100)}%`;
   if (colorInp) {
     colorInp.classList.toggle('hidden', item.type !== 'text');
     if (item.type === 'text') colorInp.value = item.color || '#ffffff';
@@ -6091,6 +6507,13 @@ function renderEditorSelectionBar() {
       styleBtn.textContent = item.style === 'plain' ? 'Clean' : (item.style === 'outline' ? 'Glow' : 'Pill');
     }
   }
+  if (fontBtn) {
+    fontBtn.classList.toggle('hidden', item.type !== 'text');
+    if (item.type === 'text') {
+      const fMap = { sans: 'Sans', impact: 'Impact', mono: 'Mono', serif: 'Serif' };
+      fontBtn.textContent = fMap[item.font || 'sans'] || 'Sans';
+    }
+  }
 }
 
 function renderPlayEditorStage() {
@@ -6099,21 +6522,37 @@ function renderPlayEditorStage() {
   stage.style.background = playEditorState.bgColor || '#161222';
   const itemsHtml = playEditorState.elements.map(el => {
     const selCls = el.id === playEditorState.selectedId ? 'is-selected' : '';
-    const posStyle = `left:${el.x}%;top:${el.y}%;transform:translate(-50%,-50%) scale(${el.scale || 1});`;
+    const rot = Number(el.rot ?? 0);
+    const op = Number(el.opacity ?? 1);
+    const animCls = ['pulse', 'float', 'spin'].includes(el.anim) ? ` play-anim-${el.anim}` : '';
+    const posStyle = `left:${el.x}%;top:${el.y}%;opacity:${op};transform:translate(-50%,-50%) scale(${el.scale || 1}) rotate(${rot}deg);`;
     if (el.type === 'gif') {
       return `
-        <div class="play-canvas-item is-gif is-editable ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}">
+        <div class="play-canvas-item is-gif is-editable${animCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}">
           <img src="${escapeHtml(el.gifUrl)}" alt="GIF" draggable="false">
         </div>`;
     }
+    if (el.type === 'photo') {
+      return `
+        <div class="play-canvas-item is-photo is-editable${animCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}">
+          <img src="${escapeHtml(el.photoUrl)}" alt="Photo" draggable="false">
+        </div>`;
+    }
+    if (el.type === 'sticker') {
+      return `
+        <div class="play-canvas-item is-sticker is-editable${animCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}">
+          <span>${escapeHtml(el.emoji)}</span>
+        </div>`;
+    }
     const styleCls = el.style === 'plain' ? 'style-plain' : (el.style === 'outline' ? 'style-outline' : 'style-pill');
+    const fontCls = ['impact', 'mono', 'serif'].includes(el.font) ? ` play-font-${el.font}` : ' play-font-sans';
     return `
-      <div class="play-canvas-item is-text is-editable ${styleCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}color:${escapeHtml(el.color || '#ffffff')};">
+      <div class="play-canvas-item is-text is-editable ${styleCls}${fontCls}${animCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}color:${escapeHtml(el.color || '#ffffff')};">
         ${escapeHtml(el.text)}
       </div>`;
   }).join('');
 
-  stage.innerHTML = (playEditorState.elements.length ? '' : '<div id="playEditorEmptyHint" class="play-editor-empty-hint">Press <strong>＋ Add GIF / Text</strong>, then drag elements anywhere!</div>') + itemsHtml;
+  stage.innerHTML = (playEditorState.elements.length ? '' : '<div id="playEditorEmptyHint" class="play-editor-empty-hint">Press <strong>＋ Add Element</strong> to add GIFs, Text, Stickers, or Photos — drag them anywhere!</div>') + itemsHtml;
 
   $$('#playEditorStage [data-edit-el]').forEach(domEl => {
     domEl.addEventListener('pointerdown', e => {
@@ -6131,11 +6570,16 @@ function renderPlayEditorStage() {
       const startClientY = e.clientY;
       const startX = item.x;
       const startY = item.y;
+      let moved = false;
 
       try { domEl.setPointerCapture(e.pointerId); } catch (err) {}
 
       const onMove = ev => {
         if (!rect.width || !rect.height) return;
+        if (!moved && (Math.abs(ev.clientX - startClientX) > 3 || Math.abs(ev.clientY - startClientY) > 3)) {
+          pushPlayEditorHistory();
+          moved = true;
+        }
         const dxPct = ((ev.clientX - startClientX) / rect.width) * 100;
         const dyPct = ((ev.clientY - startClientY) / rect.height) * 100;
         item.x = Math.min(94, Math.max(6, Math.round((startX + dxPct) * 10) / 10));
@@ -6187,6 +6631,7 @@ async function loadPlayEditorGifs(query = '') {
     btn.addEventListener('click', () => {
       const picked = res.gifs[Number(btn.dataset.editorGifIdx)];
       if (!picked) return;
+      pushPlayEditorHistory();
       const newId = 'el_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
       playEditorState.elements.push({
         id: newId,
@@ -6194,6 +6639,9 @@ async function loadPlayEditorGifs(query = '') {
         x: 50,
         y: 48,
         scale: 1,
+        rot: 0,
+        opacity: 1,
+        anim: 'none',
         gifUrl: picked.gifUrl
       });
       playEditorState.selectedId = newId;
@@ -6203,17 +6651,20 @@ async function loadPlayEditorGifs(query = '') {
   });
 }
 
-async function openPlayCreatorStudio() {
+async function openPlayCreatorStudio(promptPhotoPick = false) {
   $('#playUploadChoiceModal')?.classList.add('hidden');
   playEditorState.bgColor = '#161222';
   playEditorState.aspectRatio = '9:16';
   playEditorState.elements = [];
+  playEditorState.history = [];
   playEditorState.selectedId = null;
+  playEditorState.linkedCoinId = '';
   playEditorState.gifQuery = '';
   playEditorState.saving = false;
   if ($('#playCreatorTitle')) $('#playCreatorTitle').value = '';
   if ($('#playBgColorInput')) $('#playBgColorInput').value = '#161222';
   if ($('#playCreatorMsg')) $('#playCreatorMsg').textContent = '';
+  if ($('#playCreatorUndoBtn')) $('#playCreatorUndoBtn').disabled = true;
   if ($('#playCreatorFinishBtn')) {
     $('#playCreatorFinishBtn').disabled = false;
     $('#playCreatorFinishBtn').textContent = 'Finish ✓';
@@ -6221,10 +6672,16 @@ async function openPlayCreatorStudio() {
   $$('#playBgSwatches .play-bg-swatch').forEach(b => b.classList.toggle('active', b.dataset.bg === '#161222'));
   $('#playEditorPlusMenu')?.classList.add('hidden');
   $('#playEditorTextPanel')?.classList.add('hidden');
+  $('#playEditorStickerPanel')?.classList.add('hidden');
   $('#playEditorGifPanel')?.classList.add('hidden');
+  renderPlayStickerGrid();
+  populatePlayCoinSelect($('#playEditorCoinSelect'), 'No Linked Coin (optional)');
   syncPlayEditorAspectUi();
   renderPlayEditorStage();
   $('#playCreatorModal')?.classList.remove('hidden');
+  if (promptPhotoPick) {
+    setTimeout(() => $('#playEditorPhotoInput')?.click(), 120);
+  }
   await populateMusicSelect($('#playEditorMusicSelect'), 'No Music');
 }
 
@@ -6233,11 +6690,14 @@ function closePlayCreatorStudio() {
   hideModalSmooth($('#playCreatorModal'));
 }
 
-$('#playChooseCreateBtn')?.addEventListener('click', openPlayCreatorStudio);
+$('#playChooseCreateBtn')?.addEventListener('click', () => openPlayCreatorStudio(false));
+$('#playChoosePhotoBtn')?.addEventListener('click', () => openPlayCreatorStudio(true));
 $('#playCreatorCancelBtn')?.addEventListener('click', closePlayCreatorStudio);
+$('#playCreatorUndoBtn')?.addEventListener('click', undoPlayEditor);
 
 $$('#playAspectRatioGroup .play-aspect-btn').forEach(btn => {
   btn.addEventListener('click', () => {
+    pushPlayEditorHistory();
     playEditorState.aspectRatio = btn.dataset.aspect || '9:16';
     syncPlayEditorAspectUi();
   });
@@ -6245,34 +6705,85 @@ $$('#playAspectRatioGroup .play-aspect-btn').forEach(btn => {
 
 $$('#playBgSwatches .play-bg-swatch').forEach(btn => {
   btn.addEventListener('click', () => {
+    pushPlayEditorHistory();
     playEditorState.bgColor = btn.dataset.bg || '#161222';
-    if ($('#playBgColorInput')) $('#playBgColorInput').value = playEditorState.bgColor;
+    if ($('#playBgColorInput') && /^#[0-9a-fA-F]{6}$/.test(playEditorState.bgColor)) {
+      $('#playBgColorInput').value = playEditorState.bgColor;
+    }
     $$('#playBgSwatches .play-bg-swatch').forEach(b => b.classList.toggle('active', b === btn));
     if ($('#playEditorStage')) $('#playEditorStage').style.background = playEditorState.bgColor;
   });
 });
 $('#playBgColorInput')?.addEventListener('input', e => {
+  pushPlayEditorHistory();
   playEditorState.bgColor = e.target.value || '#161222';
   $$('#playBgSwatches .play-bg-swatch').forEach(b => b.classList.remove('active'));
   if ($('#playEditorStage')) $('#playEditorStage').style.background = playEditorState.bgColor;
 });
+
+function hideAllEditorSubpanels() {
+  $('#playEditorPlusMenu')?.classList.add('hidden');
+  $('#playEditorTextPanel')?.classList.add('hidden');
+  $('#playEditorStickerPanel')?.classList.add('hidden');
+  $('#playEditorGifPanel')?.classList.add('hidden');
+}
 
 $('#playEditorPlusBtn')?.addEventListener('click', e => {
   e.stopPropagation();
   $('#playEditorPlusMenu')?.classList.toggle('hidden');
 });
 $('#playAddGifModeBtn')?.addEventListener('click', () => {
-  $('#playEditorPlusMenu')?.classList.add('hidden');
-  $('#playEditorTextPanel')?.classList.add('hidden');
+  hideAllEditorSubpanels();
   $('#playEditorGifPanel')?.classList.remove('hidden');
   loadPlayEditorGifs(playEditorState.gifQuery);
   setTimeout(() => $('#playEditorGifSearchInput')?.focus(), 40);
 });
 $('#playAddTextModeBtn')?.addEventListener('click', () => {
-  $('#playEditorPlusMenu')?.classList.add('hidden');
-  $('#playEditorGifPanel')?.classList.add('hidden');
+  hideAllEditorSubpanels();
   $('#playEditorTextPanel')?.classList.remove('hidden');
   setTimeout(() => $('#playEditorTextInput')?.focus(), 40);
+});
+$('#playAddStickerModeBtn')?.addEventListener('click', () => {
+  hideAllEditorSubpanels();
+  renderPlayStickerGrid();
+  $('#playEditorStickerPanel')?.classList.remove('hidden');
+});
+$('#playAddPhotoModeBtn')?.addEventListener('click', () => {
+  hideAllEditorSubpanels();
+  $('#playEditorPhotoInput')?.click();
+});
+
+$('#playEditorPhotoInput')?.addEventListener('change', async e => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const photoUrl = await compressPlayCanvasImage(file);
+    pushPlayEditorHistory();
+    const newId = 'el_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
+    playEditorState.elements.push({
+      id: newId, type: 'photo', x: 50, y: 48, scale: 1, rot: 0, opacity: 1, anim: 'none', photoUrl
+    });
+    playEditorState.selectedId = newId;
+    renderPlayEditorStage();
+  } catch (err) {
+    toast(err?.message || 'Could not add photo');
+  }
+});
+
+$('#playCustomEmojiAddBtn')?.addEventListener('click', () => {
+  const inp = $('#playCustomEmojiInput');
+  const em = (inp?.value || '').trim();
+  if (!em) return toast('Enter an emoji first!');
+  pushPlayEditorHistory();
+  const newId = 'el_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
+  playEditorState.elements.push({
+    id: newId, type: 'sticker', x: 50, y: 48, scale: 1.2, rot: 0, opacity: 1, anim: 'none', emoji: em.slice(0, 8)
+  });
+  playEditorState.selectedId = newId;
+  if (inp) inp.value = '';
+  $('#playEditorStickerPanel')?.classList.add('hidden');
+  renderPlayEditorStage();
 });
 
 let playEditorGifTimer = null;
@@ -6287,6 +6798,8 @@ $('#playEditorAddTextConfirmBtn')?.addEventListener('click', () => {
   const txt = (inp?.value || '').trim();
   if (!txt) return toast('Enter some text first!');
   const color = $('#playEditorNewTextColor')?.value || '#ffffff';
+  const font = $('#playEditorNewTextFont')?.value || 'sans';
+  pushPlayEditorHistory();
   const newId = 'el_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
   playEditorState.elements.push({
     id: newId,
@@ -6294,9 +6807,13 @@ $('#playEditorAddTextConfirmBtn')?.addEventListener('click', () => {
     x: 50,
     y: 45,
     scale: 1,
+    rot: 0,
+    opacity: 1,
+    anim: 'none',
     text: txt.slice(0, 90),
     color,
-    style: 'pill'
+    style: 'pill',
+    font
   });
   playEditorState.selectedId = newId;
   if (inp) inp.value = '';
@@ -6307,13 +6824,48 @@ $('#playEditorAddTextConfirmBtn')?.addEventListener('click', () => {
 $('#playSelScaleDownBtn')?.addEventListener('click', () => {
   const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
   if (!it) return;
+  pushPlayEditorHistory();
   it.scale = Math.max(0.5, Math.round(((it.scale || 1) - 0.15) * 100) / 100);
   renderPlayEditorStage();
 });
 $('#playSelScaleUpBtn')?.addEventListener('click', () => {
   const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
   if (!it) return;
+  pushPlayEditorHistory();
   it.scale = Math.min(2.4, Math.round(((it.scale || 1) + 0.15) * 100) / 100);
+  renderPlayEditorStage();
+});
+$('#playSelRotLeftBtn')?.addEventListener('click', () => {
+  const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
+  if (!it) return;
+  pushPlayEditorHistory();
+  it.rot = ((Number(it.rot || 0) - 15) + 360) % 360;
+  if (it.rot > 180) it.rot -= 360;
+  renderPlayEditorStage();
+});
+$('#playSelRotRightBtn')?.addEventListener('click', () => {
+  const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
+  if (!it) return;
+  pushPlayEditorHistory();
+  it.rot = (Number(it.rot || 0) + 15);
+  if (it.rot > 180) it.rot -= 360;
+  renderPlayEditorStage();
+});
+$('#playSelAnimBtn')?.addEventListener('click', () => {
+  const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
+  if (!it) return;
+  pushPlayEditorHistory();
+  const order = ['none', 'pulse', 'float', 'spin'];
+  it.anim = order[(order.indexOf(it.anim || 'none') + 1) % order.length];
+  renderPlayEditorStage();
+});
+$('#playSelOpacityBtn')?.addEventListener('click', () => {
+  const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
+  if (!it) return;
+  pushPlayEditorHistory();
+  const order = [1, 0.8, 0.55];
+  const idx = order.findIndex(v => Math.abs(v - Number(it.opacity ?? 1)) < 0.08);
+  it.opacity = order[(idx + 1) % order.length];
   renderPlayEditorStage();
 });
 $('#playSelTextColorInput')?.addEventListener('input', e => {
@@ -6325,12 +6877,48 @@ $('#playSelTextColorInput')?.addEventListener('input', e => {
 $('#playSelTextStyleBtn')?.addEventListener('click', () => {
   const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
   if (!it || it.type !== 'text') return;
+  pushPlayEditorHistory();
   const order = ['pill', 'outline', 'plain'];
   it.style = order[(order.indexOf(it.style || 'pill') + 1) % order.length];
   renderPlayEditorStage();
 });
+$('#playSelTextFontBtn')?.addEventListener('click', () => {
+  const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
+  if (!it || it.type !== 'text') return;
+  pushPlayEditorHistory();
+  const order = ['sans', 'impact', 'mono', 'serif'];
+  it.font = order[(order.indexOf(it.font || 'sans') + 1) % order.length];
+  renderPlayEditorStage();
+});
+$('#playSelFrontBtn')?.addEventListener('click', () => {
+  const idx = playEditorState.elements.findIndex(el => el.id === playEditorState.selectedId);
+  if (idx < 0 || idx === playEditorState.elements.length - 1) return;
+  pushPlayEditorHistory();
+  const [it] = playEditorState.elements.splice(idx, 1);
+  playEditorState.elements.push(it);
+  renderPlayEditorStage();
+});
+$('#playSelBackBtn')?.addEventListener('click', () => {
+  const idx = playEditorState.elements.findIndex(el => el.id === playEditorState.selectedId);
+  if (idx <= 0) return;
+  pushPlayEditorHistory();
+  const [it] = playEditorState.elements.splice(idx, 1);
+  playEditorState.elements.unshift(it);
+  renderPlayEditorStage();
+});
+$('#playSelDupBtn')?.addEventListener('click', () => {
+  const it = playEditorState.elements.find(el => el.id === playEditorState.selectedId);
+  if (!it) return;
+  pushPlayEditorHistory();
+  const newId = 'el_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
+  const copy = { ...it, id: newId, x: Math.min(88, it.x + 6), y: Math.min(86, it.y + 6) };
+  playEditorState.elements.push(copy);
+  playEditorState.selectedId = newId;
+  renderPlayEditorStage();
+});
 $('#playSelDeleteBtn')?.addEventListener('click', () => {
   if (!playEditorState.selectedId) return;
+  pushPlayEditorHistory();
   playEditorState.elements = playEditorState.elements.filter(el => el.id !== playEditorState.selectedId);
   playEditorState.selectedId = null;
   renderPlayEditorStage();
@@ -6344,7 +6932,7 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
   const msgEl = $('#playCreatorMsg');
   const finishBtn = $('#playCreatorFinishBtn');
   if (!playEditorState.elements.length) {
-    if (msgEl) msgEl.textContent = 'Press ＋ to add at least one GIF or Text first!';
+    if (msgEl) msgEl.textContent = 'Press ＋ Add Element to drop a GIF, Text, Sticker, or Photo first!';
     return;
   }
   playEditorState.saving = true;
@@ -6356,6 +6944,8 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
 
   const musicName = $('#playEditorMusicSelect')?.value || '';
   const track = musicName ? (musicCache || []).find(t => t.name === musicName) : null;
+  const linkedId = $('#playEditorCoinSelect')?.value || '';
+  const linkedCoin = linkedId ? (coins || []).find(c => String(c.id) === String(linkedId)) : null;
   const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
   const payload = {
     id: newVidId,
@@ -6363,14 +6953,17 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
     title: ($('#playCreatorTitle')?.value || '').trim().slice(0, 60),
     bgColor: playEditorState.bgColor || '#161222',
     aspectRatio: playEditorState.aspectRatio || '9:16',
-    elements: playEditorState.elements.map(({ id, type, x, y, scale, gifUrl, text, color, style }) => ({
-      id, type, x, y, scale,
+    elements: playEditorState.elements.map(({ id, type, x, y, scale, rot, opacity, anim, gifUrl, photoUrl, emoji, text, color, style, font }) => ({
+      id, type, x, y, scale, rot: Number(rot || 0), opacity: Number(opacity ?? 1), anim: anim || 'none',
       ...(gifUrl ? { gifUrl } : {}),
-      ...(text ? { text, color, style } : {})
+      ...(photoUrl ? { photoUrl } : {}),
+      ...(emoji ? { emoji } : {}),
+      ...(text ? { text, color, style, font: font || 'sans' } : {})
     })),
     musicName: track ? track.name : '',
     musicUrl: track ? track.url : '',
     musicFallbackUrl: track ? (track.fallbackUrl || '') : '',
+    ...(linkedCoin ? { linkedCoinId: String(linkedCoin.id), linkedCoinName: linkedCoin.name, linkedCoinTicker: linkedCoin.ticker } : {}),
     ts: Date.now()
   };
 
@@ -6492,6 +7085,17 @@ async function compressPlayVideoFile(file, onProgress) {
   });
 }
 
+function syncPlayUploadPreviewEffects() {
+  const prev = $('#playUploadPreviewVideo');
+  if (!prev) return;
+  const f = $('#playUploadFilterSelect')?.value || 'none';
+  const spd = Math.min(2.5, Math.max(0.5, Number($('#playUploadSpeedSelect')?.value || 1)));
+  const muteOrig = Boolean($('#playUploadMuteOrigCheckbox')?.checked);
+  prev.style.filter = getPlayVideoFilterCss(f);
+  try { prev.playbackRate = spd; } catch (e) {}
+  prev.muted = muteOrig;
+}
+
 async function openPlayVideoFileModal() {
   $('#playUploadChoiceModal')?.classList.add('hidden');
   pendingUploadVideoDataUrl = '';
@@ -6501,8 +7105,12 @@ async function openPlayVideoFileModal() {
   if ($('#playUploadFileInput')) $('#playUploadFileInput').value = '';
   if ($('#playUploadFileName')) $('#playUploadFileName').textContent = 'No video selected';
   if ($('#playUploadMsg')) $('#playUploadMsg').textContent = '';
+  if ($('#playUploadFilterSelect')) $('#playUploadFilterSelect').value = 'none';
+  if ($('#playUploadSpeedSelect')) $('#playUploadSpeedSelect').value = '1';
+  if ($('#playUploadMuteOrigCheckbox')) $('#playUploadMuteOrigCheckbox').checked = false;
+  populatePlayCoinSelect($('#playUploadCoinSelect'), 'No Linked Coin');
   const prev = $('#playUploadPreviewVideo');
-  if (prev) { prev.src = ''; prev.classList.add('hidden'); }
+  if (prev) { prev.src = ''; prev.style.filter = 'none'; prev.classList.add('hidden'); }
   const pubBtn = $('#publishPlayVideoFileBtn');
   if (pubBtn) { pubBtn.disabled = true; pubBtn.textContent = 'Publish Video'; }
   $('#playVideoFileModal')?.classList.remove('hidden');
@@ -6519,6 +7127,9 @@ function closePlayVideoFileModal() {
 $('#playChooseUploadBtn')?.addEventListener('click', openPlayVideoFileModal);
 $('#closePlayVideoFileBtn')?.addEventListener('click', closePlayVideoFileModal);
 $('#cancelPlayVideoFileBtn')?.addEventListener('click', closePlayVideoFileModal);
+$('#playUploadFilterSelect')?.addEventListener('change', syncPlayUploadPreviewEffects);
+$('#playUploadSpeedSelect')?.addEventListener('change', syncPlayUploadPreviewEffects);
+$('#playUploadMuteOrigCheckbox')?.addEventListener('change', syncPlayUploadPreviewEffects);
 $('#playUploadMusicPreviewBtn')?.addEventListener('click', () => {
   playSelectedMusicPreview($('#playUploadMusicSelect'), $('#playUploadMusicPreviewBtn'));
 });
@@ -6560,6 +7171,7 @@ $('#playUploadFileInput')?.addEventListener('change', async e => {
     if (prev && pendingUploadVideoDataUrl) {
       prev.src = pendingUploadVideoDataUrl;
       prev.classList.remove('hidden');
+      syncPlayUploadPreviewEffects();
     }
     if (pubBtn && pendingUploadVideoDataUrl) pubBtn.disabled = false;
   } catch (err) {
@@ -6579,6 +7191,8 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
 
   const musicName = $('#playUploadMusicSelect')?.value || '';
   const track = musicName ? (musicCache || []).find(t => t.name === musicName) : null;
+  const linkedId = $('#playUploadCoinSelect')?.value || '';
+  const linkedCoin = linkedId ? (coins || []).find(c => String(c.id) === String(linkedId)) : null;
   const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
   const payload = {
     id: newVidId,
@@ -6586,9 +7200,13 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
     title: ($('#playUploadTitleInput')?.value || '').trim().slice(0, 60),
     aspectRatio: pendingUploadVideoAspect || (9 / 16),
     videoUrl: pendingUploadVideoDataUrl,
+    videoFilter: $('#playUploadFilterSelect')?.value || 'none',
+    playbackRate: Math.min(2.5, Math.max(0.5, Number($('#playUploadSpeedSelect')?.value || 1))),
+    muteOriginal: Boolean($('#playUploadMuteOrigCheckbox')?.checked),
     musicName: track ? track.name : '',
     musicUrl: track ? track.url : '',
     musicFallbackUrl: track ? (track.fallbackUrl || '') : '',
+    ...(linkedCoin ? { linkedCoinId: String(linkedCoin.id), linkedCoinName: linkedCoin.name, linkedCoinTicker: linkedCoin.ticker } : {}),
     ts: Date.now()
   };
 
@@ -7019,20 +7637,27 @@ async function loadLiveFeed() {
     });
   });
 
-  let postRows = [];
-  try {
-    let lpQ = sb.from('premium_requests')
-      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
-      .like('reason', '__LIVE_POST__:%')
-      .order('created_at', { ascending: false })
-      .limit(40);
-    if (srvResetTs > 0) {
-      lpQ = lpQ.gt('created_at', new Date(srvResetTs).toISOString());
-    }
-    const { data: lpData } = await lpQ;
-    postRows = lpData || [];
-  } catch (e) {}
+  let lpQ = sb.from('premium_requests')
+    .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+    .like('reason', '__LIVE_POST__:%')
+    .order('created_at', { ascending: false })
+    .limit(40);
+  if (srvResetTs > 0) {
+    lpQ = lpQ.gt('created_at', new Date(srvResetTs).toISOString());
+  }
 
+  let playLiveQ = sb.from('premium_requests')
+    .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+    .like('reason', '__PLAY_%')
+    .order('created_at', { ascending: true })
+    .limit(1200);
+
+  const [lpRes, playLiveRes] = await Promise.all([
+    lpQ.catch(() => ({ data: [] })),
+    playLiveQ.catch(() => ({ data: [] }))
+  ]);
+
+  const postRows = lpRes?.data || [];
   postRows.forEach(r => {
     try {
       const parsed = JSON.parse(String(r.reason || '').slice('__LIVE_POST__:'.length));
@@ -7071,6 +7696,90 @@ async function loadLiveFeed() {
     } catch (e) {}
   });
 
+  // Also include all active User Play Videos & Play Donations in LIVE
+  const livePlayVideos = new Map();
+  const liveDeletedVids = new Set();
+  const liveDonates = [];
+  (playLiveRes?.data || []).forEach(r => {
+    const reason = String(r.reason || '');
+    const uid = String(r.user_id || '');
+    const rowTs = r.created_at ? new Date(r.created_at).getTime() : Date.now();
+    if (!uid) return;
+    if (reason.startsWith('__PLAY_VID__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__PLAY_VID__:'.length));
+        if (!p?.id) return;
+        livePlayVideos.set(String(p.id), {
+          id: String(p.id),
+          user_id: uid,
+          kind: p.kind === 'video' ? 'video' : 'scene',
+          title: String(p.title || '').slice(0, 80) || (p.kind === 'video' ? 'Uploaded Video' : 'Play Short'),
+          ts: Number(p.ts) || rowTs,
+          profile: r.profiles || profMap.get(uid) || { id: uid, username: 'Trader' }
+        });
+      } catch (e) {}
+    } else if (reason.startsWith('__PLAY_DEL__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__PLAY_DEL__:'.length));
+        if (p?.videoId) liveDeletedVids.add(String(p.videoId));
+      } catch (e) {}
+    } else if (reason.startsWith('__PLAY_DONATE__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__PLAY_DONATE__:'.length));
+        const amt = Number(p?.amount || 0);
+        if (!p?.id || !p?.toUserId || !Number.isFinite(amt) || amt <= 0) return;
+        const ts = Number(p.ts) || rowTs;
+        if (srvResetTs > 0 && ts <= srvResetTs) return;
+        liveDonates.push({
+          id: String(p.id),
+          fromUserId: uid,
+          fromProfile: r.profiles || profMap.get(uid) || { id: uid, username: 'Trader' },
+          toUserId: String(p.toUserId),
+          toProfile: profMap.get(String(p.toUserId)) || { id: String(p.toUserId), username: p.toUsername || 'Creator' },
+          videoId: p.videoId ? String(p.videoId) : '',
+          videoTitle: String(p.videoTitle || 'Play Video').slice(0, 80),
+          amount: Math.round(amt * 100) / 100,
+          note: String(p.note || '').slice(0, 120),
+          ts
+        });
+      } catch (e) {}
+    }
+  });
+
+  livePlayVideos.forEach((v, vidId) => {
+    if (liveDeletedVids.has(vidId) || delUsers.has(v.user_id)) return;
+    const vKey = 'playvid_' + vidId;
+    if (seenKeys.has(vKey)) return;
+    seenKeys.add(vKey);
+    const isSelf = currentUser && v.user_id === String(currentUser.id);
+    events.push({
+      kind: 'play_video',
+      ts: v.ts,
+      userId: v.user_id,
+      profile: v.profile,
+      video: v,
+      isPersonal: Boolean(isSelf),
+      isSelf: Boolean(isSelf)
+    });
+  });
+
+  liveDonates.forEach(d => {
+    if (delUsers.has(d.fromUserId) || delUsers.has(d.toUserId)) return;
+    const dKey = 'playdon_' + d.id;
+    if (seenKeys.has(dKey)) return;
+    seenKeys.add(dKey);
+    const isSelf = currentUser && (d.fromUserId === String(currentUser.id) || d.toUserId === String(currentUser.id));
+    events.push({
+      kind: 'play_donate',
+      ts: d.ts,
+      userId: d.fromUserId,
+      profile: d.fromProfile,
+      donate: d,
+      isPersonal: Boolean(isSelf),
+      isSelf: Boolean(isSelf)
+    });
+  });
+
   events.sort((a, b) => b.ts - a.ts);
   liveEventsCache = events;
   if (currentPage === 'live') renderLiveFeed();
@@ -7096,6 +7805,7 @@ function renderLiveFeed() {
     if (liveMode === 'personal') return ev.isPersonal;
     if (liveMode === 'trades') return ev.kind === 'trade';
     if (liveMode === 'coins') return ev.kind === 'coin';
+    if (liveMode === 'videos') return ev.kind === 'play_video';
     return true;
   });
 
@@ -7105,12 +7815,73 @@ function renderLiveFeed() {
     return;
   }
 
-  listEl.innerHTML = filtered.slice(0, 80).map(ev => {
+  listEl.innerHTML = filtered.slice(0, 90).map(ev => {
     const uname = ev.profile?.username || 'Trader';
     const av = ev.profile?.avatar_url
       ? `<img src="${escapeHtml(ev.profile.avatar_url)}" alt="">`
       : escapeHtml(uname[0].toUpperCase());
     const profObj = { id: ev.userId, ...ev.profile };
+
+    if (ev.kind === 'play_video') {
+      const v = ev.video;
+      const sum = getPlayVoteSummary(v.id);
+      const personalTag = liveMode === 'personal' && ev.isSelf ? `<span class="live-personal-tag">YOU</span>` : '';
+      return `
+        <div class="live-row live-video-highlight">
+          <div class="live-row-left">
+            <div class="avatar profile-link" data-profile="${escapeHtml(ev.userId)}" style="cursor:pointer;">${av}</div>
+            <div class="live-row-main">
+              <div class="live-row-line">
+                <span class="live-badge playvid">${v.kind === 'video' ? 'VIDEO' : 'SHORT'}</span>
+                ${personalTag}
+                <span class="live-user-donate-wrap">
+                  <strong class="profile-link" data-profile="${escapeHtml(ev.userId)}">${escapeHtml(uname)}${tierBadgeHtml(profObj)}</strong>
+                  <button type="button" class="play-donate-plus-btn live-donate-plus" data-live-donate="${escapeHtml(v.id)}" data-donate-user="${escapeHtml(ev.userId)}" title="Donate to ${escapeHtml(uname)}" aria-label="Donate to ${escapeHtml(uname)}">＋</button>
+                </span>
+                <span class="muted">posted <button type="button" class="live-video-chip" data-live-play-vid="${escapeHtml(v.id)}">▶ ${escapeHtml(v.title)}</button></span>
+              </div>
+              <div class="muted tiny" style="margin-top:3px;">♥ ${sum.likes} likes · 💬 ${sum.commentsCount} comments</div>
+            </div>
+          </div>
+          <div class="live-row-right">
+            <button type="button" class="zoom-btn live-watch-btn" data-live-play-vid="${escapeHtml(v.id)}">▶ Watch</button>
+            <span class="muted tiny" title="${escapeHtml(new Date(ev.ts).toLocaleString())}">${escapeHtml(formatLiveTime(ev.ts))}</span>
+          </div>
+        </div>
+      `;
+    }
+
+    if (ev.kind === 'play_donate') {
+      const d = ev.donate;
+      const toName = d.toProfile?.username || d.toUsername || 'Creator';
+      const personalTag = liveMode === 'personal' && ev.isSelf ? `<span class="live-personal-tag">YOU</span>` : '';
+      return `
+        <div class="live-row live-donate-highlight">
+          <div class="live-row-left">
+            <div class="avatar profile-link" data-profile="${escapeHtml(ev.userId)}" style="cursor:pointer;">${av}</div>
+            <div class="live-row-main">
+              <div class="live-row-line">
+                <span class="live-badge donate">DONATION</span>
+                ${personalTag}
+                <strong class="profile-link" data-profile="${escapeHtml(ev.userId)}">${escapeHtml(uname)}${tierBadgeHtml(profObj)}</strong>
+                <span class="muted">donated <strong style="color:#facc15;">${money(d.amount)}</strong> to</span>
+                <span class="live-user-donate-wrap">
+                  <strong class="profile-link" data-profile="${escapeHtml(d.toUserId)}">${escapeHtml(toName)}${tierBadgeHtml(d.toProfile)}</strong>
+                  <button type="button" class="play-donate-plus-btn live-donate-plus" data-live-donate="${escapeHtml(d.videoId)}" data-donate-user="${escapeHtml(d.toUserId)}" title="Donate to ${escapeHtml(toName)}" aria-label="Donate to ${escapeHtml(toName)}">＋</button>
+                </span>
+                ${d.videoId ? `<button type="button" class="live-video-chip" data-live-play-vid="${escapeHtml(d.videoId)}">▶ ${escapeHtml(d.videoTitle || 'Video')}</button>` : ''}
+              </div>
+              ${d.note ? `<div class="live-post-msg">“${escapeHtml(d.note)}”</div>` : ''}
+            </div>
+          </div>
+          <div class="live-row-right">
+            <span class="live-row-price" style="color:#facc15;">+${money(d.amount)}</span>
+            <span class="muted tiny" title="${escapeHtml(new Date(ev.ts).toLocaleString())}">${escapeHtml(formatLiveTime(ev.ts))}</span>
+          </div>
+        </div>
+      `;
+    }
+
     const coinImg = ev.coin?.image_url
       ? `<img src="${escapeHtml(ev.coin.image_url)}" alt="">`
       : escapeHtml((ev.coin?.ticker || '?')[0]);
@@ -7175,6 +7946,17 @@ function renderLiveFeed() {
   listEl.querySelectorAll('[data-live-coin]').forEach(el => {
     el.addEventListener('click', () => {
       if (el.dataset.liveCoin) openCoin(el.dataset.liveCoin);
+    });
+  });
+  listEl.querySelectorAll('[data-live-donate]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openPlayDonateModal(btn.dataset.liveDonate, btn.dataset.donateUser);
+    });
+  });
+  listEl.querySelectorAll('[data-live-play-vid]').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el.dataset.livePlayVid) openPlayAtVideo(el.dataset.livePlayVid);
     });
   });
 }
@@ -7348,14 +8130,19 @@ async function fetchUserNotifications() {
   const delCoins = adminModStateCache.deletedCoinIds || new Set();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
 
-  const [updatesList, coinsRes, cmtRes] = await Promise.all([
+  const [updatesList, coinsRes, cmtRes, playRes] = await Promise.all([
     fetchActiveUpdates(),
     sb.from('coins').select('id, name, ticker, creator_id, created_at').limit(500),
     sb.from('premium_requests')
       .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
       .like('reason', '__CMT_%')
       .order('created_at', { ascending: true })
-      .limit(1000)
+      .limit(1000),
+    sb.from('premium_requests')
+      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .like('reason', '__PLAY_%')
+      .order('created_at', { ascending: true })
+      .limit(2000)
   ]);
 
   const items = [];
@@ -7467,6 +8254,150 @@ async function fetchUserNotifications() {
         body: cm.text
       });
     }
+  });
+
+  // 5. Play Video Likes, Video Comments, and Creator Donations
+  const playVideosMap = new Map();
+  const deletedPlayVidIds = new Set();
+  const playVotes = [];
+  const playCmts = [];
+  const deletedPlayCmtIds = new Set();
+  const playDonates = [];
+
+  (playRes?.data || []).forEach(r => {
+    const reason = String(r.reason || '');
+    const rowTs = r.created_at ? new Date(r.created_at).getTime() : 0;
+    const rowUid = String(r.user_id || '');
+    if (!rowUid) return;
+
+    if (reason.startsWith('__PLAY_VID__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__PLAY_VID__:'.length));
+        if (!p?.id) return;
+        playVideosMap.set(String(p.id), {
+          id: String(p.id),
+          userId: rowUid,
+          title: String(p.title || '').slice(0, 80) || (p.kind === 'video' ? 'Uploaded Video' : 'Play Short'),
+          ts: Number(p.ts) || rowTs
+        });
+      } catch (e) {}
+    } else if (reason.startsWith('__PLAY_DEL__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__PLAY_DEL__:'.length));
+        if (p?.videoId) deletedPlayVidIds.add(String(p.videoId));
+      } catch (e) {}
+    } else if (reason.startsWith('__PLAY_VOTE__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__PLAY_VOTE__:'.length));
+        if (!p?.videoId) return;
+        playVotes.push({
+          videoId: String(p.videoId),
+          userId: rowUid,
+          vote: p.vote === 'like' || p.vote === 'dislike' ? p.vote : 'none',
+          ts: Number(p.ts) || rowTs,
+          profile: r.profiles || { id: rowUid, username: 'Trader' }
+        });
+      } catch (e) {}
+    } else if (reason.startsWith('__PLAY_CMT__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__PLAY_CMT__:'.length));
+        const cleanGif = typeof sanitizeGifUrl === 'function' ? sanitizeGifUrl(p?.gif_url) : '';
+        const cleanText = String(p?.text || '').trim();
+        if (!p?.id || !p?.videoId || (!cleanText && !cleanGif)) return;
+        playCmts.push({
+          id: String(p.id),
+          videoId: String(p.videoId),
+          userId: rowUid,
+          text: cleanText,
+          gifUrl: cleanGif,
+          ts: Number(p.ts) || rowTs,
+          profile: r.profiles || { id: rowUid, username: 'Trader' }
+        });
+      } catch (e) {}
+    } else if (reason.startsWith('__PLAY_CMT_DEL__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__PLAY_CMT_DEL__:'.length));
+        if (p?.commentId) deletedPlayCmtIds.add(String(p.commentId));
+      } catch (e) {}
+    } else if (reason.startsWith('__PLAY_DONATE__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__PLAY_DONATE__:'.length));
+        const amt = Number(p?.amount || 0);
+        if (!p?.id || !p?.toUserId || !Number.isFinite(amt) || amt <= 0) return;
+        const ts = Number(p.ts) || rowTs;
+        if (srvResetTs > 0 && ts <= srvResetTs) return;
+        playDonates.push({
+          id: String(p.id),
+          fromUserId: rowUid,
+          toUserId: String(p.toUserId),
+          videoId: p.videoId ? String(p.videoId) : '',
+          videoTitle: String(p.videoTitle || 'Play Video').slice(0, 80),
+          amount: Math.round(amt * 100) / 100,
+          note: String(p.note || '').slice(0, 120),
+          ts,
+          profile: r.profiles || { id: rowUid, username: 'Trader' }
+        });
+      } catch (e) {}
+    }
+  });
+
+  // Keep latest vote per (videoId, voterId) so un-liking removes the notification
+  const latestVoteByPair = new Map();
+  playVotes.forEach(pv => {
+    latestVoteByPair.set(`${pv.videoId}__${pv.userId}`, pv);
+  });
+  latestVoteByPair.forEach(pv => {
+    if (pv.vote !== 'like' || pv.userId === uid || delUsers.has(pv.userId)) return;
+    if (deletedPlayVidIds.has(pv.videoId)) return;
+    const vid = playVideosMap.get(pv.videoId);
+    if (!vid || vid.userId !== uid) return;
+    if (srvResetTs > 0 && pv.ts <= srvResetTs) return;
+    items.push({
+      id: 'plike_' + pv.videoId + '_' + pv.userId,
+      category: 'play_like',
+      ts: pv.ts,
+      videoId: pv.videoId,
+      videoTitle: vid.title,
+      authorId: pv.userId,
+      authorProfile: { id: pv.userId, ...pv.profile },
+      authorName: pv.profile?.username || 'Trader'
+    });
+  });
+
+  playCmts.forEach(pc => {
+    if (deletedPlayCmtIds.has(pc.id) || deletedPlayVidIds.has(pc.videoId) || delUsers.has(pc.userId)) return;
+    if (pc.userId === uid) return;
+    const vid = playVideosMap.get(pc.videoId);
+    if (!vid || vid.userId !== uid) return;
+    if (srvResetTs > 0 && pc.ts <= srvResetTs) return;
+    items.push({
+      id: 'pcmt_' + pc.id,
+      category: 'play_comment',
+      ts: pc.ts,
+      videoId: pc.videoId,
+      videoTitle: vid.title,
+      authorId: pc.userId,
+      authorProfile: { id: pc.userId, ...pc.profile },
+      authorName: pc.profile?.username || 'Trader',
+      body: pc.text || 'Sent a GIF',
+      gifUrl: pc.gifUrl
+    });
+  });
+
+  playDonates.forEach(pd => {
+    if (pd.toUserId !== uid || pd.fromUserId === uid || delUsers.has(pd.fromUserId)) return;
+    items.push({
+      id: 'pdon_' + pd.id,
+      category: 'play_donate',
+      ts: pd.ts,
+      videoId: pd.videoId,
+      videoTitle: pd.videoTitle,
+      amount: pd.amount,
+      note: pd.note,
+      authorId: pd.fromUserId,
+      authorProfile: { id: pd.fromUserId, ...pd.profile },
+      authorName: pd.profile?.username || 'Trader'
+    });
   });
 
   items.sort((a, b) => b.ts - a.ts);
@@ -7602,7 +8533,10 @@ function renderUserNotifsList() {
   const filtered = userNotifsCache.filter(it => {
     if (userNotifFilter === 'update') return it.category === 'update';
     if (userNotifFilter === 'warning') return it.category === 'warning';
-    if (userNotifFilter === 'social') return it.category === 'comment' || it.category === 'reply';
+    if (userNotifFilter === 'social') {
+      return it.category === 'comment' || it.category === 'reply' || it.category === 'play_like' || it.category === 'play_comment';
+    }
+    if (userNotifFilter === 'donate') return it.category === 'play_donate';
     return true;
   });
 
@@ -7612,7 +8546,7 @@ function renderUserNotifsList() {
     return;
   }
 
-  listEl.innerHTML = filtered.slice(0, 80).map(it => {
+  listEl.innerHTML = filtered.slice(0, 90).map(it => {
     const isUnread = Number(it.ts || 0) > seenTs;
     let tagCls = 'update';
     let tagText = 'Update';
@@ -7657,6 +8591,29 @@ function renderUserNotifsList() {
       headHtml = `<strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}${tierBadgeHtml(it.authorProfile)}</strong> <span class="muted">replied to your comment on</span> <span class="live-coin-chip" data-notif-coin="${escapeHtml(it.coin.id)}">${escapeHtml(it.coin.name)} ($${escapeHtml(it.coin.ticker)})</span>`;
       bodyHtml = `<div class="report-details-box">${escapeHtml(it.body).replace(/\n/g, '<br>')}</div>`;
       actionHtml = `<div class="request-actions"><button type="button" class="zoom-btn" data-notif-coin="${escapeHtml(it.coin.id)}">View reply</button></div>`;
+    } else if (it.category === 'play_donate') {
+      tagCls = 'donate';
+      tagText = 'Donation';
+      headHtml = `<strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}${tierBadgeHtml(it.authorProfile)}</strong> <span class="muted">donated <strong style="color:#facc15;">${money(it.amount)}</strong> on your video</span> <strong>“${escapeHtml(it.videoTitle || 'Play Video')}”</strong>`;
+      bodyHtml = it.note ? `<div class="report-details-box">“${escapeHtml(it.note)}”</div>` : '';
+      if (it.videoId) {
+        actionHtml = `<div class="request-actions"><button type="button" class="zoom-btn" data-notif-play-vid="${escapeHtml(it.videoId)}">▶ Open Video</button></div>`;
+      }
+    } else if (it.category === 'play_like') {
+      tagCls = 'play-like';
+      tagText = 'Video Like';
+      headHtml = `<strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}${tierBadgeHtml(it.authorProfile)}</strong> <span class="muted">liked your video</span> <strong>“${escapeHtml(it.videoTitle || 'Play Video')}”</strong> <span style="color:var(--green);font-weight:800;">(+${money(PLAY_LIKE_PAYOUT)})</span>`;
+      actionHtml = `<div class="request-actions"><button type="button" class="zoom-btn" data-notif-play-vid="${escapeHtml(it.videoId)}">▶ Watch Video</button></div>`;
+    } else if (it.category === 'play_comment') {
+      tagCls = 'play-comment';
+      tagText = 'Video Comment';
+      headHtml = `<strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}${tierBadgeHtml(it.authorProfile)}</strong> <span class="muted">commented on your video</span> <strong>“${escapeHtml(it.videoTitle || 'Play Video')}”</strong>`;
+      bodyHtml = `
+        <div class="report-details-box">
+          ${escapeHtml(it.body || '').replace(/\n/g, '<br>')}
+          ${it.gifUrl ? `<div class="comment-gif-wrap" style="margin-top:6px;"><img src="${escapeHtml(it.gifUrl)}" alt="GIF" loading="lazy"></div>` : ''}
+        </div>`;
+      actionHtml = `<div class="request-actions"><button type="button" class="zoom-btn" data-notif-play-cmt="${escapeHtml(it.videoId)}">💬 View Comment</button></div>`;
     }
 
     return `
@@ -7683,6 +8640,16 @@ function renderUserNotifsList() {
   listEl.querySelectorAll('[data-notif-coin]').forEach(el => {
     el.addEventListener('click', () => {
       if (el.dataset.notifCoin) openCoin(el.dataset.notifCoin);
+    });
+  });
+  listEl.querySelectorAll('[data-notif-play-vid]').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el.dataset.notifPlayVid) openPlayAtVideo(el.dataset.notifPlayVid, false);
+    });
+  });
+  listEl.querySelectorAll('[data-notif-play-cmt]').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el.dataset.notifPlayCmt) openPlayAtVideo(el.dataset.notifPlayCmt, true);
     });
   });
 }
@@ -7753,11 +8720,11 @@ async function loadRequests() {
   if (isDompinator()) {
     adminWrap?.classList.remove('hidden');
     if (eyebrow) eyebrow.textContent = 'INBOX & ADMIN';
-    if (sub) sub.textContent = 'Updates, warnings, coin comments, replies, player/bug reports, and premium requests.';
+    if (sub) sub.textContent = 'Updates, warnings, coin & video likes, comments, replies, donations, reports, and premium requests.';
   } else {
     adminWrap?.classList.add('hidden');
     if (eyebrow) eyebrow.textContent = 'INBOX';
-    if (sub) sub.textContent = 'Updates, warnings, comments on your coins, and replies to your comments.';
+    if (sub) sub.textContent = 'Updates, warnings, coin & video likes, comments, replies, and donations.';
   }
 
   userNotifsCache = await fetchUserNotifications();
@@ -8447,6 +9414,114 @@ async function handleRequest(reqId, userId, status) {
   loadRequests();
 }
 
+// ---------- Real-Time Notification Popups ----------
+const shownRealtimePopupKeys = new Set();
+
+function showLiveNotifPopup({ key, kind = 'donate', icon = '🔔', title = '', body = '', onClick = null }) {
+  const stack = $('#liveNotifPopups');
+  if (!stack) return;
+  if (key && shownRealtimePopupKeys.has(key)) return;
+  if (key) shownRealtimePopupKeys.add(key);
+
+  const card = document.createElement('div');
+  card.className = `live-notif-popup is-${kind}`;
+  card.innerHTML = `
+    <div class="live-notif-popup-icon">${escapeHtml(icon)}</div>
+    <div class="live-notif-popup-body">
+      <div class="live-notif-popup-title">${escapeHtml(title)}</div>
+      <div class="live-notif-popup-text">${escapeHtml(body)}</div>
+    </div>
+    <button type="button" class="live-notif-popup-close" aria-label="Dismiss">✕</button>
+  `;
+  const removeCard = () => {
+    card.classList.add('is-leaving');
+    setTimeout(() => card.remove(), 220);
+  };
+  card.querySelector('.live-notif-popup-close')?.addEventListener('click', e => {
+    e.stopPropagation();
+    removeCard();
+  });
+  if (onClick) {
+    card.style.cursor = 'pointer';
+    card.addEventListener('click', () => {
+      removeCard();
+      onClick();
+    });
+  }
+  stack.appendChild(card);
+  while (stack.children.length > 4) {
+    stack.firstElementChild?.remove();
+  }
+  setTimeout(removeCard, 6500);
+}
+
+async function handleRealtimePremiumInsertPopup(row) {
+  if (!row || !currentUser?.id || !sb) return;
+  const uid = String(currentUser.id);
+  const fromId = String(row.user_id || '');
+  if (!fromId || fromId === uid) return;
+  const reason = String(row.reason || '');
+  if (!reason.startsWith('__PLAY_DONATE__:') && !reason.startsWith('__PLAY_VOTE__:') && !reason.startsWith('__PLAY_CMT__:')) {
+    return;
+  }
+
+  let actorName = 'Someone';
+  try {
+    const { data: prof } = await sb.from('profiles').select('username').eq('id', fromId).maybeSingle();
+    if (prof?.username) actorName = prof.username;
+  } catch (e) {}
+
+  if (reason.startsWith('__PLAY_DONATE__:')) {
+    try {
+      const p = JSON.parse(reason.slice('__PLAY_DONATE__:'.length));
+      if (String(p?.toUserId || '') !== uid) return;
+      const amt = Number(p.amount || 0);
+      showLiveNotifPopup({
+        key: 'pdon_' + (p.id || row.id || p.ts),
+        kind: 'donate',
+        icon: '💛',
+        title: `${actorName} donated ${money(amt)}!`,
+        body: (p.note ? `“${p.note}”` : `On your video "${p.videoTitle || 'Play Video'}"`) + ' — Tap to view',
+        onClick: () => (p.videoId ? openPlayAtVideo(p.videoId, false) : showPage('notifications'))
+      });
+      playSound('buy');
+    } catch (e) {}
+  } else if (reason.startsWith('__PLAY_VOTE__:')) {
+    try {
+      const p = JSON.parse(reason.slice('__PLAY_VOTE__:'.length));
+      if (p?.vote !== 'like' || !p?.videoId) return;
+      const vid = playState.videosById.get(String(p.videoId));
+      if (!vid || String(vid.user_id) !== uid) return;
+      showLiveNotifPopup({
+        key: `plike_${p.videoId}_${fromId}_${p.ts || ''}`,
+        kind: 'like',
+        icon: '♥',
+        title: `${actorName} liked your video (+$0.50)`,
+        body: `"${vid.title || 'Play Video'}" — Tap to open in Play`,
+        onClick: () => openPlayAtVideo(vid.id, false)
+      });
+      playSound('click');
+    } catch (e) {}
+  } else if (reason.startsWith('__PLAY_CMT__:')) {
+    try {
+      const p = JSON.parse(reason.slice('__PLAY_CMT__:'.length));
+      if (!p?.videoId) return;
+      const vid = playState.videosById.get(String(p.videoId));
+      if (!vid || String(vid.user_id) !== uid) return;
+      const txt = String(p.text || '').trim() || 'Sent a GIF';
+      showLiveNotifPopup({
+        key: 'pcmt_' + (p.id || row.id || p.ts),
+        kind: 'comment',
+        icon: '💬',
+        title: `${actorName} commented on your video`,
+        body: `"${txt}" — Tap to view comment`,
+        onClick: () => openPlayAtVideo(vid.id, true)
+      });
+      playSound('commenting');
+    } catch (e) {}
+  }
+}
+
 // ---------- Realtime ----------
 function startRealtime() {
   if (!sb) return;
@@ -8461,7 +9536,10 @@ function startRealtime() {
       if (currentPage === 'live') loadLiveFeed();
       if (currentPage === 'global' && lbMode === 'weekly' && Date.now() > lbAnimatingUntil) renderLeaderboard();
     })
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, () => {
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, payload => {
+      if (payload?.eventType === 'INSERT' && payload?.new) {
+        handleRealtimePremiumInsertPopup(payload.new);
+      }
       if (currentUser) loadProfile();
       if (selectedCoin && currentPage === 'coin') loadCoinComments(selectedCoin);
       if (currentPage === 'feed') fetchFeaturedCoins().then(() => renderFeaturedSection());
@@ -8477,6 +9555,7 @@ function startRealtime() {
       if (typeof loadPlayData === 'function') {
         loadPlayData(true).then(() => {
           if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
+          if (typeof syncPlayDonations === 'function') syncPlayDonations();
           if (currentPage === 'account' && typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
           if (playState.openCommentsVideoId && typeof renderPlayCommentsDrawerList === 'function') renderPlayCommentsDrawerList();
         });

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=51">
+  <link rel="stylesheet" href="styles.css?v=53">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -38,7 +38,7 @@
           <button type="button" class="zoom-btn" id="cancelVerifyBtn">Back</button>
         </div>
       </div>
-      <p class="tiny muted">GRIND v0.5</p>
+      <p class="tiny muted">GRIND v0.7</p>
       <p id="authMessage" class="form-message" aria-live="polite"></p>
     </section>
   </main>
@@ -77,7 +77,7 @@
           </div>
         </div>
         <button id="logoutBtn" class="logout-btn">↗ Log out</button>
-        <div class="version">GRIND v0.5</div>
+        <div class="version">GRIND v0.7</div>
       </div>
     </aside>
     <div id="mobileSidebarBackdrop" class="mobile-sidebar-backdrop hidden" aria-hidden="true"></div>
@@ -155,6 +155,7 @@
             <button type="button" class="feed-tab" data-live="personal">Personal</button>
             <button type="button" class="feed-tab" data-live="trades">Trades</button>
             <button type="button" class="feed-tab" data-live="coins">New Coins</button>
+            <button type="button" class="feed-tab" data-live="videos">Videos</button>
           </div>
           <div id="liveFeedList" class="live-feed-list"></div>
           <div id="emptyLiveFeed" class="empty-state hidden">
@@ -461,7 +462,7 @@
             <div>
               <div class="eyebrow purple-text" id="notificationsEyebrow">INBOX</div>
               <h3>Notifications</h3>
-              <p class="muted" id="notificationsSubtitle">Updates, warnings, comments on your coins, and replies to your comments.</p>
+              <p class="muted" id="notificationsSubtitle">Updates, warnings, coin &amp; video likes, comments, replies, and donations.</p>
             </div>
             <button type="button" class="zoom-btn" id="markNotifsReadBtn" style="padding:8px 14px;">Mark all read</button>
           </div>
@@ -471,7 +472,8 @@
               <button type="button" class="feed-tab active" data-unotif="all">All</button>
               <button type="button" class="feed-tab" data-unotif="update">Updates</button>
               <button type="button" class="feed-tab" data-unotif="warning">Warnings</button>
-              <button type="button" class="feed-tab" data-unotif="social">Comments &amp; Replies</button>
+              <button type="button" class="feed-tab" data-unotif="social">Likes &amp; Comments</button>
+              <button type="button" class="feed-tab" data-unotif="donate">Donations</button>
             </div>
             <div id="userNotifsList" class="requests-list" style="margin-bottom:28px;"></div>
             <div id="emptyUserNotifs" class="empty-state hidden" style="padding:28px 20px;">
@@ -538,7 +540,7 @@
           </div>
           <div class="admin-update-grid">
             <div class="form-card">
-              <label>Title<input id="updateTitleInput" maxlength="80" placeholder="e.g. GRIND v0.5.1 Update"></label>
+              <label>Title<input id="updateTitleInput" maxlength="80" placeholder="e.g. GRIND v0.7.1 Update"></label>
               <label>Message<textarea id="updateBodyInput" rows="3" maxlength="800" placeholder="Describe what changed or important info..."></textarea></label>
               <div style="margin:14px 0;">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
@@ -1205,20 +1207,25 @@
         <div>
           <div class="eyebrow purple-text">PLAY STUDIO</div>
           <h3 id="playUploadChoiceTitle">Share to Play</h3>
-          <p class="muted tiny" style="margin:2px 0 0;">Earn $0.50 for every like your video receives from other players.</p>
+          <p class="muted tiny" style="margin:2px 0 0;">Earn $0.50 per like plus creator donations from viewers in Play &amp; Live.</p>
         </div>
         <button type="button" class="zoom-btn" id="closePlayChoiceBtn" aria-label="Close">✕</button>
       </div>
-      <div class="play-choice-grid">
+      <div class="play-choice-grid play-choice-grid-3">
         <button type="button" class="play-choice-btn" id="playChooseCreateBtn">
           <span class="play-choice-icon">✦</span>
           <strong>Create Short</strong>
-          <small class="muted tiny">Pick a background color, press ＋ to add GIFs &amp; Text, move them around &amp; add Music.</small>
+          <small class="muted tiny">Pick colors or gradients, add GIFs, Text, Stickers &amp; Music, animate &amp; drag freely.</small>
+        </button>
+        <button type="button" class="play-choice-btn" id="playChoosePhotoBtn">
+          <span class="play-choice-icon">🖼</span>
+          <strong>Photo / Meme Short</strong>
+          <small class="muted tiny">Drop an image or screenshot into Studio with captions, stickers &amp; Music.</small>
         </button>
         <button type="button" class="play-choice-btn" id="playChooseUploadBtn">
           <span class="play-choice-icon">⇪</span>
           <strong>Upload Video</strong>
-          <small class="muted tiny">Upload a video clip (.mp4, .webm, .mov) from your device and attach Music.</small>
+          <small class="muted tiny">Upload a video clip (.mp4, .webm, .mov) with filters, playback speed, Music &amp; coin tag.</small>
         </button>
       </div>
     </div>
@@ -1230,21 +1237,34 @@
       <div class="play-creator-topbar">
         <button type="button" class="zoom-btn" id="playCreatorCancelBtn">← Back</button>
         <input id="playCreatorTitle" class="play-creator-title-input" maxlength="60" placeholder="Add a Short title (optional)...">
+        <button type="button" class="zoom-btn" id="playCreatorUndoBtn" title="Undo last action" disabled>↶ Undo</button>
         <button type="button" class="primary-btn play-finish-btn" id="playCreatorFinishBtn">Finish ✓</button>
       </div>
 
       <div class="play-creator-body">
         <div class="play-editor-stage-col">
           <div id="playEditorStage" class="play-editor-stage" style="background:#161222;">
-            <div id="playEditorEmptyHint" class="play-editor-empty-hint">Press <strong>＋</strong> to add a GIF or Text, then drag them anywhere!</div>
+            <div id="playEditorEmptyHint" class="play-editor-empty-hint">Press <strong>＋ Add Element</strong> to add GIFs, Text, Stickers, or Photos — drag them anywhere!</div>
           </div>
           <div id="playEditorSelectionBar" class="play-editor-selection-bar hidden">
-            <span id="playSelLabel" class="tiny muted">Selected</span>
-            <div class="play-sel-controls">
-              <button type="button" class="zoom-btn" id="playSelScaleDownBtn" title="Smaller">A-</button>
-              <button type="button" class="zoom-btn" id="playSelScaleUpBtn" title="Larger">A+</button>
+            <div class="play-sel-top">
+              <span id="playSelLabel" class="tiny muted">Selected</span>
+              <div class="play-sel-controls">
+                <button type="button" class="zoom-btn" id="playSelScaleDownBtn" title="Smaller">A-</button>
+                <button type="button" class="zoom-btn" id="playSelScaleUpBtn" title="Larger">A+</button>
+                <button type="button" class="zoom-btn" id="playSelRotLeftBtn" title="Rotate left">↺</button>
+                <button type="button" class="zoom-btn" id="playSelRotRightBtn" title="Rotate right">↻</button>
+                <button type="button" class="zoom-btn" id="playSelAnimBtn" title="Animation effect">✨ Still</button>
+                <button type="button" class="zoom-btn" id="playSelOpacityBtn" title="Cycle opacity">100%</button>
+              </div>
+            </div>
+            <div class="play-sel-controls play-sel-bottom">
               <input type="color" id="playSelTextColorInput" class="play-color-dot-input hidden" value="#ffffff" title="Text color">
               <button type="button" class="zoom-btn hidden" id="playSelTextStyleBtn">Pill</button>
+              <button type="button" class="zoom-btn hidden" id="playSelTextFontBtn">Sans</button>
+              <button type="button" class="zoom-btn" id="playSelFrontBtn" title="Bring to front">↑ Front</button>
+              <button type="button" class="zoom-btn" id="playSelBackBtn" title="Send to back">↓ Back</button>
+              <button type="button" class="zoom-btn" id="playSelDupBtn" title="Duplicate">❐</button>
               <button type="button" class="deny-btn" id="playSelDeleteBtn" style="padding:5px 10px;font-size:12px;">Delete</button>
             </div>
           </div>
@@ -1263,16 +1283,18 @@
           </div>
 
           <div class="play-tool-block">
-            <div class="eyebrow purple-text" style="margin-bottom:8px;">BACKGROUND COLOR</div>
+            <div class="eyebrow purple-text" style="margin-bottom:8px;">BACKGROUND COLOR &amp; GRADIENTS</div>
             <div class="play-bg-swatches" id="playBgSwatches">
               <button type="button" class="play-bg-swatch active" data-bg="#161222" style="background:#161222" title="Obsidian"></button>
               <button type="button" class="play-bg-swatch" data-bg="#2e1065" style="background:#2e1065" title="Deep Purple"></button>
               <button type="button" class="play-bg-swatch" data-bg="#0f172a" style="background:#0f172a" title="Midnight"></button>
               <button type="button" class="play-bg-swatch" data-bg="#064e3b" style="background:#064e3b" title="Emerald"></button>
               <button type="button" class="play-bg-swatch" data-bg="#7f1d1d" style="background:#7f1d1d" title="Crimson"></button>
-              <button type="button" class="play-bg-swatch" data-bg="#78350f" style="background:#78350f" title="Gold Amber"></button>
-              <button type="button" class="play-bg-swatch" data-bg="#831843" style="background:#831843" title="Magenta"></button>
               <button type="button" class="play-bg-swatch" data-bg="#f8fafc" style="background:#f8fafc" title="Clean White"></button>
+              <button type="button" class="play-bg-swatch play-gradient-swatch" data-bg="linear-gradient(135deg,#3b0764,#1e1b4b,#0f172a)" style="background:linear-gradient(135deg,#3b0764,#1e1b4b,#0f172a)" title="Cyber Neon"></button>
+              <button type="button" class="play-bg-swatch play-gradient-swatch" data-bg="linear-gradient(135deg,#be123c,#ea580c,#fbbf24)" style="background:linear-gradient(135deg,#be123c,#ea580c,#fbbf24)" title="Sunset Fire"></button>
+              <button type="button" class="play-bg-swatch play-gradient-swatch" data-bg="linear-gradient(135deg,#064e3b,#0f766e,#0284c7)" style="background:linear-gradient(135deg,#064e3b,#0f766e,#0284c7)" title="Emerald Ocean"></button>
+              <button type="button" class="play-bg-swatch play-gradient-swatch" data-bg="linear-gradient(135deg,#451a03,#92400e,#eab308)" style="background:linear-gradient(135deg,#451a03,#92400e,#eab308)" title="24K Luxury"></button>
               <label class="play-custom-color-label" title="Custom color">
                 <span>🎨</span>
                 <input type="color" id="playBgColorInput" value="#161222" hidden>
@@ -1284,13 +1306,16 @@
             <div class="play-tool-head-row">
               <div class="eyebrow purple-text">ADD ELEMENTS</div>
               <div class="play-plus-menu-wrap">
-                <button type="button" class="primary-btn play-editor-plus-btn" id="playEditorPlusBtn">＋ Add GIF / Text</button>
+                <button type="button" class="primary-btn play-editor-plus-btn" id="playEditorPlusBtn">＋ Add Element</button>
                 <div id="playEditorPlusMenu" class="play-editor-plus-menu hidden">
                   <button type="button" id="playAddGifModeBtn">🎞 Add GIF (GIPHY)</button>
                   <button type="button" id="playAddTextModeBtn">𝐓 Add Text</button>
+                  <button type="button" id="playAddStickerModeBtn">😎 Add Sticker / Emoji</button>
+                  <button type="button" id="playAddPhotoModeBtn">🖼 Add Photo</button>
                 </div>
               </div>
             </div>
+            <input id="playEditorPhotoInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
 
             <div id="playEditorTextPanel" class="play-editor-subpanel hidden">
               <label style="margin-bottom:8px;">Text overlay
@@ -1298,7 +1323,21 @@
               </label>
               <div class="play-text-add-row">
                 <label class="play-inline-color">Color <input type="color" id="playEditorNewTextColor" value="#ffffff"></label>
+                <select id="playEditorNewTextFont" class="play-compact-select" aria-label="Font family">
+                  <option value="sans">Sans</option>
+                  <option value="impact">Impact</option>
+                  <option value="mono">Mono</option>
+                  <option value="serif">Serif</option>
+                </select>
                 <button type="button" class="primary-btn" id="playEditorAddTextConfirmBtn">Place Text</button>
+              </div>
+            </div>
+
+            <div id="playEditorStickerPanel" class="play-editor-subpanel hidden">
+              <div class="play-sticker-grid" id="playEditorStickerGrid"></div>
+              <div class="play-text-add-row" style="margin-top:8px;">
+                <input id="playCustomEmojiInput" maxlength="8" placeholder="Or type any emoji..." style="flex:1;">
+                <button type="button" class="zoom-btn" id="playCustomEmojiAddBtn">Place</button>
               </div>
             </div>
 
@@ -1311,14 +1350,19 @@
           </div>
 
           <div class="play-tool-block">
-            <div class="eyebrow purple-text" style="margin-bottom:8px;">MUSIC (FROM MUSIC FOLDER)</div>
+            <div class="eyebrow purple-text" style="margin-bottom:8px;">MUSIC &amp; COIN PROMO</div>
             <div class="play-music-picker-row">
               <select id="playEditorMusicSelect" class="play-music-select">
                 <option value="">Loading Music folder...</option>
               </select>
               <button type="button" class="zoom-btn" id="playEditorMusicPreviewBtn">▶ Test</button>
             </div>
-            <p class="muted tiny" style="margin:6px 0 0;">Tracks loaded from the GitHub <code>Music/</code> folder.</p>
+            <div style="margin-top:10px;">
+              <select id="playEditorCoinSelect" class="play-music-select" style="width:100%;">
+                <option value="">No Linked Coin (optional)</option>
+              </select>
+            </div>
+            <p class="muted tiny" style="margin:6px 0 0;">Music from GitHub <code>Music/</code> folder · Optional coin tag lets viewers click to trade.</p>
           </div>
           <p id="playCreatorMsg" class="form-message" style="margin-top:4px;"></p>
         </div>
@@ -1333,7 +1377,7 @@
         <div>
           <div class="eyebrow purple-text">UPLOAD VIDEO</div>
           <h3 id="playVideoFileTitleHeading">Post Video to Play</h3>
-          <p class="muted tiny" style="margin:2px 0 0;">Pick a short video clip from your device. Viewers can Like, Dislike &amp; Comment!</p>
+          <p class="muted tiny" style="margin:2px 0 0;">Pick a video clip, apply filters or speed, attach Music, or link a coin.</p>
         </div>
         <button type="button" class="zoom-btn" id="closePlayVideoFileBtn" aria-label="Close">✕</button>
       </div>
@@ -1346,13 +1390,43 @@
         <div id="playUploadFileName" class="muted tiny" style="margin-top:6px;">No video selected</div>
         <video id="playUploadPreviewVideo" class="play-upload-preview hidden" controls playsinline muted></video>
       </div>
-      <label style="margin-top:12px;">Background Music (optional · Music folder)
+      <div class="play-upload-opts-grid">
+        <label style="margin:0;">Video Filter
+          <select id="playUploadFilterSelect" class="play-music-select">
+            <option value="none">Original (None)</option>
+            <option value="vivid">Vivid</option>
+            <option value="warm">Warm Sunset</option>
+            <option value="cool">Cyber Cool</option>
+            <option value="noir">Noir B&amp;W</option>
+            <option value="retro">Retro Vintage</option>
+          </select>
+        </label>
+        <label style="margin:0;">Playback Speed
+          <select id="playUploadSpeedSelect" class="play-music-select">
+            <option value="0.5">0.5x Slow</option>
+            <option value="1" selected>1x Normal</option>
+            <option value="1.25">1.25x Fast</option>
+            <option value="1.5">1.5x Faster</option>
+            <option value="2">2x Turbo</option>
+          </select>
+        </label>
+      </div>
+      <label class="play-mute-orig-check">
+        <input type="checkbox" id="playUploadMuteOrigCheckbox">
+        <span>Mute original video audio</span>
+      </label>
+      <label style="margin-top:10px;">Background Music (optional · Music folder)
         <div class="play-music-picker-row">
           <select id="playUploadMusicSelect" class="play-music-select">
             <option value="">Original Video Audio (No extra music)</option>
           </select>
           <button type="button" class="zoom-btn" id="playUploadMusicPreviewBtn">▶ Test</button>
         </div>
+      </label>
+      <label style="margin-top:10px;">Link a Coin (optional)
+        <select id="playUploadCoinSelect" class="play-music-select" style="width:100%;">
+          <option value="">No Linked Coin</option>
+        </select>
       </label>
       <p id="playUploadMsg" class="form-message"></p>
       <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px;">
@@ -1362,10 +1436,46 @@
     </div>
   </div>
 
+  <!-- CREATOR DONATION MODAL (Play & Live yellow '+' button) -->
+  <div id="playDonateModal" class="modal-backdrop hidden" style="z-index:122;" role="dialog" aria-modal="true" aria-labelledby="playDonateHeading">
+    <div class="modal-card play-donate-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow" style="color:#facc15;">CREATOR DONATION</div>
+          <h3 id="playDonateHeading">Donate Cash</h3>
+        </div>
+        <button type="button" class="zoom-btn" id="closePlayDonateBtn" aria-label="Close">✕</button>
+      </div>
+      <div id="playDonateRecipientCard" class="play-donate-recipient"></div>
+      <div class="play-donate-quick-row" id="playDonateQuickBtns">
+        <button type="button" class="play-donate-chip" data-donate-amt="1">$1</button>
+        <button type="button" class="play-donate-chip" data-donate-amt="5">$5</button>
+        <button type="button" class="play-donate-chip" data-donate-amt="10">$10</button>
+        <button type="button" class="play-donate-chip" data-donate-amt="25">$25</button>
+        <button type="button" class="play-donate-chip" data-donate-amt="50">$50</button>
+      </div>
+      <label style="margin-top:10px;">Amount (USD)
+        <input id="playDonateAmountInput" type="number" min="0.50" step="0.01" placeholder="5.00">
+      </label>
+      <label style="margin-top:8px;">Message (optional)
+        <input id="playDonateNoteInput" maxlength="120" placeholder="Nice video! Keep grinding...">
+      </label>
+      <div class="muted tiny" id="playDonateCashAvail" style="margin-top:6px;">Available cash: $0.00</div>
+      <p id="playDonateMsg" class="form-message"></p>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px;">
+        <button type="button" class="zoom-btn" id="cancelPlayDonateBtn" style="padding:10px 16px;">Cancel</button>
+        <button type="button" class="play-donate-send-btn" id="confirmPlayDonateBtn">＋ Send Donation</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- REAL-TIME NOTIFICATION POPUP STACK -->
+  <div id="liveNotifPopups" class="live-notif-popups-container" aria-live="polite"></div>
+
   <!-- REWARD BURST LAYER (Daily Login & Season Pass) -->
   <div id="rewardBurstLayer" class="reward-burst-layer" aria-hidden="true"></div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=52"></script>
+  <script src="app.js?v=54"></script>
 </body>
 </html>
