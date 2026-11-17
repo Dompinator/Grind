@@ -6,20 +6,12 @@
 SELECT count(*) AS uploaded_play_video_rows
 FROM public.premium_requests
 WHERE reason LIKE '__PLAY_VID__:%'
-  AND CASE
-    WHEN substring(reason FROM 14) ~ '^\\s*\\{'
-    THEN (substring(reason FROM 14)::jsonb ->> 'kind') = 'video'
-    ELSE false
-  END;
+  AND position('"kind":"video"' in reason) > 0;
 
 -- Run this DELETE only after reviewing the count above.
 DELETE FROM public.premium_requests
 WHERE reason LIKE '__PLAY_VID__:%'
-  AND CASE
-    WHEN substring(reason FROM 14) ~ '^\\s*\\{'
-    THEN (substring(reason FROM 14)::jsonb ->> 'kind') = 'video'
-    ELSE false
-  END;
+  AND position('"kind":"video"' in reason) > 0;
 
 -- Run separately after the DELETE if you want Postgres to reclaim reusable space:
 -- VACUUM (ANALYZE) public.premium_requests;
