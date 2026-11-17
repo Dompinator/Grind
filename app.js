@@ -560,8 +560,11 @@ async function loadProfile() {
 
 let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map(), serverResetTs: 0, resetDoneMap: new Map(), deletedCoinIds: new Set(), deletedUserIds: new Set(), premiumOverrides: new Map(), selfSoldCoins: new Map() };
 let pendingWarnAckTs = 0;
+let adminModStateFetchedAt = 0;
+let adminModStatePromise = null;
+const ADMIN_MOD_STATE_TTL_MS = 30000;
 
-async function fetchAdminModerationState() {
+async function _fetchAdminModerationStateFresh() {
   const bans = new Map();
   const resets = new Map();
   const warnings = new Map();
@@ -680,6 +683,25 @@ async function fetchAdminModerationState() {
   } catch (e) {}
   adminModStateCache = { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds, deletedUserIds, premiumOverrides, selfSoldCoins };
   return adminModStateCache;
+}
+
+async function fetchAdminModerationState(force = false) {
+  if (!sb) return adminModStateCache;
+  if (adminModStatePromise) return adminModStatePromise;
+  if (!force && adminModStateFetchedAt && Date.now() - adminModStateFetchedAt < ADMIN_MOD_STATE_TTL_MS) {
+    return adminModStateCache;
+  }
+  adminModStatePromise = _fetchAdminModerationStateFresh()
+    .then(result => {
+      adminModStateFetchedAt = Date.now();
+      return result;
+    })
+    .finally(() => { adminModStatePromise = null; });
+  return adminModStatePromise;
+}
+
+function invalidateAdminModerationStateCache() {
+  adminModStateFetchedAt = 0;
 }
 
 function showBannedScreen(reason) {
@@ -1439,6 +1461,11 @@ function enterApp() {
   showPage('feed');
   startRealtime();
   loadCoins();
+  if (notificationPollInterval) clearInterval(notificationPollInterval);
+  updateNotificationsBadge();
+  notificationPollInterval = setInterval(() => {
+    if (currentUser && !document.hidden) updateNotificationsBadge();
+  }, NOTIFICATION_SCAN_TTL_MS);
   startTimeTracking();
   checkDailyLogin();
   flushPendingTierPromo();
@@ -1484,6 +1511,12 @@ $('#logoutBtn')?.addEventListener('click', async () => {
   if (passTickerInterval) clearInterval(passTickerInterval);
   if (sb) await sb.auth.signOut();
   currentUser = null;
+  if (notificationPollInterval) clearInterval(notificationPollInterval);
+  notificationPollInterval = null;
+  userNotificationsFetchedAt = 0;
+  adminNotificationsFetchedAt = 0;
+  userNotifsCache = [];
+  adminNotificationsCache = { reports: [], pendingRequests: [] };
   grindBotHistory = [];
   if (realtimeChannel && sb) sb.removeChannel(realtimeChannel);
   $('#appView').classList.add('hidden');
@@ -1817,7 +1850,29 @@ $('#saveFeaturedBtn')?.addEventListener('click', async () => {
   toast('Featured coins updated for everyone!');
 });
 
+let loadCoinsPromise = null;
+let loadCoinsQueued = false;
+
 async function loadCoins() {
+  if (!sb) return;
+  if (loadCoinsPromise) {
+    loadCoinsQueued = true;
+    return loadCoinsPromise;
+  }
+  loadCoinsPromise = (async () => {
+    do {
+      loadCoinsQueued = false;
+      await _loadCoinsFresh();
+    } while (loadCoinsQueued);
+  })();
+  try {
+    await loadCoinsPromise;
+  } finally {
+    loadCoinsPromise = null;
+  }
+}
+
+async function _loadCoinsFresh() {
   if (!sb) return;
   await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
   await fetchFeaturedCoins();
@@ -9070,6 +9125,7 @@ $('#submitReportBtn')?.addEventListener('click', async () => {
 });
 
 // ---------- NOTIFICATIONS (ALL USERS + DOMPINATOR INBOX) ----------
+let notificationPollInterval = null;
 let notifReportsCache = [];
 let notifReportFilter = 'all';
 let userNotifsCache = [];
@@ -9104,7 +9160,7 @@ function setNotificationsBadgeCount(total) {
   }
 }
 
-async function fetchUserNotifications() {
+async function _fetchUserNotificationsFresh() {
   if (!sb || !currentUser) return [];
   const uid = String(currentUser.id);
   await fetchAdminModerationState();
@@ -9412,7 +9468,27 @@ async function fetchUserNotifications() {
   return items;
 }
 
-async function fetchReportsAndPending() {
+let userNotificationsFetchedAt = 0;
+let userNotificationsPromise = null;
+const NOTIFICATION_SCAN_TTL_MS = 60000;
+
+async function fetchUserNotifications(force = false) {
+  if (!sb || !currentUser) return [];
+  if (userNotificationsPromise) return userNotificationsPromise;
+  if (!force && userNotificationsFetchedAt && Date.now() - userNotificationsFetchedAt < NOTIFICATION_SCAN_TTL_MS) {
+    return userNotifsCache;
+  }
+  userNotificationsPromise = _fetchUserNotificationsFresh()
+    .then(items => {
+      userNotifsCache = items || [];
+      userNotificationsFetchedAt = Date.now();
+      return userNotifsCache;
+    })
+    .finally(() => { userNotificationsPromise = null; });
+  return userNotificationsPromise;
+}
+
+async function _fetchReportsAndPendingFresh() {
   if (!sb || !isDompinator()) return { reports: [], pendingRequests: [] };
   await fetchAdminModerationState();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
@@ -9502,14 +9578,33 @@ async function fetchReportsAndPending() {
   return { reports, pendingRequests };
 }
 
+let adminNotificationsFetchedAt = 0;
+let adminNotificationsPromise = null;
+async function fetchReportsAndPending(force = false) {
+  if (!sb || !isDompinator()) return { reports: [], pendingRequests: [] };
+  if (adminNotificationsPromise) return adminNotificationsPromise;
+  if (!force && adminNotificationsFetchedAt && Date.now() - adminNotificationsFetchedAt < NOTIFICATION_SCAN_TTL_MS) {
+    return adminNotificationsCache;
+  }
+  adminNotificationsPromise = _fetchReportsAndPendingFresh()
+    .then(result => {
+      adminNotificationsCache = result;
+      adminNotificationsFetchedAt = Date.now();
+      return result;
+    })
+    .finally(() => { adminNotificationsPromise = null; });
+  return adminNotificationsPromise;
+}
+let adminNotificationsCache = { reports: [], pendingRequests: [] };
+
 async function updateNotificationsBadge() {
   if (!sb || !currentUser) return;
   try {
     const seenTs = getUserNotifSeenTs();
-    const userItems = await fetchUserNotifications();
+    const userItems = await fetchUserNotifications(false);
     const unreadUserCount = userItems.filter(it => Number(it.ts || 0) > seenTs).length;
     if (isDompinator()) {
-      const { reports, pendingRequests } = await fetchReportsAndPending();
+      const { reports, pendingRequests } = await fetchReportsAndPending(false);
       setNotificationsBadgeCount(unreadUserCount + reports.length + pendingRequests.length);
     } else {
       setNotificationsBadgeCount(unreadUserCount);
@@ -9740,11 +9835,11 @@ async function loadRequests() {
     if (sub) sub.textContent = 'Updates, warnings, coin & video likes, comments, replies, and donations.';
   }
 
-  userNotifsCache = await fetchUserNotifications();
+  userNotifsCache = await fetchUserNotifications(true);
   renderUserNotifsList();
 
   if (isDompinator()) {
-    const { reports, pendingRequests } = await fetchReportsAndPending();
+    const { reports, pendingRequests } = await fetchReportsAndPending(true);
     notifReportsCache = reports;
     renderReportsList();
 
@@ -10569,6 +10664,12 @@ function startRealtime() {
       if (currentPage === 'global' && lbMode === 'weekly' && Date.now() > lbAnimatingUntil) renderLeaderboard();
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, payload => {
+      const changedReason = String(payload?.new?.reason || payload?.old?.reason || '');
+      if (/^__(ADMIN_CMD|SERVER_RESET|RESET_DONE|COIN_DEL|ACCOUNT_DELETED|COIN_SELF_SELL)__/.test(changedReason)) {
+        invalidateAdminModerationStateCache();
+        userNotificationsFetchedAt = 0;
+        adminNotificationsFetchedAt = 0;
+      }
       if (payload?.eventType === 'INSERT' && payload?.new) {
         handleRealtimePremiumInsertPopup(payload.new);
       }
