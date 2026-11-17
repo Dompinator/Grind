@@ -1,7 +1,7 @@
 # GRIND PLAY video storage setup
 
 This change moves uploaded PLAY video binaries out of Postgres and into the
-repository's `PLAY/` directory. The PLAY metadata row remains in
+repository's `PLAY/` directory on a dedicated `play-media` branch. This keeps video commits away from the GitHub Pages branch so each upload does not trigger a site deployment. The PLAY metadata row remains in
 `premium_requests`; votes, comments, views, donations, follows, and earnings
 remain in Supabase exactly as before.
 
