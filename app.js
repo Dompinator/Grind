@@ -6318,6 +6318,13 @@ async function deletePlayVideo(videoId) {
     toast('Could not delete video: ' + error.message);
     return;
   }
+  if (vid.kind === 'video' && /^https:\/\/raw\.githubusercontent\.com\//i.test(String(vid.videoUrl || ''))) {
+    try {
+      await deletePlayVideoFileFromGitHub(vid);
+    } catch (cleanupError) {
+      console.warn('PLAY video file cleanup failed:', cleanupError);
+    }
+  }
   playState.deletedIds.add(String(videoId));
   playState.videos = playState.videos.filter(v => v.id !== String(videoId));
   playState.videosById.delete(String(videoId));
@@ -7905,10 +7912,11 @@ async function compressPlayVideoFile(file, onProgress) {
   const natW = vid.videoWidth || 360;
   const natH = vid.videoHeight || 640;
   const aspectRatio = Math.min(2.6, Math.max(0.35, Number((natW / natH).toFixed(4))));
-  const scale = Math.min(1, 640 / Math.max(natW, natH));
+  // Every uploaded PLAY video is re-encoded with its longest edge capped at 340px.
+  const scale = Math.min(1, 340 / Math.max(natW, natH));
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(160, Math.round((natW * scale) / 2) * 2);
-  canvas.height = Math.max(160, Math.round((natH * scale) / 2) * 2);
+  canvas.width = Math.max(2, Math.round((natW * scale) / 2) * 2);
+  canvas.height = Math.max(2, Math.round((natH * scale) / 2) * 2);
   const ctx = canvas.getContext('2d');
   const canvasStream = canvas.captureStream(24);
   const tracks = [...canvasStream.getVideoTracks()];
@@ -7955,21 +7963,32 @@ async function compressPlayVideoFile(file, onProgress) {
 
   const stream = new MediaStream(tracks);
   const preferredMimes = hasAudioTrack
-    ? ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm']
-    : ['video/webm;codecs=vp8', 'video/webm'];
+    ? [
+        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+        'video/mp4',
+        'video/webm;codecs=vp8,opus',
+        'video/webm;codecs=vp9,opus',
+        'video/webm'
+      ]
+    : [
+        'video/mp4;codecs=avc1.42E01E',
+        'video/mp4',
+        'video/webm;codecs=vp8',
+        'video/webm'
+      ];
   const mime = preferredMimes.find(m => {
     try { return MediaRecorder.isTypeSupported(m); } catch (e) { return false; }
-  }) || 'video/webm';
+  }) || '';
 
   let recorder = null;
   try {
     recorder = new MediaRecorder(stream, {
-      mimeType: mime,
-      videoBitsPerSecond: 580000,
+      ...(mime ? { mimeType: mime } : {}),
+      videoBitsPerSecond: 320000,
       ...(hasAudioTrack ? { audioBitsPerSecond: 48000 } : {})
     });
   } catch (e) {
-    recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 580000 });
+    recorder = new MediaRecorder(stream, { videoBitsPerSecond: 320000 });
   }
   const chunks = [];
   recorder.ondataavailable = ev => { if (ev.data && ev.data.size > 0) chunks.push(ev.data); };
@@ -7981,13 +8000,18 @@ async function compressPlayVideoFile(file, onProgress) {
     recorder.onstop = async () => {
       URL.revokeObjectURL(objectUrl);
       cleanupAudio();
-      const blob = new Blob(chunks, { type: 'video/webm' });
-      if (blob.size > 2.6 * 1024 * 1024) {
-        reject(new Error('Video is too large after compression. Please pick a shorter clip (under 15s).'));
+      const outputMime = String(recorder.mimeType || mime || chunks[0]?.type || 'video/webm').split(';')[0];
+      if (!['video/webm', 'video/mp4'].includes(outputMime)) {
+        reject(new Error('This browser could not create a supported MP4/WebM video. Please try another browser.'));
+        return;
+      }
+      const blob = new Blob(chunks, { type: outputMime });
+      if (blob.size > 2.8 * 1024 * 1024) {
+        reject(new Error('Video is too large after 340p compression. Please choose a shorter clip (under 15 seconds).'));
         return;
       }
       const dataUrl = await readFileAsDataUrlPromise(blob);
-      resolve({ dataUrl, aspectRatio });
+      resolve({ dataUrl, aspectRatio, mimeType: outputMime });
     };
     recorder.onerror = () => {
       URL.revokeObjectURL(objectUrl);
@@ -8014,6 +8038,31 @@ async function compressPlayVideoFile(file, onProgress) {
     };
     requestAnimationFrame(drawLoop);
   });
+}
+
+async function uploadPlayVideoToGitHub(dataUrl, videoId) {
+  if (!sb || !currentUser?.id) throw new Error('Please sign in again before uploading.');
+  const { data, error } = await sb.functions.invoke('play-video-storage', {
+    body: { action: 'upload', videoId: String(videoId), dataUrl }
+  });
+  if (error) throw new Error(error.message || 'Could not upload video to GitHub.');
+  if (!data?.url || !/^https:\/\/raw\.githubusercontent\.com\//i.test(data.url)) {
+    throw new Error(data?.error || 'GitHub returned an invalid video URL.');
+  }
+  return data.url;
+}
+
+async function deletePlayVideoFileFromGitHub(video) {
+  if (!sb || !currentUser?.id || !video?.id || !video?.user_id) return;
+  const { data, error } = await sb.functions.invoke('play-video-storage', {
+    body: {
+      action: 'delete',
+      videoId: String(video.id),
+      ownerId: String(video.user_id)
+    }
+  });
+  if (error) throw new Error(error.message || 'Could not remove the GitHub video file.');
+  return Boolean(data?.deleted);
 }
 
 function syncPlayUploadPreviewEffects() {
@@ -8088,25 +8137,16 @@ $('#playUploadFileInput')?.addEventListener('change', async e => {
 
   try {
     pendingUploadBusy = true;
-    if (file.size <= 2.2 * 1024 * 1024) {
-      const [ar, dataUrl] = await Promise.all([
-        probeVideoAspectRatio(file),
-        readFileAsDataUrlPromise(file)
-      ]);
-      pendingUploadVideoAspect = ar;
-      pendingUploadVideoDataUrl = dataUrl;
-    } else {
-      if (typeof MediaRecorder === 'undefined') {
-        throw new Error('Please choose a smaller video clip under 2.2 MB.');
-      }
-      if (nameEl) nameEl.textContent = `Optimizing ${file.name} for Play... 0%`;
-      const res = await compressPlayVideoFile(file, pct => {
-        if (nameEl) nameEl.textContent = `Optimizing ${file.name} for Play... ${pct}%`;
-      });
-      pendingUploadVideoDataUrl = res.dataUrl;
-      pendingUploadVideoAspect = res.aspectRatio;
-      if (nameEl) nameEl.textContent = `${file.name} · Ready (with original audio)!`;
+    if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) {
+      throw new Error('This browser cannot safely compress videos to 340p. Please try an up-to-date Safari or Chrome browser.');
     }
+    if (nameEl) nameEl.textContent = `Optimizing ${file.name} to 340p... 0%`;
+    const res = await compressPlayVideoFile(file, pct => {
+      if (nameEl) nameEl.textContent = `Optimizing ${file.name} to 340p... ${pct}%`;
+    });
+    pendingUploadVideoDataUrl = res.dataUrl;
+    pendingUploadVideoAspect = res.aspectRatio;
+    if (nameEl) nameEl.textContent = `${file.name} · Ready (340p, original audio where supported)!`;
     if (prev && pendingUploadVideoDataUrl) {
       prev.src = pendingUploadVideoDataUrl;
       prev.classList.remove('hidden');
@@ -8147,12 +8187,25 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
   const linkedCoin = linkedId ? (coins || []).find(c => String(c.id) === String(linkedId)) : null;
   const voUrl = playVoiceoverState.uploadUrl || '';
   const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  let githubVideoUrl = '';
+  try {
+    if (msgEl) msgEl.textContent = 'Uploading compressed video to GRIND...';
+    githubVideoUrl = await uploadPlayVideoToGitHub(pendingUploadVideoDataUrl, newVidId);
+  } catch (uploadError) {
+    if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
+    pubBtn.disabled = false;
+    pubBtn.textContent = 'Publish';
+    updatePlayUploadFeeUi();
+    if (msgEl) msgEl.textContent = 'Video upload failed: ' + (uploadError?.message || 'Unknown error');
+    return;
+  }
+
   const payload = {
     id: newVidId,
     kind: 'video',
     title: ($('#playUploadTitleInput')?.value || '').trim().slice(0, 60),
     aspectRatio: pendingUploadVideoAspect || (9 / 16),
-    videoUrl: pendingUploadVideoDataUrl,
+    videoUrl: githubVideoUrl,
     videoFilter: $('#playUploadFilterSelect')?.value || 'none',
     playbackRate: Math.min(2.5, Math.max(0.5, Number($('#playUploadSpeedSelect')?.value || 1))),
     muteOriginal: Boolean($('#playUploadMuteOrigCheckbox')?.checked),
@@ -8173,6 +8226,7 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
   pubBtn.disabled = false;
   updatePlayUploadFeeUi();
   if (error) {
+    try { await deletePlayVideoFileFromGitHub({ id: newVidId, user_id: currentUser.id }); } catch (cleanupError) {}
     if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
     if (msgEl) msgEl.textContent = 'Upload failed: ' + error.message;
     return;
