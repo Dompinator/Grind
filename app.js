@@ -2077,6 +2077,9 @@ $('#createForm')?.addEventListener('submit', async (e) => {
 async function openCoin(id) {
   selectedCoin = coins.find(c => c.id === id);
   if (!selectedCoin) return;
+  pendingCommentGif = null;
+  commentGifPickerOpen = false;
+  commentGifSearchQuery = '';
   showPage('coin');
   await renderCoinDetail();
 }
@@ -2292,7 +2295,21 @@ async function renderCoinDetail() {
         <div class="avatar">${currentUser.avatar_url ? `<img src="${escapeHtml(currentUser.avatar_url)}">` : escapeHtml((currentUser.username || 'G')[0].toUpperCase())}</div>
         <div class="comment-composer-body">
           <textarea id="commentInput" rows="2" maxlength="500" placeholder="Add a comment on $${escapeHtml(c.ticker)}..."></textarea>
+          <div id="commentGifPreview" class="comment-gif-preview hidden"></div>
+          <div id="commentGifPicker" class="comment-gif-picker hidden" role="region" aria-label="Choose a GIF">
+            <div class="comment-gif-picker-head">
+              <div>
+                <strong>Choose a GIF</strong>
+                <span class="muted tiny">Powered by GIPHY</span>
+              </div>
+              <button type="button" id="closeCommentGifPickerBtn" class="zoom-btn" aria-label="Close GIF picker">✕</button>
+            </div>
+            <input id="commentGifSearchInput" class="feed-search dm-coin-search" type="search" maxlength="120" placeholder="Search GIPHY GIFs or paste a giphy.com link...">
+            <div id="commentGifStatus" class="dm-gif-status hidden"></div>
+            <div id="commentGifGrid" class="dm-gif-grid"></div>
+          </div>
           <div class="comment-composer-actions">
+            <button type="button" class="comment-plus-btn" id="commentGifBtn" title="Add a GIF" aria-label="Add a GIF" aria-expanded="false"><span>＋</span><small>GIF</small></button>
             <button type="button" class="primary-btn" id="postCommentBtn" style="padding:9px 18px;font-size:13px;">Comment</button>
           </div>
         </div>
@@ -2545,6 +2562,24 @@ async function renderCoinDetail() {
     });
   }
 
+  $('#commentGifBtn')?.addEventListener('click', () => {
+    setCommentGifPickerOpen(!commentGifPickerOpen);
+  });
+  $('#closeCommentGifPickerBtn')?.addEventListener('click', () => {
+    setCommentGifPickerOpen(false);
+  });
+  let commentGifSearchTimer = null;
+  $('#commentGifSearchInput')?.addEventListener('input', e => {
+    commentGifSearchQuery = e.target.value || '';
+    clearTimeout(commentGifSearchTimer);
+    const delay = extractDirectGiphyUrl(commentGifSearchQuery) ? 0 : 280;
+    commentGifSearchTimer = setTimeout(() => {
+      if (commentGifPickerOpen) loadCommentGifPicker();
+    }, delay);
+  });
+  renderCommentGifPreview();
+  if (commentGifPickerOpen) setCommentGifPickerOpen(true);
+
   $('#postCommentBtn')?.addEventListener('click', () => postCoinComment(c));
   $('#commentInput')?.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -2672,6 +2707,219 @@ $('#saveEditCoinBtn')?.addEventListener('click', async () => {
   loadCoins();
 });
 
+const GRIND_GIPHY_REMOTE_URL = 'https://ais-pre-6t6kqxwlmllmygnc6gzkjm-935946932105.europe-west2.run.app/api/giphy';
+const giphyQueryCache = new Map();
+const giphyRequestTokens = new WeakMap();
+let pendingCommentGif = null; // { id, gifUrl, previewUrl, title }
+let commentGifPickerOpen = false;
+let commentGifSearchQuery = '';
+
+function sanitizeGifUrl(rawUrl) {
+  const s = String(rawUrl || '').trim();
+  if (!s) return '';
+  try {
+    const u = new URL(s);
+    if (u.protocol !== 'https:') return '';
+    if (!/(^|\.)giphy\.com$/i.test(u.hostname)) return '';
+    return u.toString();
+  } catch (e) {
+    return '';
+  }
+}
+
+function extractDirectGiphyUrl(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  let id = '';
+  const mediaMatch = s.match(/https?:\/\/(?:media\d*\.)?giphy\.com\/media\/(?:v1\.[^/]+\/)?([A-Za-z0-9]+)/i);
+  const imgMatch = s.match(/https?:\/\/i\.giphy\.com\/(?:media\/)?([A-Za-z0-9]+)(?:\.(?:gif|webp|mp4))?/i);
+  const pageMatch = s.match(/https?:\/\/(?:www\.)?giphy\.com\/gifs\/(?:[^/?#]*-)?([A-Za-z0-9]+)(?:[/?#]|$)/i);
+  if (mediaMatch) id = mediaMatch[1];
+  else if (imgMatch) id = imgMatch[1];
+  else if (pageMatch) id = pageMatch[1];
+  if (!id) return null;
+  return {
+    id,
+    title: 'GIPHY GIF',
+    previewUrl: `https://media.giphy.com/media/${id}/200w.gif`,
+    gifUrl: `https://media.giphy.com/media/${id}/giphy.gif`,
+    width: 200,
+    height: 150
+  };
+}
+
+async function tryGiphyEndpoint(baseUrl, query, limit = 24, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const sep = baseUrl.includes('?') ? '&' : '?';
+    const url = `${baseUrl}${sep}limit=${encodeURIComponent(String(limit))}${query ? `&q=${encodeURIComponent(query)}` : ''}`;
+    const res = await fetch(url, { signal: controller.signal });
+    const data = await res.json().catch(() => null);
+    if (!data || !Array.isArray(data.gifs)) return null;
+    return {
+      configured: data.configured !== false,
+      gifs: data.gifs
+        .map(g => ({
+          id: String(g.id || ''),
+          title: String(g.title || 'GIF'),
+          previewUrl: sanitizeGifUrl(g.previewUrl) || sanitizeGifUrl(g.gifUrl),
+          gifUrl: sanitizeGifUrl(g.gifUrl) || sanitizeGifUrl(g.previewUrl),
+          width: Number(g.width) || 200,
+          height: Number(g.height) || 150
+        }))
+        .filter(g => g.id && g.previewUrl && g.gifUrl),
+      error: data.error ? String(data.error) : ''
+    };
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchGiphyGifs(query = '') {
+  const cleanQ = String(query || '').trim().slice(0, 120);
+  const direct = extractDirectGiphyUrl(cleanQ);
+  if (direct) {
+    return { configured: true, gifs: [direct], error: '' };
+  }
+
+  const cacheKey = cleanQ.toLowerCase();
+  const cached = giphyQueryCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts) < 120000) {
+    return cached.data;
+  }
+
+  const isGithubPages = (window.location.hostname || '').endsWith('github.io');
+  let result = null;
+  if (!isGithubPages) {
+    result = await tryGiphyEndpoint('/api/giphy', cleanQ, 24, 8000);
+  }
+  if (!result) {
+    result = await tryGiphyEndpoint(GRIND_GIPHY_REMOTE_URL, cleanQ, 24, 6000);
+  }
+  if (!result) {
+    return {
+      configured: false,
+      gifs: [],
+      error: 'Could not reach the GIPHY service right now.'
+    };
+  }
+
+  if (result.configured && result.gifs.length > 0) {
+    giphyQueryCache.set(cacheKey, { ts: Date.now(), data: result });
+  }
+  return result;
+}
+
+async function renderGiphyPickerGrid({ gridEl, statusEl, query, emptyText, onSelect }) {
+  if (!gridEl) return;
+  const nextToken = (giphyRequestTokens.get(gridEl) || 0) + 1;
+  giphyRequestTokens.set(gridEl, nextToken);
+
+  if (statusEl) {
+    statusEl.classList.remove('hidden');
+    statusEl.textContent = String(query || '').trim() ? 'Searching GIPHY...' : 'Loading trending GIFs...';
+  }
+  gridEl.innerHTML = '<div class="dm-gif-skeleton"></div>'.repeat(6);
+
+  const res = await fetchGiphyGifs(query);
+  if (giphyRequestTokens.get(gridEl) !== nextToken || !gridEl.isConnected) return;
+
+  if (!res.configured && !res.gifs.length) {
+    gridEl.innerHTML = '';
+    if (statusEl) {
+      statusEl.classList.remove('hidden');
+      statusEl.textContent = 'GIPHY live search needs GIPHY_API_KEY configured on the server — or paste any giphy.com GIF link above!';
+    }
+    return;
+  }
+
+  if (!res.gifs.length) {
+    gridEl.innerHTML = '';
+    if (statusEl) {
+      statusEl.classList.remove('hidden');
+      statusEl.textContent = res.error || emptyText || 'No GIFs found. Try another search or paste a giphy.com link.';
+    }
+    return;
+  }
+
+  if (statusEl) {
+    statusEl.classList.add('hidden');
+    statusEl.textContent = '';
+  }
+
+  gridEl.innerHTML = res.gifs.map((g, idx) => `
+    <button type="button" class="dm-gif-tile" data-gif-idx="${idx}" title="${escapeHtml(g.title || 'GIF')}">
+      <img src="${escapeHtml(g.previewUrl)}" alt="${escapeHtml(g.title || 'GIF')}" loading="lazy">
+    </button>
+  `).join('');
+
+  gridEl.querySelectorAll('[data-gif-idx]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.gifIdx);
+      const chosen = res.gifs[idx];
+      if (chosen && typeof onSelect === 'function') onSelect(chosen);
+    });
+  });
+}
+
+function renderCommentGifPreview() {
+  const prevEl = $('#commentGifPreview');
+  if (!prevEl) return;
+  if (!pendingCommentGif || !pendingCommentGif.gifUrl) {
+    prevEl.innerHTML = '';
+    prevEl.classList.add('hidden');
+    return;
+  }
+  prevEl.classList.remove('hidden');
+  prevEl.innerHTML = `
+    <div class="comment-gif-chip">
+      <img src="${escapeHtml(pendingCommentGif.previewUrl || pendingCommentGif.gifUrl)}" alt="${escapeHtml(pendingCommentGif.title || 'Selected GIF')}">
+      <div class="comment-gif-chip-meta">
+        <strong>GIF attached</strong>
+        <span class="muted tiny">${escapeHtml(pendingCommentGif.title || 'GIPHY GIF')}</span>
+      </div>
+      <button type="button" class="zoom-btn comment-gif-remove-btn" id="removeCommentGifBtn" aria-label="Remove GIF">✕</button>
+    </div>
+  `;
+  $('#removeCommentGifBtn')?.addEventListener('click', () => {
+    pendingCommentGif = null;
+    renderCommentGifPreview();
+  });
+}
+
+function loadCommentGifPicker() {
+  return renderGiphyPickerGrid({
+    gridEl: $('#commentGifGrid'),
+    statusEl: $('#commentGifStatus'),
+    query: commentGifSearchQuery,
+    emptyText: 'No GIFs matched your search.',
+    onSelect: (gif) => {
+      pendingCommentGif = gif;
+      setCommentGifPickerOpen(false);
+      renderCommentGifPreview();
+      $('#commentInput')?.focus();
+    }
+  });
+}
+
+function setCommentGifPickerOpen(open) {
+  commentGifPickerOpen = Boolean(open);
+  const picker = $('#commentGifPicker');
+  const btn = $('#commentGifBtn');
+  if (picker) picker.classList.toggle('hidden', !commentGifPickerOpen);
+  if (btn) {
+    btn.classList.toggle('active', commentGifPickerOpen);
+    btn.setAttribute('aria-expanded', commentGifPickerOpen ? 'true' : 'false');
+  }
+  if (commentGifPickerOpen) {
+    loadCommentGifPicker();
+    $('#commentGifSearchInput')?.focus();
+  }
+}
+
 const expandedCommentReplies = new Set();
 let activeReplyTarget = null; // { parentId, replyToUserId, replyToUsername }
 
@@ -2685,7 +2933,12 @@ async function postCoinComment(coin, replyTarget = null) {
     ? $(`#sendReplyBtn-${replyTarget.parentId}`)
     : $('#postCommentBtn');
   const text = (input?.value || '').trim();
-  if (!text) return toast(isReply ? 'Write a reply first.' : 'Write a comment first.');
+  const attachedGif = !isReply && pendingCommentGif && sanitizeGifUrl(pendingCommentGif.gifUrl)
+    ? pendingCommentGif
+    : null;
+  if (!text && !attachedGif) {
+    return toast(isReply ? 'Write a reply first.' : 'Write a comment or pick a GIF first.');
+  }
   if (btn) btn.disabled = true;
 
   const payload = {
@@ -2694,6 +2947,10 @@ async function postCoinComment(coin, replyTarget = null) {
     text,
     ts: Date.now()
   };
+  if (attachedGif) {
+    payload.gif_url = sanitizeGifUrl(attachedGif.gifUrl);
+    payload.gif_title = String(attachedGif.title || 'GIF').slice(0, 80);
+  }
   if (isReply) {
     payload.parent_id = String(replyTarget.parentId);
     if (replyTarget.replyToUserId) payload.reply_to_user_id = String(replyTarget.replyToUserId);
@@ -2718,6 +2975,11 @@ async function postCoinComment(coin, replyTarget = null) {
     toast('Reply posted!');
   } else {
     if (input) input.value = '';
+    pendingCommentGif = null;
+    commentGifSearchQuery = '';
+    if ($('#commentGifSearchInput')) $('#commentGifSearchInput').value = '';
+    setCommentGifPickerOpen(false);
+    renderCommentGifPreview();
     toast('Comment posted!');
   }
   loadCoinComments(coin);
@@ -2821,7 +3083,9 @@ async function loadCoinComments(coin) {
     if (reason.startsWith('__CMT_ADD__:')) {
       try {
         const p = JSON.parse(reason.slice('__CMT_ADD__:'.length));
-        if (!p || String(p.coin_id) !== coinId || !p.id || !p.text) return;
+        const cleanGif = sanitizeGifUrl(p?.gif_url);
+        const cleanText = String(p?.text || '').trim();
+        if (!p || String(p.coin_id) !== coinId || !p.id || (!cleanText && !cleanGif)) return;
         const ts = Number(p.ts) || rowTs;
         if (srvResetTs > 0 && ts <= srvResetTs) return;
         commentsMap.set(String(p.id), {
@@ -2830,7 +3094,9 @@ async function loadCoinComments(coin) {
           parent_id: p.parent_id ? String(p.parent_id) : null,
           reply_to_user_id: p.reply_to_user_id ? String(p.reply_to_user_id) : null,
           reply_to_username: p.reply_to_username ? String(p.reply_to_username) : null,
-          text: String(p.text),
+          text: String(p.text || ''),
+          gif_url: cleanGif,
+          gif_title: p.gif_title ? String(p.gif_title) : 'GIF',
           ts,
           profile: r.profiles || { id: r.user_id, username: 'Trader' }
         });
@@ -2967,7 +3233,8 @@ async function loadCoinComments(coin) {
               ${rIsCreator ? '<span class="comment-creator-tag">Creator</span>' : ''}
               <span class="comment-time">${escapeHtml(formatRelativeTime(rp.ts))}</span>
             </div>
-            <div class="comment-text">${mentionHtml}${escapeHtml(rp.text).replace(/\n/g, '<br>')}</div>
+            ${rp.text ? `<div class="comment-text">${mentionHtml}${escapeHtml(rp.text).replace(/\n/g, '<br>')}</div>` : (mentionHtml ? `<div class="comment-text">${mentionHtml}</div>` : '')}
+            ${rp.gif_url ? `<div class="comment-gif-wrap"><img src="${escapeHtml(rp.gif_url)}" alt="${escapeHtml(rp.gif_title || 'GIF')}" loading="lazy"></div>` : ''}
             <div class="comment-actions">
               ${renderVoteBtns(rp)}
               <button type="button" class="cmt-action-btn" data-cmt-reply="${escapeHtml(cm.id)}" data-reply-uid="${escapeHtml(rp.user_id)}" data-reply-name="${escapeHtml(rUname)}">Reply</button>
@@ -2988,7 +3255,8 @@ async function loadCoinComments(coin) {
           ${isCommenterCreator ? '<span class="comment-creator-tag">Creator</span>' : ''}
           <span class="comment-time">${escapeHtml(formatRelativeTime(cm.ts))}</span>
         </div>
-        <div class="comment-text">${escapeHtml(cm.text).replace(/\n/g, '<br>')}</div>
+        ${cm.text ? `<div class="comment-text">${escapeHtml(cm.text).replace(/\n/g, '<br>')}</div>` : ''}
+        ${cm.gif_url ? `<div class="comment-gif-wrap"><img src="${escapeHtml(cm.gif_url)}" alt="${escapeHtml(cm.gif_title || 'GIF')}" loading="lazy"></div>` : ''}
         <div class="comment-actions">
           ${renderVoteBtns(cm)}
           <button type="button" class="cmt-action-btn" data-cmt-reply="${escapeHtml(cm.id)}" data-reply-uid="${escapeHtml(cm.user_id)}" data-reply-name="${escapeHtml(uname)}">Reply</button>
@@ -5499,7 +5767,9 @@ async function fetchUserNotifications() {
     if (reason.startsWith('__CMT_ADD__:')) {
       try {
         const p = JSON.parse(reason.slice('__CMT_ADD__:'.length));
-        if (!p || !p.id || !p.coin_id || !p.text) return;
+        const hasGif = Boolean(sanitizeGifUrl(p?.gif_url));
+        const cleanText = String(p?.text || '').trim();
+        if (!p || !p.id || !p.coin_id || (!cleanText && !hasGif)) return;
         const ts = Number(p.ts) || rowTs;
         if (srvResetTs > 0 && ts <= srvResetTs) return;
         allComments.set(String(p.id), {
@@ -5508,7 +5778,7 @@ async function fetchUserNotifications() {
           userId: String(r.user_id),
           parentId: p.parent_id ? String(p.parent_id) : null,
           replyToUserId: p.reply_to_user_id ? String(p.reply_to_user_id) : null,
-          text: String(p.text),
+          text: cleanText || (hasGif ? 'Sent a GIF' : ''),
           ts,
           profile: r.profiles || { id: r.user_id, username: 'Trader' }
         });
@@ -6542,7 +6812,7 @@ async function handleRequest(reqId, userId, status) {
 // ---------- Realtime ----------
 function startRealtime() {
   if (!sb) return;
-  realtimeChannel = sb.channel('grind-live')
+  realtimeChannel = sb.channel('grind-live', { config: { broadcast: { self: false } } })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'coins' }, () => {
       loadCoins();
       if (currentPage === 'live') loadLiveFeed();
@@ -6563,6 +6833,12 @@ function startRealtime() {
       else if (currentUser) updateNotificationsBadge();
       if (isDompinator() && currentPage === 'admin') loadAdminPage();
       if (currentUser && typeof refreshDirectMessages === 'function') refreshDirectMessages(true);
+    })
+    .on('broadcast', { event: 'dm_typing' }, ({ payload }) => {
+      if (typeof handleIncomingDmTyping === 'function') handleIncomingDmTyping(payload);
+    })
+    .on('broadcast', { event: 'dm_read' }, ({ payload }) => {
+      if (typeof handleIncomingDmRead === 'function') handleIncomingDmRead(payload);
     })
     .subscribe();
 }
@@ -8918,6 +9194,10 @@ $('#ambientMusicToggleBtn')?.addEventListener('click', () => {
 // ============================================================
 function hideModalSmooth(modalEl) {
   if (!modalEl || modalEl.classList.contains('hidden')) return;
+  if (modalEl.id === 'dmModal' && typeof stopOutgoingDmTyping === 'function') {
+    stopOutgoingDmTyping();
+    setDmCoinPickerOpen(false);
+  }
   if (modalEl.classList.contains('modal-closing')) return;
   modalEl.classList.add('modal-closing');
   setTimeout(() => {
@@ -9445,18 +9725,32 @@ $$('[data-watch-speed]').forEach(btn => {
 // ============================================================
 const dmState = {
   profilesMap: new Map(),   // userId -> profile
-  messagesByPartner: new Map(), // partnerId -> [{ id, from, to, text, ts }]
+  messagesByPartner: new Map(), // partnerId -> [{ id, from, to, type, text, ts, ... }]
+  partnerReadTsByPartner: new Map(), // partnerId -> latest message ts partner opened/read
+  lastSentReadByPartner: new Map(), // partnerId -> latest incoming ts we already acked
+  typingUntilByPartner: new Map(), // partnerId -> expiry ts
+  typingClearTimers: new Map(), // partnerId -> timeoutId
+  lastTypingSentAt: 0,
+  lastTypingTargetId: null,
+  typingStopTimer: null,
   activePartnerId: null,
   searchQuery: '',
   totalUnread: 0,
   lastUnreadNotifiedCount: 0,
   coinPickerOpen: false,
+  attachTab: 'coins', // 'coins' | 'gifs'
   coinSearchQuery: '',
-  sendingCoin: false
+  gifSearchQuery: '',
+  sendingCoin: false,
+  sendingGif: false
 };
 
 function getDmSeenKey(myId, partnerId) {
   return `grind_dm_seen_${myId}_${partnerId}`;
+}
+
+function getDmSentReadKey(myId, partnerId) {
+  return `grind_dm_sent_read_${myId}_${partnerId}`;
 }
 
 function getDmSeenTs(partnerId) {
@@ -9468,6 +9762,27 @@ function getDmSeenTs(partnerId) {
   }
 }
 
+function getDmSentReadWatermark(partnerId) {
+  if (!currentUser?.id || !partnerId) return 0;
+  const pid = String(partnerId);
+  const mem = dmState.lastSentReadByPartner.get(pid) || 0;
+  let ls = 0;
+  try {
+    ls = Number(localStorage.getItem(getDmSentReadKey(currentUser.id, pid)) || 0);
+  } catch (e) {}
+  return Math.max(mem, ls);
+}
+
+function setDmSentReadWatermark(partnerId, ts) {
+  if (!currentUser?.id || !partnerId) return;
+  const pid = String(partnerId);
+  const next = Math.max(getDmSentReadWatermark(pid), Number(ts) || 0);
+  dmState.lastSentReadByPartner.set(pid, next);
+  try {
+    localStorage.setItem(getDmSentReadKey(currentUser.id, pid), String(next));
+  } catch (e) {}
+}
+
 function markDmThreadSeen(partnerId, latestTs = Date.now()) {
   if (!currentUser?.id || !partnerId) return;
   try {
@@ -9476,6 +9791,160 @@ function markDmThreadSeen(partnerId, latestTs = Date.now()) {
     localStorage.setItem(getDmSeenKey(currentUser.id, partnerId), String(next));
   } catch (e) {}
   updateDmUnreadBadge();
+}
+
+function isDmPartnerTyping(partnerId) {
+  if (!partnerId) return false;
+  const exp = dmState.typingUntilByPartner.get(String(partnerId)) || 0;
+  return exp > Date.now();
+}
+
+function emitDmTyping(isTyping, targetPartnerId = dmState.activePartnerId) {
+  if (!realtimeChannel || !currentUser?.id || !targetPartnerId) return;
+  try {
+    realtimeChannel.send({
+      type: 'broadcast',
+      event: 'dm_typing',
+      payload: {
+        from: String(currentUser.id),
+        to: String(targetPartnerId),
+        typing: Boolean(isTyping),
+        ts: Date.now()
+      }
+    });
+  } catch (e) {}
+}
+
+function stopOutgoingDmTyping(targetId = dmState.lastTypingTargetId) {
+  clearTimeout(dmState.typingStopTimer);
+  dmState.typingStopTimer = null;
+  if (targetId) {
+    emitDmTyping(false, targetId);
+  }
+  dmState.lastTypingSentAt = 0;
+  dmState.lastTypingTargetId = null;
+}
+
+function renderDmTypingUi() {
+  const dmModalOpen = !$('#dmModal')?.classList.contains('hidden');
+  if (!dmModalOpen) return;
+
+  const typingRow = $('#dmTypingRow');
+  const statusEl = $('#dmChatHeaderStatus');
+  const partnerId = dmState.activePartnerId ? String(dmState.activePartnerId) : null;
+  const activeTyping = partnerId ? isDmPartnerTyping(partnerId) : false;
+
+  if (statusEl) {
+    if (activeTyping) {
+      statusEl.textContent = 'typing...';
+      statusEl.classList.add('is-typing');
+    } else {
+      statusEl.textContent = 'Private DM · Click to view profile';
+      statusEl.classList.remove('is-typing');
+    }
+  }
+
+  if (typingRow) {
+    if (partnerId && activeTyping) {
+      const p = getDmPartnerProfile(partnerId);
+      typingRow.classList.remove('hidden');
+      typingRow.innerHTML = `
+        <div class="dm-typing-indicator">
+          <span class="dm-typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span><strong>${escapeHtml(p.username || 'Trader')}</strong> is typing...</span>
+        </div>
+      `;
+    } else {
+      typingRow.classList.add('hidden');
+      typingRow.innerHTML = '';
+    }
+  }
+
+  renderDmSidebar();
+}
+
+function handleIncomingDmTyping(payload) {
+  if (!payload || !currentUser?.id) return;
+  const myId = String(currentUser.id);
+  const fromId = String(payload.from || '');
+  const toId = String(payload.to || '');
+  if (!fromId || fromId === myId || toId !== myId) return;
+
+  const existingTimer = dmState.typingClearTimers.get(fromId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    dmState.typingClearTimers.delete(fromId);
+  }
+
+  if (payload.typing) {
+    dmState.typingUntilByPartner.set(fromId, Date.now() + 3600);
+    const tid = setTimeout(() => {
+      dmState.typingUntilByPartner.delete(fromId);
+      dmState.typingClearTimers.delete(fromId);
+      renderDmTypingUi();
+    }, 3700);
+    dmState.typingClearTimers.set(fromId, tid);
+  } else {
+    dmState.typingUntilByPartner.delete(fromId);
+  }
+
+  renderDmTypingUi();
+}
+
+function handleIncomingDmRead(payload) {
+  if (!payload || !currentUser?.id) return;
+  const myId = String(currentUser.id);
+  const fromId = String(payload.from || '');
+  const toId = String(payload.to || '');
+  const seenTs = Number(payload.seenTs || 0);
+  if (!fromId || fromId === myId || toId !== myId || seenTs <= 0) return;
+
+  const prev = dmState.partnerReadTsByPartner.get(fromId) || 0;
+  if (seenTs > prev) {
+    dmState.partnerReadTsByPartner.set(fromId, seenTs);
+  }
+  const dmModalOpen = !$('#dmModal')?.classList.contains('hidden');
+  if (dmModalOpen && dmState.activePartnerId === fromId) {
+    renderDmThread();
+  }
+}
+
+async function syncDmReadReceipt(partnerId) {
+  if (!sb || !currentUser?.id || !partnerId) return;
+  const myId = String(currentUser.id);
+  const pid = String(partnerId);
+  const msgs = dmState.messagesByPartner.get(pid) || [];
+  let latestTheirMsgTs = 0;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].from === pid) {
+      latestTheirMsgTs = Math.max(latestTheirMsgTs, Number(msgs[i].ts) || 0);
+      break;
+    }
+  }
+  if (!latestTheirMsgTs) return;
+
+  const alreadySentTs = getDmSentReadWatermark(pid);
+  if (latestTheirMsgTs <= alreadySentTs) return;
+
+  setDmSentReadWatermark(pid, latestTheirMsgTs);
+
+  if (realtimeChannel) {
+    try {
+      realtimeChannel.send({
+        type: 'broadcast',
+        event: 'dm_read',
+        payload: { from: myId, to: pid, seenTs: latestTheirMsgTs }
+      });
+    } catch (e) {}
+  }
+
+  try {
+    await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: '__DM_READ__:' + JSON.stringify({ to: pid, seenTs: latestTheirMsgTs, ts: Date.now() }),
+      status: 'denied'
+    });
+  } catch (e) {}
 }
 
 function updateDmUnreadBadge() {
@@ -9502,8 +9971,49 @@ function updateDmUnreadBadge() {
   }
 }
 
-function setDmCoinPickerOpen(open) {
+function setDmAttachTab(tab = 'coins') {
+  dmState.attachTab = tab === 'gifs' ? 'gifs' : 'coins';
+  const coinsTab = $('#dmAttachCoinsTab');
+  const gifsTab = $('#dmAttachGifsTab');
+  const coinPane = $('#dmCoinPane');
+  const gifPane = $('#dmGifPane');
+  const titleEl = $('#dmAttachPickerTitle');
+  const subEl = $('#dmAttachPickerSubtitle');
+
+  const isGif = dmState.attachTab === 'gifs';
+  if (coinsTab) {
+    coinsTab.classList.toggle('active', !isGif);
+    coinsTab.setAttribute('aria-selected', !isGif ? 'true' : 'false');
+  }
+  if (gifsTab) {
+    gifsTab.classList.toggle('active', isGif);
+    gifsTab.setAttribute('aria-selected', isGif ? 'true' : 'false');
+  }
+  if (coinPane) coinPane.classList.toggle('hidden', isGif);
+  if (gifPane) gifPane.classList.toggle('hidden', !isGif);
+  if (titleEl) titleEl.textContent = isGif ? 'Send a GIF' : 'Share a Coin';
+  if (subEl) {
+    subEl.textContent = isGif
+      ? 'Search GIPHY GIFs or paste a giphy.com link'
+      : 'Pick any currency to send with a Check It card';
+  }
+
+  if (dmState.coinPickerOpen) {
+    if (isGif) {
+      loadDmGifPicker();
+      $('#dmGifSearchInput')?.focus();
+    } else {
+      renderDmCoinPicker();
+      $('#dmCoinSearchInput')?.focus();
+    }
+  }
+}
+
+function setDmCoinPickerOpen(open, tab = null) {
   dmState.coinPickerOpen = Boolean(open);
+  if (tab === 'coins' || tab === 'gifs') {
+    dmState.attachTab = tab;
+  }
   const picker = $('#dmCoinPicker');
   const btn = $('#dmAttachCoinBtn');
   if (picker) picker.classList.toggle('hidden', !dmState.coinPickerOpen);
@@ -9512,22 +10022,31 @@ function setDmCoinPickerOpen(open) {
     btn.setAttribute('aria-expanded', dmState.coinPickerOpen ? 'true' : 'false');
   }
   if (dmState.coinPickerOpen) {
-    renderDmCoinPicker();
-    $('#dmCoinSearchInput')?.focus();
+    setDmAttachTab(dmState.attachTab);
   }
 }
 
 function resetDmStateOnLogout() {
+  stopOutgoingDmTyping();
+  dmState.typingClearTimers.forEach(tid => clearTimeout(tid));
+  dmState.typingClearTimers.clear();
+  dmState.typingUntilByPartner.clear();
   dmState.messagesByPartner.clear();
+  dmState.partnerReadTsByPartner.clear();
+  dmState.lastSentReadByPartner.clear();
   dmState.activePartnerId = null;
   dmState.searchQuery = '';
   dmState.totalUnread = 0;
   dmState.lastUnreadNotifiedCount = 0;
   dmState.coinPickerOpen = false;
+  dmState.attachTab = 'coins';
   dmState.coinSearchQuery = '';
+  dmState.gifSearchQuery = '';
   dmState.sendingCoin = false;
+  dmState.sendingGif = false;
   if ($('#dmUserSearchInput')) $('#dmUserSearchInput').value = '';
   if ($('#dmCoinSearchInput')) $('#dmCoinSearchInput').value = '';
+  if ($('#dmGifSearchInput')) $('#dmGifSearchInput').value = '';
   setDmCoinPickerOpen(false);
   updateDmUnreadBadge();
 }
@@ -9553,9 +10072,9 @@ async function refreshDirectMessages(fromRealtime = false) {
     sb.from('profiles').select('id, username, avatar_url, is_premium').order('username', { ascending: true }).limit(500),
     sb.from('premium_requests')
       .select('id, user_id, reason, created_at')
-      .like('reason', '__DM_MSG__:%')
+      .like('reason', '__DM_%')
       .order('created_at', { ascending: true })
-      .limit(1500)
+      .limit(2000)
   ]);
 
   const profMap = new Map();
@@ -9568,14 +10087,32 @@ async function refreshDirectMessages(fromRealtime = false) {
   dmState.profilesMap = profMap;
 
   const grouped = new Map();
+  const partnerReadMap = new Map(dmState.partnerReadTsByPartner);
+
   (dmRes?.data || []).forEach(r => {
     const raw = String(r.reason || '');
+    if (raw.startsWith('__DM_READ__:')) {
+      try {
+        const p = JSON.parse(raw.slice('__DM_READ__:'.length));
+        const readerId = String(r.user_id || '');
+        const msgSenderId = String(p?.to || '');
+        const seenTs = Number(p?.seenTs || 0);
+        if (readerId && readerId !== myId && msgSenderId === myId && seenTs > 0) {
+          partnerReadMap.set(readerId, Math.max(partnerReadMap.get(readerId) || 0, seenTs));
+        }
+      } catch (e) {}
+      return;
+    }
+
     if (!raw.startsWith('__DM_MSG__:')) return;
     try {
       const p = JSON.parse(raw.slice('__DM_MSG__:'.length));
       const senderId = String(r.user_id || '');
       const toId = String(p?.to || '');
-      const msgType = p?.type === 'coin' && p?.coinId ? 'coin' : 'text';
+      const cleanGifUrl = p?.type === 'gif' ? sanitizeGifUrl(p?.gifUrl) : '';
+      const msgType = p?.type === 'coin' && p?.coinId
+        ? 'coin'
+        : (cleanGifUrl ? 'gif' : 'text');
       const text = String(p?.text || '').trim();
       if (!senderId || !toId) return;
       if (msgType === 'text' && !text) return;
@@ -9589,12 +10126,14 @@ async function refreshDirectMessages(fromRealtime = false) {
         from: senderId,
         to: toId,
         type: msgType,
-        text: text || (msgType === 'coin' ? `Shared $${p.coinTicker || 'COIN'}` : ''),
+        text: text || (msgType === 'coin' ? `Shared $${p.coinTicker || 'COIN'}` : (msgType === 'gif' ? 'Sent a GIF' : '')),
         coinId: p.coinId ? String(p.coinId) : null,
         coinName: p.coinName ? String(p.coinName) : '',
         coinTicker: p.coinTicker ? String(p.coinTicker) : '',
         coinDesc: p.coinDesc ? String(p.coinDesc) : '',
         coinImg: p.coinImg ? String(p.coinImg) : '',
+        gifUrl: cleanGifUrl,
+        gifTitle: p.gifTitle ? String(p.gifTitle) : 'GIF',
         ts
       });
     } catch (e) {}
@@ -9602,12 +10141,14 @@ async function refreshDirectMessages(fromRealtime = false) {
 
   grouped.forEach(list => list.sort((a, b) => a.ts - b.ts));
   dmState.messagesByPartner = grouped;
+  dmState.partnerReadTsByPartner = partnerReadMap;
 
   const dmModalOpen = !$('#dmModal')?.classList.contains('hidden');
   if (dmModalOpen && dmState.activePartnerId) {
     const thread = dmState.messagesByPartner.get(dmState.activePartnerId) || [];
     const latest = thread.length ? thread[thread.length - 1].ts : Date.now();
     markDmThreadSeen(dmState.activePartnerId, latest);
+    syncDmReadReceipt(dmState.activePartnerId);
   }
 
   const prevUnread = dmState.totalUnread;
@@ -9619,7 +10160,10 @@ async function refreshDirectMessages(fromRealtime = false) {
 
   if (dmModalOpen) {
     renderDmSidebar();
-    if (dmState.activePartnerId) renderDmThread();
+    if (dmState.activePartnerId) {
+      renderDmThread();
+      renderDmTypingUi();
+    }
   }
 }
 
@@ -9655,7 +10199,10 @@ function renderDmSidebar() {
       const pid = String(p.id);
       const msgs = dmState.messagesByPartner.get(pid) || [];
       const last = msgs[msgs.length - 1];
-      const preview = last ? (last.from === myId ? 'You: ' : '') + last.text : 'Click to start a DM';
+      const typingNow = isDmPartnerTyping(pid);
+      const preview = typingNow
+        ? 'typing...'
+        : (last ? (last.from === myId ? 'You: ' : '') + last.text : 'Click to start a DM');
       const activeCls = dmState.activePartnerId === pid ? 'active' : '';
       return `
         <button type="button" class="dm-thread-item ${activeCls}" data-dm-partner="${escapeHtml(pid)}">
@@ -9664,7 +10211,7 @@ function renderDmSidebar() {
             <div class="dm-thread-top">
               <span class="dm-thread-name">${escapeHtml(p.username || 'Trader')}${tierBadgeHtml(p)}</span>
             </div>
-            <div class="dm-thread-preview">${escapeHtml(preview)}</div>
+            <div class="dm-thread-preview ${typingNow ? 'is-typing' : ''}">${escapeHtml(preview)}</div>
           </div>
         </button>`;
     }).join('');
@@ -9686,7 +10233,10 @@ function renderDmSidebar() {
     rowsHtml = threads.map(th => {
       const p = getDmPartnerProfile(th.partnerId);
       const activeCls = dmState.activePartnerId === th.partnerId ? 'active' : '';
-      const preview = (th.last.from === myId ? 'You: ' : '') + th.last.text;
+      const typingNow = isDmPartnerTyping(th.partnerId);
+      const preview = typingNow
+        ? 'typing...'
+        : ((th.last.from === myId ? 'You: ' : '') + th.last.text);
       return `
         <button type="button" class="dm-thread-item ${activeCls}" data-dm-partner="${escapeHtml(th.partnerId)}">
           <div class="avatar" style="width:36px;height:36px;font-size:14px;flex-shrink:0;">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
@@ -9695,7 +10245,7 @@ function renderDmSidebar() {
               <span class="dm-thread-name">${escapeHtml(p.username || 'Trader')}${tierBadgeHtml(p)}</span>
               ${th.unread > 0 ? `<span class="dm-item-unread">${th.unread}</span>` : `<span class="tiny muted">${escapeHtml(formatDmTime(th.last.ts))}</span>`}
             </div>
-            <div class="dm-thread-preview">${escapeHtml(preview)}</div>
+            <div class="dm-thread-preview ${typingNow ? 'is-typing' : ''}">${escapeHtml(preview)}</div>
           </div>
         </button>`;
     }).join('');
@@ -9709,15 +10259,31 @@ function renderDmSidebar() {
 
 function selectDmPartner(partnerId) {
   if (!partnerId) return;
-  dmState.activePartnerId = String(partnerId);
+  const nextId = String(partnerId);
+  if (dmState.activePartnerId && dmState.activePartnerId !== nextId) {
+    stopOutgoingDmTyping(dmState.activePartnerId);
+  }
+  dmState.activePartnerId = nextId;
   setDmCoinPickerOpen(false);
   const msgs = dmState.messagesByPartner.get(dmState.activePartnerId) || [];
   const latestTs = msgs.length ? msgs[msgs.length - 1].ts : Date.now();
   markDmThreadSeen(dmState.activePartnerId, latestTs);
+  syncDmReadReceipt(dmState.activePartnerId);
   updateDmMobilePane();
   renderDmSidebar();
   renderDmThread();
+  renderDmTypingUi();
   $('#dmMessageInput')?.focus();
+}
+
+function loadDmGifPicker() {
+  return renderGiphyPickerGrid({
+    gridEl: $('#dmGifGrid'),
+    statusEl: $('#dmGifStatus'),
+    query: dmState.gifSearchQuery,
+    emptyText: 'No GIFs matched your search.',
+    onSelect: (gif) => sendDmGif(gif)
+  });
 }
 
 function renderDmCoinPicker() {
@@ -9768,6 +10334,7 @@ async function sendDmCoinCard(coinId) {
     toast('Coin could not be found.');
     return;
   }
+  stopOutgoingDmTyping();
   dmState.sendingCoin = true;
   const safeDesc = String(coin.description || '').trim().slice(0, 180);
   const compactImg = coin.image_url && String(coin.image_url).length <= 400 ? String(coin.image_url) : '';
@@ -9818,11 +10385,62 @@ async function sendDmCoinCard(coinId) {
   renderDmThread();
 }
 
+async function sendDmGif(gifObj) {
+  if (!currentUser?.id || !sb || !dmState.activePartnerId || dmState.sendingGif) return;
+  const cleanUrl = sanitizeGifUrl(gifObj?.gifUrl);
+  if (!cleanUrl) {
+    toast('Invalid GIF URL.');
+    return;
+  }
+  stopOutgoingDmTyping();
+  dmState.sendingGif = true;
+  const msgObj = {
+    id: 'dm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    to: String(dmState.activePartnerId),
+    type: 'gif',
+    gifUrl: cleanUrl,
+    gifTitle: String(gifObj?.title || 'GIF').slice(0, 80),
+    text: 'Sent a GIF',
+    ts: Date.now()
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__DM_MSG__:' + JSON.stringify(msgObj),
+    status: 'denied'
+  });
+  dmState.sendingGif = false;
+
+  if (error) {
+    toast('Could not send GIF: ' + error.message);
+    return;
+  }
+
+  setDmCoinPickerOpen(false);
+  const pid = String(dmState.activePartnerId);
+  if (!dmState.messagesByPartner.has(pid)) dmState.messagesByPartner.set(pid, []);
+  dmState.messagesByPartner.get(pid).push({
+    id: msgObj.id,
+    from: String(currentUser.id),
+    to: pid,
+    type: 'gif',
+    text: msgObj.text,
+    gifUrl: msgObj.gifUrl,
+    gifTitle: msgObj.gifTitle,
+    ts: msgObj.ts
+  });
+  markDmThreadSeen(pid, msgObj.ts);
+  playSound('commenting');
+  renderDmSidebar();
+  renderDmThread();
+}
+
 function renderDmThread() {
   const headerEl = $('#dmChatHeader');
   const emptyEl = $('#dmEmptyState');
   const listEl = $('#dmMessagesList');
   const formEl = $('#dmSendForm');
+  const typingRow = $('#dmTypingRow');
   if (!headerEl || !emptyEl || !listEl || !formEl) return;
 
   updateDmMobilePane();
@@ -9831,12 +10449,17 @@ function renderDmThread() {
     headerEl.classList.add('hidden');
     listEl.classList.add('hidden');
     formEl.classList.add('hidden');
+    if (typingRow) {
+      typingRow.classList.add('hidden');
+      typingRow.innerHTML = '';
+    }
     setDmCoinPickerOpen(false);
     emptyEl.classList.remove('hidden');
     return;
   }
 
   const p = getDmPartnerProfile(dmState.activePartnerId);
+  const partnerTyping = isDmPartnerTyping(dmState.activePartnerId);
   headerEl.classList.remove('hidden');
   listEl.classList.remove('hidden');
   formEl.classList.remove('hidden');
@@ -9849,11 +10472,12 @@ function renderDmThread() {
         <div class="avatar" style="width:34px;height:34px;font-size:13px;">${p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}">` : escapeHtml((p.username || '?')[0].toUpperCase())}</div>
         <div>
           <strong>${escapeHtml(p.username || 'Trader')}${tierBadgeHtml(p)}</strong>
-          <div class="tiny muted">Private DM · Click to view profile</div>
+          <div id="dmChatHeaderStatus" class="tiny muted ${partnerTyping ? 'is-typing' : ''}">${partnerTyping ? 'typing...' : 'Private DM · Click to view profile'}</div>
         </div>
       </button>
     </div>`;
   $('#dmBackToListBtn')?.addEventListener('click', () => {
+    stopOutgoingDmTyping();
     dmState.activePartnerId = null;
     setDmCoinPickerOpen(false);
     renderDmSidebar();
@@ -9866,11 +10490,26 @@ function renderDmThread() {
   const myId = String(currentUser.id);
   const msgs = dmState.messagesByPartner.get(dmState.activePartnerId) || [];
   if (!msgs.length) {
-    listEl.innerHTML = `<div class="muted tiny" style="margin:auto;text-align:center;">Say hello or tap <strong>＋</strong> to share a coin with <strong>${escapeHtml(p.username || 'Trader')}</strong>!</div>`;
+    listEl.innerHTML = `<div class="muted tiny" style="margin:auto;text-align:center;">Say hello or tap <strong>＋</strong> to send a GIF or share a coin with <strong>${escapeHtml(p.username || 'Trader')}</strong>!</div>`;
   } else {
     const coinById = new Map((coins || []).map(c => [String(c.id), c]));
-    listEl.innerHTML = msgs.map(m => {
+    const partnerReadTs = dmState.partnerReadTsByPartner.get(String(dmState.activePartnerId)) || 0;
+    let lastMineIdx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].from === myId) {
+        lastMineIdx = i;
+        break;
+      }
+    }
+
+    listEl.innerHTML = msgs.map((m, idx) => {
       const mine = m.from === myId;
+      const isRead = mine && partnerReadTs > 0 && Number(m.ts) <= partnerReadTs;
+      const showReceipt = mine && idx === lastMineIdx;
+      const metaFooter = showReceipt
+        ? `<span class="dm-msg-meta-row">${escapeHtml(formatDmTime(m.ts))} · <span class="dm-read-badge ${isRead ? 'is-read' : ''}">${isRead ? '✓✓ READ' : '✓ Sent'}</span></span>`
+        : `<span class="dm-msg-time">${escapeHtml(formatDmTime(m.ts))}</span>`;
+
       if (m.type === 'coin' && m.coinId) {
         const liveCoin = coinById.get(String(m.coinId));
         const title = liveCoin?.name || m.coinName || 'Currency';
@@ -9894,13 +10533,24 @@ function renderDmThread() {
               <p class="dm-coin-card-desc">${escapeHtml(desc)}</p>
               <button type="button" class="dm-check-it-btn" data-dm-check-coin="${escapeHtml(m.coinId)}">Check It</button>
             </div>
-            <span class="dm-msg-time">${escapeHtml(formatDmTime(m.ts))}</span>
+            ${metaFooter}
           </div>`;
       }
+
+      if (m.type === 'gif' && m.gifUrl) {
+        return `
+          <div class="dm-msg-row dm-msg-gif ${mine ? 'mine' : 'theirs'}">
+            <div class="dm-gif-bubble">
+              <img src="${escapeHtml(m.gifUrl)}" alt="${escapeHtml(m.gifTitle || 'GIF')}" loading="lazy">
+            </div>
+            ${metaFooter}
+          </div>`;
+      }
+
       return `
         <div class="dm-msg-row ${mine ? 'mine' : 'theirs'}">
           <div class="dm-msg-bubble">${escapeHtml(m.text)}</div>
-          <span class="dm-msg-time">${escapeHtml(formatDmTime(m.ts))}</span>
+          ${metaFooter}
         </div>`;
     }).join('');
     $$('#dmMessagesList [data-dm-check-coin]').forEach(btn => {
@@ -9939,6 +10589,7 @@ async function openDmModalWithUser(targetProfile = null) {
   } else {
     renderDmSidebar();
     renderDmThread();
+    renderDmTypingUi();
   }
 }
 
@@ -9956,9 +10607,39 @@ $('#dmAttachCoinBtn')?.addEventListener('click', async () => {
   setDmCoinPickerOpen(!dmState.coinPickerOpen);
 });
 $('#dmCloseCoinPickerBtn')?.addEventListener('click', () => setDmCoinPickerOpen(false));
+$('#dmAttachCoinsTab')?.addEventListener('click', () => setDmAttachTab('coins'));
+$('#dmAttachGifsTab')?.addEventListener('click', () => setDmAttachTab('gifs'));
 $('#dmCoinSearchInput')?.addEventListener('input', e => {
   dmState.coinSearchQuery = e.target.value || '';
   renderDmCoinPicker();
+});
+let dmGifSearchTimer = null;
+$('#dmGifSearchInput')?.addEventListener('input', e => {
+  dmState.gifSearchQuery = e.target.value || '';
+  clearTimeout(dmGifSearchTimer);
+  const delay = extractDirectGiphyUrl(dmState.gifSearchQuery) ? 0 : 280;
+  dmGifSearchTimer = setTimeout(() => {
+    if (dmState.coinPickerOpen && dmState.attachTab === 'gifs') loadDmGifPicker();
+  }, delay);
+});
+$('#dmMessageInput')?.addEventListener('input', e => {
+  if (!currentUser?.id || !dmState.activePartnerId) return;
+  const val = (e.target.value || '').trim();
+  const pid = String(dmState.activePartnerId);
+  if (!val) {
+    stopOutgoingDmTyping(pid);
+    return;
+  }
+  const now = Date.now();
+  if (now - dmState.lastTypingSentAt >= 1200 || dmState.lastTypingTargetId !== pid) {
+    dmState.lastTypingSentAt = now;
+    dmState.lastTypingTargetId = pid;
+    emitDmTyping(true, pid);
+  }
+  clearTimeout(dmState.typingStopTimer);
+  dmState.typingStopTimer = setTimeout(() => {
+    stopOutgoingDmTyping(pid);
+  }, 2800);
 });
 $('#dmSendForm')?.addEventListener('submit', async e => {
   e.preventDefault();
@@ -9968,6 +10649,7 @@ $('#dmSendForm')?.addEventListener('submit', async e => {
   const text = (input?.value || '').trim();
   if (!text) return;
 
+  stopOutgoingDmTyping();
   if (sendBtn) sendBtn.disabled = true;
   const msgObj = {
     id: 'dm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
@@ -10052,6 +10734,10 @@ window.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   if ($('.sidebar')?.classList.contains('mobile-open')) {
     closeMobileSidebar();
+    return;
+  }
+  if (commentGifPickerOpen) {
+    setCommentGifPickerOpen(false);
     return;
   }
   if (dmState.coinPickerOpen) {

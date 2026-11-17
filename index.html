@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=47">
+  <link rel="stylesheet" href="styles.css?v=48">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -38,7 +38,7 @@
           <button type="button" class="zoom-btn" id="cancelVerifyBtn">Back</button>
         </div>
       </div>
-      <p class="tiny muted">GRIND v0.6</p>
+      <p class="tiny muted">GRIND v0.5</p>
       <p id="authMessage" class="form-message" aria-live="polite"></p>
     </section>
   </main>
@@ -70,7 +70,7 @@
           </div>
         </div>
         <button id="logoutBtn" class="logout-btn">↗ Log out</button>
-        <div class="version">GRIND v0.6</div>
+        <div class="version">GRIND v0.5</div>
       </div>
     </aside>
     <div id="mobileSidebarBackdrop" class="mobile-sidebar-backdrop hidden" aria-hidden="true"></div>
@@ -964,19 +964,34 @@
             <p class="muted tiny">Search any trader on the left to send a direct message.</p>
           </div>
           <div id="dmMessagesList" class="dm-messages-list hidden"></div>
-          <div id="dmCoinPicker" class="dm-coin-picker hidden" role="region" aria-label="Share a coin">
+          <div id="dmTypingRow" class="dm-typing-row hidden" aria-live="polite"></div>
+          <div id="dmCoinPicker" class="dm-coin-picker hidden" role="region" aria-label="Attach coin or GIF">
             <div class="dm-coin-picker-head">
               <div>
-                <strong>Share a Coin</strong>
-                <span class="muted tiny">Pick any currency to send with a Check It card</span>
+                <strong id="dmAttachPickerTitle">Share a Coin</strong>
+                <span class="muted tiny" id="dmAttachPickerSubtitle">Pick any currency to send with a Check It card</span>
               </div>
-              <button type="button" id="dmCloseCoinPickerBtn" class="zoom-btn" aria-label="Close coin picker">✕</button>
+              <div class="dm-attach-head-right">
+                <div class="dm-attach-tabs" id="dmAttachTabs" role="tablist" aria-label="Attachment type">
+                  <button type="button" class="dm-attach-tab active" id="dmAttachCoinsTab" data-dm-attach-tab="coins" role="tab" aria-selected="true">Coins</button>
+                  <button type="button" class="dm-attach-tab" id="dmAttachGifsTab" data-dm-attach-tab="gifs" role="tab" aria-selected="false">GIFs</button>
+                </div>
+                <button type="button" id="dmCloseCoinPickerBtn" class="zoom-btn" aria-label="Close picker">✕</button>
+              </div>
             </div>
-            <input id="dmCoinSearchInput" class="feed-search dm-coin-search" type="search" maxlength="40" placeholder="Search coin name or $ticker...">
-            <div id="dmCoinPickerList" class="dm-coin-picker-list"></div>
+            <div id="dmCoinPane" class="dm-attach-pane">
+              <input id="dmCoinSearchInput" class="feed-search dm-coin-search" type="search" maxlength="40" placeholder="Search coin name or $ticker...">
+              <div id="dmCoinPickerList" class="dm-coin-picker-list"></div>
+            </div>
+            <div id="dmGifPane" class="dm-attach-pane hidden">
+              <input id="dmGifSearchInput" class="feed-search dm-coin-search" type="search" maxlength="120" placeholder="Search GIPHY GIFs or paste a giphy.com link...">
+              <div id="dmGifStatus" class="dm-gif-status hidden"></div>
+              <div id="dmGifGrid" class="dm-gif-grid"></div>
+              <div class="dm-giphy-attr">Powered by GIPHY</div>
+            </div>
           </div>
           <form id="dmSendForm" class="dm-composer hidden">
-            <button type="button" id="dmAttachCoinBtn" class="dm-plus-btn" title="Share a coin" aria-label="Share a coin" aria-expanded="false">＋</button>
+            <button type="button" id="dmAttachCoinBtn" class="dm-plus-btn" title="Attach GIF or Coin" aria-label="Attach GIF or Coin" aria-expanded="false">＋</button>
             <input id="dmMessageInput" type="text" maxlength="500" autocomplete="off" placeholder="Write a private message...">
             <button type="submit" id="dmSendBtn" class="primary-btn">Send</button>
           </form>
@@ -1032,6 +1047,6 @@
   <div id="rewardBurstLayer" class="reward-burst-layer" aria-hidden="true"></div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=48"></script>
+  <script src="app.js?v=49"></script>
 </body>
 </html>
