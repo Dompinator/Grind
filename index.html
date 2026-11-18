@@ -1624,20 +1624,30 @@
       </div>
 
       <div id="tbStepPrice" class="hidden">
-        <div class="tb-step-label">2. Price (Prize Stake)</div>
+        <div class="tb-step-label">2. Price Mode</div>
         <div id="tbBalancesSummary" class="tb-balances-box"></div>
-        <div class="tb-chips-grid" id="tbPricePresets" style="margin-top:10px;">
-          <button type="button" class="tb-preset-chip" data-tb-stake="10">$10</button>
-          <button type="button" class="tb-preset-chip" data-tb-stake="25">$25</button>
-          <button type="button" class="tb-preset-chip" data-tb-stake="50">$50</button>
-          <button type="button" class="tb-preset-chip" data-tb-stake="100">$100</button>
-          <button type="button" class="tb-preset-chip" data-tb-stake="500">$500</button>
-          <button type="button" class="tb-preset-chip" data-tb-stake="max">Max</button>
+        <div class="tb-mode-tabs" id="tbPriceModeTabs" style="margin-top:10px;">
+          <button type="button" class="tb-mode-tab active" data-tb-mode="fixed">💵 Set Stake</button>
+          <button type="button" class="tb-mode-tab" data-tb-mode="classic">🔥 Classic Mode (½ Gains)</button>
         </div>
-        <label style="margin-top:10px;">Battle Stake Amount (USD)
-          <input id="tbStakeInput" type="number" min="1" step="0.01" placeholder="50.00">
-        </label>
-        <p class="muted tiny" style="margin:6px 0 0;">Both players must have this amount. If either player's money drops below this bar during the battle, the prize automatically shrinks to that minimum.</p>
+        <div id="tbFixedStakePanel">
+          <div class="tb-chips-grid" id="tbPricePresets" style="margin-top:10px;">
+            <button type="button" class="tb-preset-chip" data-tb-stake="10">$10</button>
+            <button type="button" class="tb-preset-chip" data-tb-stake="25">$25</button>
+            <button type="button" class="tb-preset-chip" data-tb-stake="50">$50</button>
+            <button type="button" class="tb-preset-chip" data-tb-stake="100">$100</button>
+            <button type="button" class="tb-preset-chip" data-tb-stake="500">$500</button>
+            <button type="button" class="tb-preset-chip" data-tb-stake="max">Max</button>
+          </div>
+          <label style="margin-top:10px;">Battle Stake Amount (USD)
+            <input id="tbStakeInput" type="number" min="1" step="0.01" placeholder="50.00">
+          </label>
+          <p class="muted tiny" style="margin:6px 0 0;">Both players must have this amount. If either player's money drops below this bar during the battle, the prize automatically shrinks to that minimum.</p>
+        </div>
+        <div id="tbClassicModePanel" class="tb-classic-box hidden">
+          <div class="tb-classic-title">🔥 Classic Mode — No Fixed Stake</div>
+          <p class="muted tiny" style="margin:4px 0 0;">All money gained during the battle is divided by <strong>2</strong> in real time and becomes the live <strong>Prize Money</strong> pool. Watch the counter tick with <strong>+</strong> and <strong>-</strong> icons live in the battle menu as both traders gain or lose money!</p>
+        </div>
         <p id="tbPriceMsg" class="form-message"></p>
         <div style="display:flex;justify-content:space-between;gap:10px;margin-top:14px;">
           <button type="button" class="zoom-btn" id="tbBackToLengthBtn" style="padding:10px 16px;">← Length</button>

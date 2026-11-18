@@ -11686,7 +11686,7 @@ function renderUserNotifsList() {
       tagCls = 'battle';
       tagText = 'Trader Battle Request';
       headHtml = `<span class="muted">Trader Battle Request From -</span> <strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}${tierBadgeHtml(it.authorProfile)}</strong>`;
-      bodyHtml = `<div class="report-details-box">Length: <strong>${escapeHtml(it.durationLabel)}</strong> · Prize Stake: <strong style="color:#fde68a;">${money(it.stake)}</strong></div>`;
+      bodyHtml = `<div class="report-details-box">Length: <strong>${escapeHtml(it.durationLabel)}</strong> · Prize: <strong style="color:#fde68a;">${escapeHtml(it.stakeLabel || money(it.stake))}</strong></div>`;
       actionHtml = it.isPending
         ? `<div class="request-actions">
             <button type="button" class="primary-btn" data-tb-accept="${escapeHtml(it.battleId)}" style="padding:6px 14px;font-size:12px;">⚔️ Yes</button>
@@ -12672,6 +12672,7 @@ function startRealtime() {
       coinsRealtimeRefreshTimer = setTimeout(() => {
         loadCoins();
         if (currentPage === 'live') loadLiveFeed();
+        if (typeof refreshOpenTraderBattleModalLive === 'function') refreshOpenTraderBattleModalLive();
       }, 2800);
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
@@ -12682,7 +12683,8 @@ function startRealtime() {
         if (selectedCoin && currentPage === 'coin') renderCoinDetail();
         if (currentPage === 'live') loadLiveFeed();
         if (currentPage === 'global' && lbMode === 'weekly' && Date.now() > lbAnimatingUntil) renderLeaderboard();
-      }, 3000);
+        if (typeof refreshOpenTraderBattleModalLive === 'function') refreshOpenTraderBattleModalLive();
+      }, 2200);
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, payload => {
       const changedReason = String(payload?.new?.reason || payload?.old?.reason || '');
@@ -17646,17 +17648,35 @@ const tbState = {
   lastSyncAt: 0,
   syncPromise: null,
   tickTimer: null,
+  liveSyncTimer: null,
+  liveRefreshInFlight: false,
   challengeTarget: null,
   selectedMins: 120,
+  selectedMode: 'fixed',
   maxStakeAllowed: 0,
   targetFreshNw: 0,
   myFreshNw: 0,
   activeInfoBattleId: null,
+  lastSnapshotByBattle: new Map(),
   settlingIds: new Set(),
   payingIds: new Set(),
   lsCacheKey: 'grind_tb_cache_v1',
   lsResultShownPrefix: 'grind_tb_popup_shown_v1_'
 };
+
+function computeClassicBattlePrize(cScore, oScore, cEndNw, oEndNw) {
+  const totalPositiveGains = Math.max(0, round2(cScore)) + Math.max(0, round2(oScore));
+  const halfPool = Math.max(0, round2(totalPositiveGains / 2));
+  const diff = round2(cScore - oScore);
+  if (Math.abs(diff) < 0.01) return halfPool;
+  const trailerNw = diff > 0 ? oEndNw : cEndNw;
+  return Math.max(0, floor2(Math.min(halfPool, Math.max(0, round2(trailerNw)))));
+}
+
+function formatTbStakeLabel(b) {
+  if (b?.mode === 'classic') return '🔥 Classic Mode (½ Gains)';
+  return money(b?.initialStake || 0);
+}
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
@@ -17738,6 +17758,10 @@ function resetTraderBattleStateOnLogout() {
     clearInterval(tbState.tickTimer);
     tbState.tickTimer = null;
   }
+  if (tbState.liveSyncTimer) {
+    clearInterval(tbState.liveSyncTimer);
+    tbState.liveSyncTimer = null;
+  }
   $('#topBattlePill')?.classList.add('hidden');
   $('#traderBattleModal')?.classList.add('hidden');
   $('#traderBattleInfoModal')?.classList.add('hidden');
@@ -17763,8 +17787,10 @@ function rebuildTraderBattlesFromRows() {
           id: String(p.id),
           challengerId: String(p.challengerId),
           opponentId: String(p.opponentId),
-          initialStake: round2(p.stake),
-          minStake: round2(p.stake),
+          mode: p.mode === 'classic' ? 'classic' : 'fixed',
+          initialStake: p.mode === 'classic' ? 0 : round2(p.stake),
+          minStake: p.mode === 'classic' ? 0 : round2(p.stake),
+          livePrize: 0,
           durationMins: Math.max(1, Number(p.durationMins) || 120),
           createdAt: ts,
           startedAt: 0,
@@ -17950,7 +17976,10 @@ function updateTraderBattleHud() {
     } else if (primary.status === 'active') {
       const msLeft = Math.max(0, primary.endsAt - Date.now());
       pill.classList.remove('hidden', 'is-pending');
-      pill.textContent = `⚔️ ${formatTbCountdown(msLeft)} · ${money(primary.minStake)}`;
+      const prizeTxt = primary.mode === 'classic'
+        ? `Classic ${money(primary.livePrize || 0)}`
+        : money(primary.minStake);
+      pill.textContent = `⚔️ ${formatTbCountdown(msLeft)} · ${prizeTxt}`;
       pill.onclick = () => openTraderBattleInfoModal(primary.id);
     } else if (primary.opponentId === uid) {
       const opp = getProfileSafe(primary.challengerId);
@@ -17961,7 +17990,7 @@ function updateTraderBattleHud() {
     } else {
       pill.classList.remove('hidden');
       pill.classList.add('is-pending');
-      pill.textContent = `⚔️ Pending (${money(primary.initialStake)})`;
+      pill.textContent = `⚔️ Pending (${primary.mode === 'classic' ? 'Classic' : money(primary.initialStake)})`;
       pill.onclick = () => openTraderBattleInfoModal(primary.id);
     }
   }
@@ -18012,6 +18041,7 @@ async function openTraderBattleChallengeModal(opponentProfile) {
 
   tbState.challengeTarget = opponentProfile;
   tbState.selectedMins = 120; // Default 2h
+  tbState.selectedMode = 'fixed';
 
   const modal = $('#traderBattleModal');
   if (!modal) return;
@@ -18021,12 +18051,36 @@ async function openTraderBattleChallengeModal(opponentProfile) {
   if ($('#tbLengthMsg')) $('#tbLengthMsg').textContent = '';
   if ($('#tbPriceMsg')) $('#tbPriceMsg').textContent = '';
   if ($('#tbStakeInput')) $('#tbStakeInput').value = '';
+  setTbPrizeMode('fixed');
 
   $$('#tbLengthPresets .tb-preset-chip').forEach(btn => {
     btn.classList.toggle('active', Number(btn.dataset.tbMins) === tbState.selectedMins);
   });
 
   modal.classList.remove('hidden');
+}
+
+function setTbPrizeMode(mode) {
+  tbState.selectedMode = mode === 'classic' ? 'classic' : 'fixed';
+  $$('#tbPriceModeTabs .tb-mode-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tbMode === tbState.selectedMode);
+  });
+  $('#tbFixedStakePanel')?.classList.toggle('hidden', tbState.selectedMode === 'classic');
+  $('#tbClassicModePanel')?.classList.toggle('hidden', tbState.selectedMode !== 'classic');
+
+  const sendBtn = $('#tbSendChallengeBtn');
+  const priceMsg = $('#tbPriceMsg');
+  if (tbState.selectedMode === 'classic') {
+    if (sendBtn) sendBtn.disabled = false;
+    if (priceMsg) priceMsg.textContent = '';
+  } else {
+    if (sendBtn) sendBtn.disabled = tbState.maxStakeAllowed < 1;
+    if (priceMsg) {
+      priceMsg.textContent = tbState.maxStakeAllowed < 1
+        ? 'Both players need at least $1.00 total money for a Set Stake battle (or switch to Classic Mode).'
+        : '';
+    }
+  }
 }
 
 function closeTraderBattleModal() {
@@ -18096,15 +18150,7 @@ async function proceedToTraderBattlePriceStep() {
       }
     });
 
-    const priceMsg = $('#tbPriceMsg');
-    if (priceMsg) {
-      priceMsg.textContent = maxAllowed < 1
-        ? 'Both players need at least $1.00 total money to start a Trader Battle.'
-        : '';
-    }
-
-    const sendBtn = $('#tbSendChallengeBtn');
-    if (sendBtn) sendBtn.disabled = maxAllowed < 1;
+    setTbPrizeMode(tbState.selectedMode);
 
     $('#tbStepLength')?.classList.add('hidden');
     $('#tbStepPrice')?.classList.remove('hidden');
@@ -18120,30 +18166,34 @@ async function sendTraderBattleChallenge() {
   const opp = tbState.challengeTarget;
   const priceMsg = $('#tbPriceMsg');
   const sendBtn = $('#tbSendChallengeBtn');
-  const stake = round2(Number($('#tbStakeInput')?.value || 0));
+  const isClassic = tbState.selectedMode === 'classic';
+  const stake = isClassic ? 0 : round2(Number($('#tbStakeInput')?.value || 0));
 
-  if (!Number.isFinite(stake) || stake < 1) {
-    if (priceMsg) priceMsg.textContent = 'Minimum battle stake is $1.00.';
-    return;
-  }
-  if (stake > tbState.maxStakeAllowed + 0.001) {
-    if (priceMsg) priceMsg.textContent = `Max stake both players can afford is ${money(tbState.maxStakeAllowed)}.`;
-    return;
+  if (!isClassic) {
+    if (!Number.isFinite(stake) || stake < 1) {
+      if (priceMsg) priceMsg.textContent = 'Minimum Set Stake is $1.00 (or choose Classic Mode).';
+      return;
+    }
+    if (stake > tbState.maxStakeAllowed + 0.001) {
+      if (priceMsg) priceMsg.textContent = `Max stake both players can afford is ${money(tbState.maxStakeAllowed)}.`;
+      return;
+    }
   }
 
   if (sendBtn) sendBtn.disabled = true;
   try {
-    // Re-check live net worths right before inserting
-    const [{ data: myProf }, { data: oppProf }] = await Promise.all([
-      sb.from('profiles').select('net_worth').eq('id', currentUser.id).maybeSingle(),
-      sb.from('profiles').select('net_worth').eq('id', opp.id).maybeSingle()
-    ]);
-    const liveMax = floor2(Math.min(Number(myProf?.net_worth || 0), Number(oppProf?.net_worth || 0)));
-    if (stake > liveMax + 0.001) {
-      tbState.maxStakeAllowed = liveMax;
-      if (priceMsg) priceMsg.textContent = `Balances updated — max stake is now ${money(liveMax)}.`;
-      if (sendBtn) sendBtn.disabled = false;
-      return;
+    if (!isClassic) {
+      const [{ data: myProf }, { data: oppProf }] = await Promise.all([
+        sb.from('profiles').select('net_worth').eq('id', currentUser.id).maybeSingle(),
+        sb.from('profiles').select('net_worth').eq('id', opp.id).maybeSingle()
+      ]);
+      const liveMax = floor2(Math.min(Number(myProf?.net_worth || 0), Number(oppProf?.net_worth || 0)));
+      if (stake > liveMax + 0.001) {
+        tbState.maxStakeAllowed = liveMax;
+        if (priceMsg) priceMsg.textContent = `Balances updated — max stake is now ${money(liveMax)}.`;
+        if (sendBtn) sendBtn.disabled = false;
+        return;
+      }
     }
 
     const battleId = `tb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -18151,6 +18201,7 @@ async function sendTraderBattleChallenge() {
       id: battleId,
       challengerId: String(currentUser.id),
       opponentId: String(opp.id),
+      mode: isClassic ? 'classic' : 'fixed',
       stake,
       durationMins: tbState.selectedMins,
       ts: Date.now()
@@ -18165,7 +18216,8 @@ async function sendTraderBattleChallenge() {
 
     await loadTraderBattles(true);
     playSound('click');
-    toast(`⚔️ Battle request sent to @${opp.username || 'Trader'} (${formatTbDuration(tbState.selectedMins)} · ${money(stake)})!`);
+    const modeSummary = isClassic ? 'Classic Mode (½ Gains)' : money(stake);
+    toast(`⚔️ Battle request sent to @${opp.username || 'Trader'} (${formatTbDuration(tbState.selectedMins)} · ${modeSummary})!`);
     closeTraderBattleModal();
   } catch (e) {
     if (priceMsg) priceMsg.textContent = 'Failed to send challenge: ' + (e?.message || 'Error');
@@ -18195,12 +18247,13 @@ async function acceptTraderBattle(battleId) {
 
     const cNw = Math.max(0, round2(cProf?.net_worth ?? 0));
     const oNw = Math.max(0, round2(oProf?.net_worth ?? currentUser.net_worth ?? currentUser.cash ?? 0));
-    if (Math.min(cNw, oNw) < 1) {
-      toast('One player no longer has at least $1.00 to start this battle.');
+    const isClassic = b.mode === 'classic';
+    if (!isClassic && Math.min(cNw, oNw) < 1) {
+      toast('One player no longer has at least $1.00 to start this Set Stake battle.');
       return;
     }
 
-    const initialStake = Math.max(1, floor2(Math.min(b.initialStake, cNw, oNw)));
+    const initialStake = isClassic ? 0 : Math.max(1, floor2(Math.min(b.initialStake, cNw, oNw)));
     const startedAt = Date.now();
     const endsAt = startedAt + b.durationMins * 60000;
 
@@ -18227,7 +18280,7 @@ async function acceptTraderBattle(battleId) {
     }
     updateNotificationsBadge();
     playSound('buy');
-    toast(`⚔️ Trader Battle started! ${formatTbDuration(b.durationMins)} for ${money(initialStake)}!`);
+    toast(`⚔️ Trader Battle started! ${formatTbDuration(b.durationMins)} (${isClassic ? 'Classic Mode' : money(initialStake)})!`);
     openTraderBattleInfoModal(b.id);
   } catch (e) {
     toast('Failed to start battle: ' + (e?.message || 'Error'));
@@ -18309,62 +18362,23 @@ function getActiveTraderBattleForUser(userId) {
   return matches[0] || null;
 }
 
-async function openTraderBattleInfoModal(battleId) {
-  if (!sb || !battleId) return;
-  await loadTraderBattles(false);
-  const b = tbState.battles.get(String(battleId));
+async function refreshActiveBattleModalDom(b, { showLoading = false } = {}) {
   const modal = $('#traderBattleInfoModal');
   const modalCard = modal?.querySelector('.tb-modal-card');
   const body = $('#tbInfoModalBody');
-  if (!b || !modal || !body) return;
+  if (!b || !modal || !body || b.status !== 'active') return;
+  if (tbState.liveRefreshInFlight) return;
+  tbState.liveRefreshInFlight = true;
 
-  tbState.activeInfoBattleId = b.id;
-  const uid = currentUser?.id ? String(currentUser.id) : '';
-  const isParticipant = uid && (b.challengerId === uid || b.opponentId === uid);
-  const isChallenger = uid && b.challengerId === uid;
-  const oppId = isChallenger ? b.opponentId : b.challengerId;
-  const oppProf = getProfileSafe(oppId);
-  const oppName = oppProf.username || 'Trader';
+  try {
+    const uid = currentUser?.id ? String(currentUser.id) : '';
+    const isParticipant = uid && (b.challengerId === uid || b.opponentId === uid);
+    const isChallenger = uid && b.challengerId === uid;
+    const isClassic = b.mode === 'classic';
 
-  if (b.status === 'pending') {
-    modalCard?.classList.remove('is-wide');
-    if (!currentUser || !isParticipant) return;
-    if (b.opponentId === uid) {
-      body.innerHTML = `
-        <div class="tb-result-banner">
-          <strong>Trader Battle Request From - ${escapeHtml(oppName)}</strong>
-          <span class="muted tiny">Length: <strong>${escapeHtml(formatTbDuration(b.durationMins))}</strong> · Stake: <strong style="color:#fde68a;">${money(b.initialStake)}</strong></span>
-        </div>
-        <p class="muted tiny" style="margin:0 0 12px;">If you press Yes, the battle starts immediately and cannot be stopped until time runs out.</p>
-        <div style="display:flex;justify-content:flex-end;gap:10px;">
-          <button type="button" class="deny-btn" id="tbInfoDeclineBtn" style="padding:9px 16px;">No</button>
-          <button type="button" class="primary-btn" id="tbInfoAcceptBtn">⚔️ Yes — Start Battle</button>
-        </div>
-      `;
-      modal.classList.remove('hidden');
-      $('#tbInfoAcceptBtn')?.addEventListener('click', () => acceptTraderBattle(b.id));
-      $('#tbInfoDeclineBtn')?.addEventListener('click', () => declineTraderBattle(b.id));
-    } else {
-      body.innerHTML = `
-        <div class="tb-result-banner">
-          <strong>Waiting for @${escapeHtml(oppName)}</strong>
-          <span class="muted tiny">Length: <strong>${escapeHtml(formatTbDuration(b.durationMins))}</strong> · Stake: <strong style="color:#fde68a;">${money(b.initialStake)}</strong></span>
-        </div>
-        <p class="muted tiny" style="margin:0 0 12px;">Your challenge has been sent. Once @${escapeHtml(oppName)} accepts, the battle cannot be stopped mid-battle.</p>
-        <div style="display:flex;justify-content:flex-end;gap:10px;">
-          <button type="button" class="zoom-btn" id="tbInfoWithdrawBtn" style="padding:9px 14px;">Withdraw Request</button>
-        </div>
-      `;
-      modal.classList.remove('hidden');
-      $('#tbInfoWithdrawBtn')?.addEventListener('click', () => cancelPendingTraderBattle(b.id));
+    if (showLoading) {
+      body.innerHTML = `<p class="muted tiny">Loading live battle breakdown...</p>`;
     }
-    return;
-  }
-
-  if (b.status === 'active') {
-    modalCard?.classList.add('is-wide');
-    modal.classList.remove('hidden');
-    body.innerHTML = `<p class="muted tiny">Loading live battle breakdown...</p>`;
 
     const sinceIso = new Date(Math.max(0, (b.startedAt || Date.now()) - 2000)).toISOString();
     let cProf = getProfileSafe(b.challengerId);
@@ -18403,7 +18417,9 @@ async function openTraderBattleInfoModal(battleId) {
       battleHoldings = Array.isArray(hdRes?.data) ? hdRes.data : [];
     } catch (e) {}
 
-    // Map all coins needed for trades & holdings
+    // If modal was closed while awaiting, bail cleanly
+    if (modal.classList.contains('hidden') || tbState.activeInfoBattleId !== b.id) return;
+
     const coinsById = new Map();
     (coins || []).forEach(c => coinsById.set(String(c.id), c));
     const missingCoinIds = new Set();
@@ -18419,30 +18435,62 @@ async function openTraderBattleInfoModal(battleId) {
       } catch (e) {}
     }
 
-    // Shrink check if either participant dropped below bar (only participants insert __TB_BAR__)
-    const minLive = Math.min(cNw, oNw);
-    if (isParticipant && minLive < b.minStake - 0.01) {
-      const shrunk = Math.max(0, floor2(minLive));
-      b.minStake = shrunk;
-      sb.from('premium_requests').insert({
-        user_id: currentUser.id,
-        reason: '__TB_BAR__:' + JSON.stringify({ id: b.id, stake: shrunk, byId: uid, ts: Date.now() }),
-        status: 'denied'
-      }).then(() => {});
-    }
-
     const cScore = round2(cNw - b.challengerStartNw);
     const oScore = round2(oNw - b.opponentStartNw);
     const cPct = b.challengerStartNw > 0 ? ((cScore / b.challengerStartNw) * 100) : 0;
     const oPct = b.opponentStartNw > 0 ? ((oScore / b.opponentStartNw) * 100) : 0;
+
+    let livePrize = b.minStake;
+    if (isClassic) {
+      livePrize = computeClassicBattlePrize(cScore, oScore, cNw, oNw);
+      b.livePrize = livePrize;
+    } else {
+      const minLive = Math.min(cNw, oNw);
+      if (isParticipant && minLive < b.minStake - 0.01) {
+        const shrunk = Math.max(0, floor2(minLive));
+        b.minStake = shrunk;
+        sb.from('premium_requests').insert({
+          user_id: currentUser.id,
+          reason: '__TB_BAR__:' + JSON.stringify({ id: b.id, stake: shrunk, byId: uid, ts: Date.now() }),
+          status: 'denied'
+        }).then(() => {});
+      }
+      livePrize = b.minStake;
+    }
+
+    // Track +/- prize deltas and score deltas vs previous refresh
+    const prev = tbState.lastSnapshotByBattle.get(b.id);
+    let prizeDelta = prev ? round2(livePrize - prev.prize) : 0;
+    if (Math.abs(prizeDelta) < 0.01 && prev?.recentPrizeDelta && (Date.now() - (prev.recentPrizeDeltaAt || 0)) < 5000) {
+      prizeDelta = prev.recentPrizeDelta;
+    }
+    const cMove = prev ? round2(cScore - prev.cScore) : 0;
+    const oMove = prev ? round2(oScore - prev.oScore) : 0;
+
+    tbState.lastSnapshotByBattle.set(b.id, {
+      prize: livePrize,
+      cScore,
+      oScore,
+      recentPrizeDelta: Math.abs(prizeDelta) >= 0.01 ? prizeDelta : 0,
+      recentPrizeDeltaAt: Math.abs(prizeDelta) >= 0.01 ? Date.now() : (prev?.recentPrizeDeltaAt || 0)
+    });
+
+    updateTraderBattleHud();
     const leftMs = Math.max(0, b.endsAt - Date.now());
 
-    const renderPlayerSide = (pObj, playerId, nwNow, startNw, score, pct, isLeading) => {
+    const renderPlayerSide = (pObj, playerId, nwNow, startNw, score, pct, moveDelta, isLeading) => {
       const pid = String(playerId);
       const uname = pObj?.username || 'Trader';
       const isMe = uid && pid === uid;
       const pctCls = pct > 0.005 ? 'is-up' : (pct < -0.005 ? 'is-down' : 'is-flat');
       const pctText = `${pct >= 0 ? '▲ +' : '▼ '}${pct.toFixed(2)}%`;
+
+      const scoreSignCls = score > 0.005 ? 'is-plus' : (score < -0.005 ? 'is-minus' : 'is-flat');
+      const scoreSignChar = score > 0.005 ? '+' : (score < -0.005 ? '-' : '•');
+      const contribHalf = isClassic ? round2(Math.max(0, score) / 2) : 0;
+      const moveBadge = Math.abs(moveDelta) >= 0.01
+        ? `<span class="tb-prize-delta-badge ${moveDelta > 0 ? 'is-plus' : 'is-minus'}">${moveDelta > 0 ? '+' : '-'} ${money(Math.abs(moveDelta))}</span>`
+        : '';
 
       const pHoldings = battleHoldings
         .filter(h => String(h.user_id) === pid && coinsById.has(String(h.coin_id)))
@@ -18510,9 +18558,13 @@ async function openTraderBattleInfoModal(battleId) {
           </div>
 
           <div class="tb-side-stats">
-            <div>
-              <div class="muted tiny">Gained During Battle</div>
-              <strong style="font-size:17px;color:${score >= 0 ? 'var(--green)' : '#fca5a5'};">${signedMoney(score)}</strong>
+            <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+              <span class="tb-pm-sign ${scoreSignCls}" title="${score >= 0 ? 'Gaining money' : 'Losing money'}">${scoreSignChar}</span>
+              <div>
+                <div class="muted tiny">Gained During Battle ${moveBadge}</div>
+                <strong style="font-size:17px;color:${score >= 0 ? 'var(--green)' : '#fca5a5'};">${signedMoney(score)}</strong>
+                ${isClassic && contribHalf > 0 ? `<div class="muted tiny">Adds <strong style="color:#fde68a;">+${money(contribHalf)}</strong> to Prize Pool</div>` : ''}
+              </div>
             </div>
             <span class="tb-pct-badge ${pctCls}">${pctText}</span>
           </div>
@@ -18526,25 +18578,33 @@ async function openTraderBattleInfoModal(battleId) {
       `;
     };
 
+    const prizeBadgeHtml = Math.abs(prizeDelta) >= 0.01
+      ? `<span class="tb-prize-delta-badge ${prizeDelta > 0 ? 'is-plus' : 'is-minus'}">${prizeDelta > 0 ? '+' : '-'} ${money(Math.abs(prizeDelta))}</span>`
+      : '';
+
+    const prizeLabelHtml = isClassic
+      ? `<span class="tb-prize-live-wrap"><strong style="color:#fde68a;">🔥 Live Prize (½ Gains): ${money(livePrize)}</strong>${prizeBadgeHtml}</span>`
+      : `<span class="tb-prize-live-wrap"><strong style="color:#fde68a;">🏆 Prize Money: ${money(livePrize)}${livePrize < b.initialStake ? ` <span class="muted tiny">(shrunk from ${money(b.initialStake)})</span>` : ''}</strong>${prizeBadgeHtml}</span>`;
+
+    modalCard?.classList.add('is-wide');
     body.innerHTML = `
       <div class="tb-result-banner">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
           <strong>⏱ Time Left: <span id="tbInfoCountdownValue">${leftMs > 0 ? formatTbCountdown(leftMs) : 'Settling...'}</span></strong>
-          <strong style="color:#fde68a;">🏆 Prize Money: ${money(b.minStake)}${b.minStake < b.initialStake ? ` <span class="muted tiny">(shrunk from ${money(b.initialStake)})</span>` : ''}</strong>
+          ${prizeLabelHtml}
         </div>
-        <span class="muted tiny">🔒 Battle is live (${escapeHtml(formatTbDuration(b.durationMins))}) — cannot be stopped mid-battle.</span>
+        <span class="muted tiny">🔒 ${isClassic ? 'Classic Mode · Live half-gains prize updates with + / - changes' : `Battle is live (${escapeHtml(formatTbDuration(b.durationMins))})`} — cannot be stopped mid-battle.</span>
       </div>
       <div class="tb-spectator-grid">
-        ${renderPlayerSide(cProf, b.challengerId, cNw, b.challengerStartNw, cScore, cPct, cScore > oScore)}
-        ${renderPlayerSide(oProf, b.opponentId, oNw, b.opponentStartNw, oScore, oPct, oScore > cScore)}
+        ${renderPlayerSide(cProf, b.challengerId, cNw, b.challengerStartNw, cScore, cPct, cMove, cScore > oScore)}
+        ${renderPlayerSide(oProf, b.opponentId, oNw, b.opponentStartNw, oScore, oPct, oMove, oScore > cScore)}
       </div>
     `;
 
     body.querySelectorAll('[data-tb-profile]').forEach(el => {
       el.addEventListener('click', () => {
         if (el.dataset.tbProfile) {
-          modal.classList.add('hidden');
-          tbState.activeInfoBattleId = null;
+          closeTbInfoModal();
           openProfileModal(el.dataset.tbProfile);
         }
       });
@@ -18552,8 +18612,7 @@ async function openTraderBattleInfoModal(battleId) {
     body.querySelectorAll('[data-tb-coin]').forEach(el => {
       el.addEventListener('click', () => {
         if (el.dataset.tbCoin) {
-          modal.classList.add('hidden');
-          tbState.activeInfoBattleId = null;
+          closeTbInfoModal();
           $('#profileModal')?.classList.add('hidden');
           openCoin(el.dataset.tbCoin);
         }
@@ -18561,12 +18620,110 @@ async function openTraderBattleInfoModal(battleId) {
     });
 
     if (leftMs <= 0 && isParticipant) evaluateTraderBattles();
+  } finally {
+    tbState.liveRefreshInFlight = false;
+  }
+}
+
+function closeTbInfoModal() {
+  tbState.activeInfoBattleId = null;
+  if (tbState.liveSyncTimer) {
+    clearInterval(tbState.liveSyncTimer);
+    tbState.liveSyncTimer = null;
+  }
+  const modal = $('#traderBattleInfoModal');
+  modal?.querySelector('.tb-modal-card')?.classList.remove('is-wide');
+  modal?.classList.add('hidden');
+}
+
+function refreshOpenTraderBattleModalLive() {
+  if (!tbState.activeInfoBattleId) return;
+  const modal = $('#traderBattleInfoModal');
+  if (!modal || modal.classList.contains('hidden')) return;
+  const b = tbState.battles.get(tbState.activeInfoBattleId);
+  if (b && b.status === 'active') {
+    refreshActiveBattleModalDom(b, { showLoading: false });
+  }
+}
+
+async function openTraderBattleInfoModal(battleId) {
+  if (!sb || !battleId) return;
+  await loadTraderBattles(false);
+  const b = tbState.battles.get(String(battleId));
+  const modal = $('#traderBattleInfoModal');
+  const modalCard = modal?.querySelector('.tb-modal-card');
+  const body = $('#tbInfoModalBody');
+  if (!b || !modal || !body) return;
+
+  tbState.activeInfoBattleId = b.id;
+  if (tbState.liveSyncTimer) {
+    clearInterval(tbState.liveSyncTimer);
+    tbState.liveSyncTimer = null;
+  }
+
+  const uid = currentUser?.id ? String(currentUser.id) : '';
+  const isParticipant = uid && (b.challengerId === uid || b.opponentId === uid);
+  const isChallenger = uid && b.challengerId === uid;
+  const oppId = isChallenger ? b.opponentId : b.challengerId;
+  const oppProf = getProfileSafe(oppId);
+  const oppName = oppProf.username || 'Trader';
+
+  if (b.status === 'pending') {
+    modalCard?.classList.remove('is-wide');
+    if (!currentUser || !isParticipant) return;
+    const stakeLabel = formatTbStakeLabel(b);
+    if (b.opponentId === uid) {
+      body.innerHTML = `
+        <div class="tb-result-banner">
+          <strong>Trader Battle Request From - ${escapeHtml(oppName)}</strong>
+          <span class="muted tiny">Length: <strong>${escapeHtml(formatTbDuration(b.durationMins))}</strong> · Prize: <strong style="color:#fde68a;">${escapeHtml(stakeLabel)}</strong></span>
+        </div>
+        <p class="muted tiny" style="margin:0 0 12px;">If you press Yes, the battle starts immediately and cannot be stopped until time runs out.</p>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+          <button type="button" class="deny-btn" id="tbInfoDeclineBtn" style="padding:9px 16px;">No</button>
+          <button type="button" class="primary-btn" id="tbInfoAcceptBtn">⚔️ Yes — Start Battle</button>
+        </div>
+      `;
+      modal.classList.remove('hidden');
+      $('#tbInfoAcceptBtn')?.addEventListener('click', () => acceptTraderBattle(b.id));
+      $('#tbInfoDeclineBtn')?.addEventListener('click', () => declineTraderBattle(b.id));
+    } else {
+      body.innerHTML = `
+        <div class="tb-result-banner">
+          <strong>Waiting for @${escapeHtml(oppName)}</strong>
+          <span class="muted tiny">Length: <strong>${escapeHtml(formatTbDuration(b.durationMins))}</strong> · Prize: <strong style="color:#fde68a;">${escapeHtml(stakeLabel)}</strong></span>
+        </div>
+        <p class="muted tiny" style="margin:0 0 12px;">Your challenge has been sent. Once @${escapeHtml(oppName)} accepts, the battle cannot be stopped mid-battle.</p>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+          <button type="button" class="zoom-btn" id="tbInfoWithdrawBtn" style="padding:9px 14px;">Withdraw Request</button>
+        </div>
+      `;
+      modal.classList.remove('hidden');
+      $('#tbInfoWithdrawBtn')?.addEventListener('click', () => cancelPendingTraderBattle(b.id));
+    }
+    return;
+  }
+
+  if (b.status === 'active') {
+    modalCard?.classList.add('is-wide');
+    modal.classList.remove('hidden');
+    await refreshActiveBattleModalDom(b, { showLoading: true });
+    tbState.liveSyncTimer = setInterval(() => {
+      if (modal.classList.contains('hidden') || tbState.activeInfoBattleId !== b.id) {
+        clearInterval(tbState.liveSyncTimer);
+        tbState.liveSyncTimer = null;
+        return;
+      }
+      const latest = tbState.battles.get(b.id);
+      if (latest && latest.status === 'active') {
+        refreshActiveBattleModalDom(latest, { showLoading: false });
+      }
+    }, 4500);
     return;
   }
 
   if (b.status === 'completed' && b.result) {
-    modalCard?.classList.remove('is-wide');
-    modal.classList.add('hidden');
+    closeTbInfoModal();
     showTraderBattleResultPopup(b);
   }
 }
@@ -18578,6 +18735,7 @@ function checkActiveTraderBattleFloor(liveNw) {
   if (!mine.length) return;
 
   for (const b of mine) {
+    if (b.mode === 'classic') continue;
     if (liveNw < b.minStake - 0.01) {
       const shrunk = Math.max(0, floor2(liveNw));
       if (shrunk >= b.minStake) continue;
@@ -18777,7 +18935,9 @@ async function settleTraderBattle(battle) {
     const cTradePnl = round2(cEndNw - freshB.challengerStartNw);
     const oTradePnl = round2(oEndNw - freshB.opponentStartNw);
 
-    const barPrize = Math.max(0, floor2(Math.min(freshB.minStake, cEndNw, oEndNw)));
+    const barPrize = freshB.mode === 'classic'
+      ? computeClassicBattlePrize(cTradePnl, oTradePnl, cEndNw, oEndNw)
+      : Math.max(0, floor2(Math.min(freshB.minStake, cEndNw, oEndNw)));
     const diff = round2(cTradePnl - oTradePnl);
     const isDraw = Math.abs(diff) < 0.01;
     const winnerId = isDraw ? null : (diff > 0 ? freshB.challengerId : freshB.opponentId);
@@ -18789,6 +18949,7 @@ async function settleTraderBattle(battle) {
 
     const resultPayload = {
       id: freshB.id,
+      mode: freshB.mode,
       challengerStartNw: freshB.challengerStartNw,
       challengerEndNw: cEndNw,
       challengerTradePnl: cTradePnl,
@@ -18815,7 +18976,7 @@ async function settleTraderBattle(battle) {
     const settledB = tbState.battles.get(freshB.id);
     if (settledB?.result) {
       if (tbState.activeInfoBattleId === settledB.id) {
-        $('#traderBattleInfoModal')?.classList.add('hidden');
+        closeTbInfoModal();
       }
       await applyOwnTraderBattleSettlement(settledB);
     }
@@ -18877,7 +19038,9 @@ function showTraderBattleResultPopup(battle) {
       <span class="muted tiny">
         ${isDraw
           ? 'Both traders had identical trading scores.'
-          : `Prize transferred: ${money(prize)}${prize < battle.initialStake ? ` (shrunk from ${money(battle.initialStake)} initial bar)` : ''}`}
+          : battle.mode === 'classic'
+            ? `Classic Mode prize (½ total gains): ${money(prize)}`
+            : `Prize transferred: ${money(prize)}${prize < battle.initialStake ? ` (shrunk from ${money(battle.initialStake)} initial bar)` : ''}`}
       </span>
     </div>
     <div class="tb-score-grid">
@@ -18929,6 +19092,7 @@ function getTraderBattleNotifications(uid, delUsers) {
         ts: Number(b.createdAt || 0),
         battleId: b.id,
         stake: b.initialStake,
+        stakeLabel: formatTbStakeLabel(b),
         durationLabel: formatTbDuration(b.durationMins),
         isPending: b.status === 'pending',
         statusNote: b.status === 'active' ? 'Battle started (accepted)' : 'Declined',
@@ -18984,13 +19148,14 @@ async function handleTraderBattleRealtimeEvent(payload) {
         await ensureProfilesCached([p.challengerId]);
         const cProf = getProfileSafe(p.challengerId);
         const cName = cProf.username || 'Trader';
+        const prizeSummary = p.mode === 'classic' ? 'Classic Mode (½ Gains)' : money(p.stake);
         playSound('buy');
         showLiveNotifPopup({
           key: 'tb_req_' + p.id,
           kind: 'battle',
           icon: '⚔️',
           title: 'Trader Battle Request',
-          body: `Trader Battle Request From - ${cName} (${formatTbDuration(p.durationMins)} · ${money(p.stake)})`,
+          body: `Trader Battle Request From - ${cName} (${formatTbDuration(p.durationMins)} · ${prizeSummary})`,
           onClick: () => openTraderBattleInfoModal(p.id)
         });
         updateTraderBattleHud();
@@ -19010,7 +19175,7 @@ async function handleTraderBattleRealtimeEvent(payload) {
           kind: 'battle',
           icon: '⚔️',
           title: 'Trader Battle Is ON!',
-          body: `@${oProf.username || 'Trader'} pressed Yes! ${formatTbDuration(b.durationMins)} for ${money(b.minStake)}`,
+          body: `@${oProf.username || 'Trader'} pressed Yes! ${formatTbDuration(b.durationMins)} (${formatTbStakeLabel(b)})`,
           onClick: () => openTraderBattleInfoModal(b.id)
         });
       }
@@ -19046,6 +19211,12 @@ $$('#tbLengthPresets .tb-preset-chip').forEach(btn => {
   });
 });
 
+$$('#tbPriceModeTabs .tb-mode-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    setTbPrizeMode(btn.dataset.tbMode === 'classic' ? 'classic' : 'fixed');
+  });
+});
+
 $$('#tbPricePresets .tb-preset-chip').forEach(btn => {
   btn.addEventListener('click', () => {
     if (btn.disabled) return;
@@ -19069,15 +19240,9 @@ $('#traderBattleModal')?.addEventListener('click', e => {
   if (e.target === $('#traderBattleModal')) closeTraderBattleModal();
 });
 
-$('#closeTbInfoBtn')?.addEventListener('click', () => {
-  tbState.activeInfoBattleId = null;
-  $('#traderBattleInfoModal')?.classList.add('hidden');
-});
+$('#closeTbInfoBtn')?.addEventListener('click', closeTbInfoModal);
 $('#traderBattleInfoModal')?.addEventListener('click', e => {
-  if (e.target === $('#traderBattleInfoModal')) {
-    tbState.activeInfoBattleId = null;
-    $('#traderBattleInfoModal')?.classList.add('hidden');
-  }
+  if (e.target === $('#traderBattleInfoModal')) closeTbInfoModal();
 });
 
 $('#closeTbResultBtn')?.addEventListener('click', () => $('#traderBattleResultModal')?.classList.add('hidden'));
