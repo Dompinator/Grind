@@ -5095,6 +5095,9 @@ const playState = {
   donations: [],                     // all __PLAY_DONATE__ rows
   paidDonateIds: new Set(),          // donation IDs already credited to recipient
   commentsByVideo: new Map(),        // videoId -> Array
+  commentVotesById: new Map(),       // commentId -> Map(userId -> 'like'|'dislike'|'none')
+  expandedCommentReplies: new Set(), // commentId set
+  activeCommentReplyTarget: null,    // { parentId, replyToUserId, replyToUsername } | null
   pinnedCommentIdByVideo: new Map(), // videoId -> commentId
   deletedIds: new Set(),
   rawRows: [],                 // Cached PLAY activity; only fetch rows newer than the last sync
@@ -5223,6 +5226,7 @@ async function loadPlayData(force = false) {
     const donations = [];
     const paidDonateIds = new Set();
     const commentsMapByVideo = new Map();
+    const commentVotesById = new Map();
     const pinnedCommentIdByVideo = new Map();
     const deletedCommentIds = new Set();
 
@@ -5383,12 +5387,23 @@ async function loadPlayData(force = false) {
             id: String(p.id),
             videoId: vidId,
             user_id: uid,
-            text: cleanText,
+            parent_id: p.parent_id ? String(p.parent_id) : null,
+            reply_to_user_id: p.reply_to_user_id ? String(p.reply_to_user_id) : null,
+            reply_to_username: p.reply_to_username ? String(p.reply_to_username) : null,
+            text: String(p.text || ''),
             gif_url: cleanGif,
             gif_title: String(p.gif_title || 'GIF').slice(0, 80),
             ts: Number(p.ts) || rowTs,
             profile: r.profiles || { id: uid, username: 'Trader' }
           });
+        } catch (e) {}
+      } else if (reason.startsWith('__PLAY_CMT_VOTE__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_CMT_VOTE__:'.length));
+          if (!p?.commentId || !p?.videoId) return;
+          let vm = commentVotesById.get(String(p.commentId));
+          if (!vm) { vm = new Map(); commentVotesById.set(String(p.commentId), vm); }
+          vm.set(uid, p.vote === 'like' || p.vote === 'dislike' ? p.vote : 'none');
         } catch (e) {}
       } else if (reason.startsWith('__PLAY_CMT_DEL__:')) {
         try {
@@ -5411,11 +5426,14 @@ async function loadPlayData(force = false) {
     });
 
     deletedIds.forEach(id => videosMap.delete(id));
+    const delUsers = adminModStateCache.deletedUserIds || new Set();
     commentsMapByVideo.forEach((arr, vidId) => {
-      const alive = arr.filter(c => !deletedCommentIds.has(c.id));
+      const aliveRaw = arr.filter(c => !deletedCommentIds.has(c.id) && !delUsers.has(String(c.user_id)));
+      const topIds = new Set(aliveRaw.filter(c => !c.parent_id).map(c => c.id));
+      const alive = aliveRaw.filter(c => !c.parent_id || topIds.has(c.parent_id));
       commentsMapByVideo.set(vidId, alive);
       const pinId = pinnedCommentIdByVideo.get(vidId);
-      if (pinId && !alive.some(c => c.id === pinId)) {
+      if (pinId && !topIds.has(pinId)) {
         pinnedCommentIdByVideo.delete(vidId);
       }
     });
@@ -5437,6 +5455,7 @@ async function loadPlayData(force = false) {
     playState.donations = donations.sort((a, b) => b.ts - a.ts);
     playState.paidDonateIds = paidDonateIds;
     playState.commentsByVideo = commentsMapByVideo;
+    playState.commentVotesById = commentVotesById;
     playState.pinnedCommentIdByVideo = pinnedCommentIdByVideo;
     playState.lastSyncAt = Date.now();
   } catch (e) {
@@ -5807,6 +5826,7 @@ function cleanupPlay() {
   }
   playState.activeSlideIndex = -1;
   playState.openCommentsVideoId = null;
+  playState.activeCommentReplyTarget = null;
   $('#playCommentsDrawer')?.classList.add('hidden');
   setPlayCommentGifPickerOpen(false);
 }
@@ -6608,51 +6628,218 @@ async function togglePinPlayComment(videoId, commentId) {
   toast(nextPin ? '📌 Comment pinned!' : 'Comment unpinned');
 }
 
+async function votePlayComment(videoId, commentId, currentVote, clickedType) {
+  if (!sb || !currentUser?.id || !videoId || !commentId) return;
+  const uid = String(currentUser.id);
+  const cid = String(commentId);
+  const nextVote = currentVote === clickedType ? 'none' : clickedType;
+
+  let vm = playState.commentVotesById.get(cid);
+  if (!vm) { vm = new Map(); playState.commentVotesById.set(cid, vm); }
+  vm.set(uid, nextVote);
+  renderPlayCommentsDrawerList();
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_CMT_VOTE__:' + JSON.stringify({
+      videoId: String(videoId),
+      commentId: cid,
+      vote: nextVote,
+      ts: Date.now()
+    }),
+    status: 'denied'
+  });
+  if (error) {
+    toast('Vote error: ' + error.message);
+  }
+}
+
+async function postPlayReplyComment(videoId, replyTarget) {
+  if (!sb || !currentUser?.id || !videoId || !replyTarget?.parentId) return;
+  const input = $(`#playReplyInput-${replyTarget.parentId}`);
+  const sendBtn = $(`#playSendReplyBtn-${replyTarget.parentId}`);
+  const text = (input?.value || '').trim();
+  if (!text) return toast('Write a reply first!');
+  if (text.length > 400) return toast('Reply must be 400 characters or less.');
+  if (sendBtn) sendBtn.disabled = true;
+
+  const payload = {
+    id: 'pcmt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    videoId: String(videoId),
+    text: text.slice(0, 400),
+    parent_id: String(replyTarget.parentId),
+    ...(replyTarget.replyToUserId ? { reply_to_user_id: String(replyTarget.replyToUserId) } : {}),
+    ...(replyTarget.replyToUsername ? { reply_to_username: String(replyTarget.replyToUsername) } : {}),
+    ts: Date.now()
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_CMT__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+  if (sendBtn) sendBtn.disabled = false;
+  if (error) return toast('Reply error: ' + error.message);
+
+  playSound('commenting');
+  playState.expandedCommentReplies.add(String(replyTarget.parentId));
+  playState.activeCommentReplyTarget = null;
+  toast('Reply posted!');
+  await loadPlayData(true);
+  renderPlayCommentsDrawerList();
+}
+
 function renderPlayCommentsDrawerList() {
   const listEl = $('#playCommentsList');
   const titleEl = $('#playCommentsTitle');
   const vidId = playState.openCommentsVideoId;
   if (!listEl || !vidId) return;
+
   const rawCmts = playState.commentsByVideo.get(vidId) || [];
-  const pinnedId = playState.pinnedCommentIdByVideo.get(vidId) || null;
-  const cmts = [...rawCmts].sort((a, b) => {
-    if (a.id === pinnedId && b.id !== pinnedId) return -1;
-    if (b.id === pinnedId && a.id !== pinnedId) return 1;
-    return a.ts - b.ts;
+  const topComments = [];
+  const repliesByParent = new Map();
+
+  rawCmts.forEach(c => {
+    if (!c.parent_id) topComments.push(c);
+  });
+  const activeTopIds = new Set(topComments.map(c => c.id));
+  let totalVisibleCount = topComments.length;
+
+  rawCmts.forEach(c => {
+    if (!c.parent_id || !activeTopIds.has(c.parent_id)) return;
+    const arr = repliesByParent.get(c.parent_id) || [];
+    arr.push(c);
+    repliesByParent.set(c.parent_id, arr);
+    totalVisibleCount += 1;
   });
 
-  if (titleEl) titleEl.textContent = `Comments (${cmts.length})`;
+  let pinnedId = playState.pinnedCommentIdByVideo.get(vidId) || null;
+  if (pinnedId && !activeTopIds.has(pinnedId)) {
+    pinnedId = null;
+  }
 
+  topComments.sort((a, b) => {
+    if (a.id === pinnedId && b.id !== pinnedId) return -1;
+    if (b.id === pinnedId && a.id !== pinnedId) return 1;
+    return b.ts - a.ts;
+  });
+  repliesByParent.forEach(arr => arr.sort((a, b) => a.ts - b.ts));
+
+  if (titleEl) titleEl.textContent = `Comments (${totalVisibleCount})`;
   document.querySelectorAll(`#playFeedTrack .play-slide[data-video-id="${CSS.escape(vidId)}"] [data-play-comment] .play-rail-count`)
-    .forEach(el => { el.textContent = String(cmts.length); });
+    .forEach(el => { el.textContent = String(totalVisibleCount); });
 
-  if (!cmts.length) {
-    listEl.innerHTML = '<div class="empty-state" style="padding:26px 12px;"><p class="muted tiny">No comments yet. Say something!</p></div>';
+  if (!topComments.length) {
+    listEl.innerHTML = '<div class="empty-state" style="padding:26px 12px;"><p class="muted tiny">No comments yet. Be the first to comment!</p></div>';
     return;
   }
-  const vid = playState.videosById.get(vidId);
-  const canPin = Boolean(currentUser && vid && (String(vid.user_id) === String(currentUser.id) || isDompinator()));
 
-  listEl.innerHTML = cmts.map(c => {
+  const vid = playState.videosById.get(vidId);
+  const creatorUsername = vid?.profile?.username || 'Creator';
+  const isViewerVidCreator = Boolean(currentUser && vid && (String(vid.user_id) === String(currentUser.id) || isDompinator()));
+  const myAv = currentUser?.avatar_url
+    ? `<img src="${escapeHtml(currentUser.avatar_url)}">`
+    : escapeHtml((currentUser?.username || 'G')[0].toUpperCase());
+
+  const renderVoteBtns = (cm) => {
+    const vm = playState.commentVotesById.get(cm.id);
+    let likes = 0;
+    let dislikes = 0;
+    if (vm) {
+      vm.forEach(v => {
+        if (v === 'like') likes += 1;
+        else if (v === 'dislike') dislikes += 1;
+      });
+    }
+    const myVote = currentUser && vm ? (vm.get(String(currentUser.id)) || 'none') : 'none';
+    return `
+      <button type="button" class="cmt-action-btn ${myVote === 'like' ? 'liked' : ''}" data-play-cmt-vote="like" data-cid="${escapeHtml(cm.id)}" data-cur="${escapeHtml(myVote)}" title="Like">
+        ${THUMB_UP_SVG}<span>${likes}</span>
+      </button>
+      <button type="button" class="cmt-action-btn ${myVote === 'dislike' ? 'disliked' : ''}" data-play-cmt-vote="dislike" data-cid="${escapeHtml(cm.id)}" data-cur="${escapeHtml(myVote)}" title="Dislike">
+        ${THUMB_DOWN_SVG}<span>${dislikes}</span>
+      </button>
+    `;
+  };
+
+  listEl.innerHTML = topComments.map(c => {
     const prof = c.profile || { id: c.user_id, username: 'Trader' };
     const uname = prof.username || 'Trader';
     const isPinned = c.id === pinnedId;
-    const canDel = currentUser && (String(c.user_id) === String(currentUser.id) || (vid && String(vid.user_id) === String(currentUser.id)) || isDompinator());
-    return `
-      <div class="play-cmt-row ${isPinned ? 'is-pinned' : ''}">
-        <div class="avatar" style="width:30px;height:30px;font-size:12px;" data-play-cmt-prof="${escapeHtml(c.user_id)}">${prof.avatar_url ? `<img src="${escapeHtml(prof.avatar_url)}">` : escapeHtml(uname[0].toUpperCase())}</div>
-        <div class="play-cmt-body">
-          ${isPinned ? `<div class="play-cmt-pinned-badge">📌 Pinned by Creator</div>` : ''}
-          <div class="play-cmt-meta">
-            <strong class="profile-link" data-play-cmt-prof="${escapeHtml(c.user_id)}">${escapeHtml(uname)}${tierBadgeHtml(prof)}</strong>
-            <span class="muted tiny">${typeof timeAgo === 'function' ? timeAgo(c.ts) : ''}</span>
-            <span style="margin-left:auto;display:inline-flex;gap:4px;">
-              ${canPin ? `<button type="button" class="zoom-btn play-cmt-pin-btn ${isPinned ? 'active' : ''}" data-play-cmt-pin="${escapeHtml(c.id)}" title="${isPinned ? 'Unpin comment' : 'Pin comment'}">📌${isPinned ? ' Unpin' : ''}</button>` : ''}
-              ${canDel ? `<button type="button" class="zoom-btn play-cmt-del" data-play-cmt-del="${escapeHtml(c.id)}" style="padding:2px 7px;font-size:11px;">✕</button>` : ''}
-            </span>
+    const isCommenterCreator = Boolean(vid && String(c.user_id) === String(vid.user_id));
+    const canDel = currentUser && (String(c.user_id) === String(currentUser.id) || isViewerVidCreator);
+    const replies = repliesByParent.get(c.id) || [];
+    const isExpanded = playState.expandedCommentReplies.has(c.id);
+    const isReplyingHere = playState.activeCommentReplyTarget && playState.activeCommentReplyTarget.parentId === c.id;
+
+    const repliesHtml = replies.map(rp => {
+      const rProf = rp.profile || { id: rp.user_id, username: 'Trader' };
+      const rUname = rProf.username || 'Trader';
+      const rIsCreator = Boolean(vid && String(rp.user_id) === String(vid.user_id));
+      const rCanDel = currentUser && (String(rp.user_id) === String(currentUser.id) || isViewerVidCreator);
+      const mentionHtml = rp.reply_to_username && String(rp.reply_to_user_id) !== String(c.user_id)
+        ? `<span class="cmt-reply-mention">@${escapeHtml(rp.reply_to_username)}</span>`
+        : '';
+      return `
+        <div class="comment-item reply-item" data-play-cmt-id="${escapeHtml(rp.id)}">
+          <div class="avatar" data-play-cmt-prof="${escapeHtml(rp.user_id)}">${rProf.avatar_url ? `<img src="${escapeHtml(rProf.avatar_url)}">` : escapeHtml(rUname[0].toUpperCase())}</div>
+          <div class="comment-main">
+            <div class="comment-meta">
+              <strong class="profile-link" data-play-cmt-prof="${escapeHtml(rp.user_id)}">${escapeHtml(rUname)}${tierBadgeHtml(rProf)}</strong>
+              ${rIsCreator ? '<span class="comment-creator-tag">Creator</span>' : ''}
+              <span class="comment-time">${escapeHtml(formatRelativeTime(rp.ts))}</span>
+            </div>
+            ${rp.text ? `<div class="comment-text">${mentionHtml}${escapeHtml(rp.text).replace(/\n/g, '<br>')}</div>` : (mentionHtml ? `<div class="comment-text">${mentionHtml}</div>` : '')}
+            ${rp.gif_url ? `<div class="comment-gif-wrap"><img src="${escapeHtml(rp.gif_url)}" alt="${escapeHtml(rp.gif_title || 'GIF')}" loading="lazy"></div>` : ''}
+            <div class="comment-actions">
+              ${renderVoteBtns(rp)}
+              <button type="button" class="cmt-action-btn" data-play-cmt-reply="${escapeHtml(c.id)}" data-reply-uid="${escapeHtml(rp.user_id)}" data-reply-name="${escapeHtml(rUname)}">Reply</button>
+              ${rCanDel ? `<button type="button" class="cmt-action-btn del-btn" data-play-cmt-del="${escapeHtml(rp.id)}">Delete</button>` : ''}
+            </div>
           </div>
-          ${c.text ? `<div class="play-cmt-text">${escapeHtml(c.text)}</div>` : ''}
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="comment-item ${isPinned ? 'pinned' : ''}" data-play-cmt-id="${escapeHtml(c.id)}">
+        <div class="avatar" data-play-cmt-prof="${escapeHtml(c.user_id)}">${prof.avatar_url ? `<img src="${escapeHtml(prof.avatar_url)}">` : escapeHtml(uname[0].toUpperCase())}</div>
+        <div class="comment-main">
+          ${isPinned ? `<div class="comment-pinned-badge">${PIN_SVG} Pinned by ${escapeHtml(creatorUsername)}</div>` : ''}
+          <div class="comment-meta">
+            <strong class="profile-link" data-play-cmt-prof="${escapeHtml(c.user_id)}">${escapeHtml(uname)}${tierBadgeHtml(prof)}</strong>
+            ${isCommenterCreator ? '<span class="comment-creator-tag">Creator</span>' : ''}
+            <span class="comment-time">${escapeHtml(formatRelativeTime(c.ts))}</span>
+          </div>
+          ${c.text ? `<div class="comment-text">${escapeHtml(c.text).replace(/\n/g, '<br>')}</div>` : ''}
           ${c.gif_url ? `<div class="comment-gif-wrap"><img src="${escapeHtml(c.gif_url)}" alt="${escapeHtml(c.gif_title || 'GIF')}" loading="lazy"></div>` : ''}
+          <div class="comment-actions">
+            ${renderVoteBtns(c)}
+            <button type="button" class="cmt-action-btn" data-play-cmt-reply="${escapeHtml(c.id)}" data-reply-uid="${escapeHtml(c.user_id)}" data-reply-name="${escapeHtml(uname)}">Reply</button>
+            ${isViewerVidCreator ? `
+              <button type="button" class="cmt-action-btn ${isPinned ? 'pinned-btn' : ''}" data-play-cmt-pin="${escapeHtml(c.id)}" title="${isPinned ? 'Unpin comment' : 'Pin comment'}">
+                ${PIN_SVG}<span>${isPinned ? 'Unpin' : 'Pin'}</span>
+              </button>
+            ` : ''}
+            ${canDel ? `<button type="button" class="cmt-action-btn del-btn" data-play-cmt-del="${escapeHtml(c.id)}">Delete</button>` : ''}
+          </div>
+          ${isReplyingHere ? `
+            <div class="cmt-reply-box">
+              <div class="avatar">${myAv}</div>
+              <div class="cmt-reply-body">
+                <textarea id="playReplyInput-${escapeHtml(c.id)}" rows="2" maxlength="400" placeholder="Replying to @${escapeHtml(playState.activeCommentReplyTarget.replyToUsername || uname)}..."></textarea>
+                <div class="cmt-reply-actions">
+                  <button type="button" class="zoom-btn" data-play-reply-cancel="${escapeHtml(c.id)}">Cancel</button>
+                  <button type="button" class="primary-btn" id="playSendReplyBtn-${escapeHtml(c.id)}" data-play-reply-send="${escapeHtml(c.id)}" style="padding:7px 14px;font-size:12px;">Reply</button>
+                </div>
+              </div>
+            </div>
+          ` : ''}
+          ${replies.length ? `
+            <button type="button" class="cmt-replies-toggle" data-play-toggle-replies="${escapeHtml(c.id)}">
+              ${isExpanded ? `▴ Hide ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}` : `▾ ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`}
+            </button>
+            ${isExpanded ? `<div class="cmt-replies-list">${repliesHtml}</div>` : ''}
+          ` : ''}
         </div>
       </div>`;
   }).join('');
@@ -6660,12 +6847,18 @@ function renderPlayCommentsDrawerList() {
   $$('#playCommentsList [data-play-cmt-prof]').forEach(el => {
     el.addEventListener('click', () => openProfileModal(el.dataset.playCmtProf));
   });
+  $$('#playCommentsList [data-play-cmt-vote]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      votePlayComment(vidId, btn.dataset.cid, btn.dataset.cur, btn.dataset.playCmtVote);
+    });
+  });
   $$('#playCommentsList [data-play-cmt-pin]').forEach(btn => {
     btn.addEventListener('click', () => togglePinPlayComment(vidId, btn.dataset.playCmtPin));
   });
   $$('#playCommentsList [data-play-cmt-del]').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!sb || !currentUser?.id) return;
+      btn.disabled = true;
       const cmtId = btn.dataset.playCmtDel;
       await sb.from('premium_requests').insert({
         user_id: currentUser.id,
@@ -6676,11 +6869,56 @@ function renderPlayCommentsDrawerList() {
       renderPlayCommentsDrawerList();
     });
   });
+  $$('#playCommentsList [data-play-cmt-reply]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const parentId = btn.dataset.playCmtReply;
+      playState.activeCommentReplyTarget = {
+        parentId,
+        replyToUserId: btn.dataset.replyUid || null,
+        replyToUsername: btn.dataset.replyName || 'Trader'
+      };
+      playState.expandedCommentReplies.add(parentId);
+      renderPlayCommentsDrawerList();
+      $(`#playReplyInput-${parentId}`)?.focus();
+    });
+  });
+  $$('#playCommentsList [data-play-reply-cancel]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      playState.activeCommentReplyTarget = null;
+      renderPlayCommentsDrawerList();
+    });
+  });
+  $$('#playCommentsList [data-play-reply-send]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (playState.activeCommentReplyTarget && playState.activeCommentReplyTarget.parentId === btn.dataset.playReplySend) {
+        postPlayReplyComment(vidId, playState.activeCommentReplyTarget);
+      }
+    });
+  });
+  $$('#playCommentsList textarea[id^="playReplyInput-"]').forEach(ta => {
+    ta.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (playState.activeCommentReplyTarget) {
+          postPlayReplyComment(vidId, playState.activeCommentReplyTarget);
+        }
+      }
+    });
+  });
+  $$('#playCommentsList [data-play-toggle-replies]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pid = btn.dataset.playToggleReplies;
+      if (playState.expandedCommentReplies.has(pid)) playState.expandedCommentReplies.delete(pid);
+      else playState.expandedCommentReplies.add(pid);
+      renderPlayCommentsDrawerList();
+    });
+  });
 }
 
 function openPlayCommentsDrawer(videoId) {
   playState.openCommentsVideoId = String(videoId);
   playState.pendingCommentGif = null;
+  playState.activeCommentReplyTarget = null;
   renderPlayCommentGifPreview();
   setPlayCommentGifPickerOpen(false);
   $('#playCommentsDrawer')?.classList.remove('hidden');
@@ -6689,6 +6927,7 @@ function openPlayCommentsDrawer(videoId) {
 
 $('#playCloseCommentsBtn')?.addEventListener('click', () => {
   playState.openCommentsVideoId = null;
+  playState.activeCommentReplyTarget = null;
   $('#playCommentsDrawer')?.classList.add('hidden');
   setPlayCommentGifPickerOpen(false);
 });
@@ -7968,6 +8207,11 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
 let pendingUploadVideoDataUrl = '';
 let pendingUploadVideoAspect = 9 / 16;
 let pendingUploadBusy = false;
+let pendingUploadSourceVideoFile = null;
+let pendingUploadCustomSongFile = null;
+let pendingUploadCustomSongPreviewAudio = null;
+let pendingUploadCustomSongPreviewUrl = '';
+let pendingUploadJobSeq = 0;
 
 function readFileAsDataUrlPromise(file) {
   return new Promise((resolve, reject) => {
@@ -7978,26 +8222,45 @@ function readFileAsDataUrlPromise(file) {
   });
 }
 
-function probeVideoAspectRatio(file) {
-  return new Promise(resolve => {
-    const objectUrl = URL.createObjectURL(file);
-    const vid = document.createElement('video');
-    vid.muted = true;
-    vid.playsInline = true;
-    vid.src = objectUrl;
-    vid.onloadedmetadata = () => {
-      const ar = (vid.videoWidth > 0 && vid.videoHeight > 0) ? (vid.videoWidth / vid.videoHeight) : (9 / 16);
-      URL.revokeObjectURL(objectUrl);
-      resolve(Math.min(2.6, Math.max(0.35, Number(ar.toFixed(4)))));
-    };
-    vid.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve(9 / 16);
-    };
-  });
+function stopCustomSongPreviewAudio() {
+  if (pendingUploadCustomSongPreviewAudio) {
+    try { pendingUploadCustomSongPreviewAudio.pause(); } catch (e) {}
+    pendingUploadCustomSongPreviewAudio = null;
+  }
+  if (pendingUploadCustomSongPreviewUrl) {
+    try { URL.revokeObjectURL(pendingUploadCustomSongPreviewUrl); } catch (e) {}
+    pendingUploadCustomSongPreviewUrl = '';
+  }
+  const prevBtn = $('#playUploadCustomSongPreviewBtn');
+  if (prevBtn) prevBtn.textContent = '▶ Test';
 }
 
-async function compressPlayVideoFile(file, onProgress) {
+function syncCustomSongUi() {
+  const prevBtn = $('#playUploadCustomSongPreviewBtn');
+  const clearBtn = $('#playUploadCustomSongClearBtn');
+  const statusEl = $('#playUploadCustomSongStatus');
+  const musicSel = $('#playUploadMusicSelect');
+  const hasSong = Boolean(pendingUploadCustomSongFile);
+
+  if (prevBtn) {
+    prevBtn.classList.toggle('hidden', !hasSong);
+    prevBtn.textContent = pendingUploadCustomSongPreviewAudio ? '■ Stop' : '▶ Test';
+  }
+  if (clearBtn) clearBtn.classList.toggle('hidden', !hasSong);
+  if (musicSel) {
+    musicSel.disabled = hasSong;
+    if (hasSong) musicSel.value = '';
+  }
+  if (statusEl) {
+    statusEl.textContent = hasSong
+      ? `♪ ${pendingUploadCustomSongFile.name} — baked into your GitHub video file!`
+      : 'Optional — MP3, WAV, OGG, or M4A mixed directly into your GitHub video file.';
+  }
+}
+
+async function compressPlayVideoFile(file, onProgress, options = {}) {
+  const customSongFile = options?.customSongFile || null;
+  const muteOriginal = Boolean(options?.muteOriginal);
   const objectUrl = URL.createObjectURL(file);
   const vid = document.createElement('video');
   vid.muted = false;
@@ -8023,9 +8286,12 @@ async function compressPlayVideoFile(file, onProgress) {
   const canvasStream = canvas.captureStream(24);
   const tracks = [...canvasStream.getVideoTracks()];
 
-  // Preserve original video sound via Web Audio destination (silent to user during encode)
+  // Mix original video audio and optional uploaded custom song via Web Audio (silent during encode)
   let audioCtx = null;
   let audioDest = null;
+  let songBufferSource = null;
+  let fallbackSongAudio = null;
+  let fallbackSongUrl = '';
   let hasAudioTrack = false;
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -8034,9 +8300,44 @@ async function compressPlayVideoFile(file, onProgress) {
       if (audioCtx.state === 'suspended') {
         await audioCtx.resume().catch(() => {});
       }
-      const sourceNode = audioCtx.createMediaElementSource(vid);
       audioDest = audioCtx.createMediaStreamDestination();
-      sourceNode.connect(audioDest);
+
+      const sourceNode = audioCtx.createMediaElementSource(vid);
+      const origGain = audioCtx.createGain();
+      origGain.gain.value = muteOriginal ? 0 : (customSongFile ? 0.8 : 1.0);
+      sourceNode.connect(origGain);
+      origGain.connect(audioDest);
+
+      if (customSongFile) {
+        let decoded = false;
+        try {
+          const arrBuf = await customSongFile.arrayBuffer();
+          const audioBuf = await audioCtx.decodeAudioData(arrBuf);
+          songBufferSource = audioCtx.createBufferSource();
+          songBufferSource.buffer = audioBuf;
+          songBufferSource.loop = true;
+          const songGain = audioCtx.createGain();
+          songGain.gain.value = muteOriginal ? 0.92 : 0.72;
+          songBufferSource.connect(songGain);
+          songGain.connect(audioDest);
+          decoded = true;
+        } catch (decodeErr) {
+          decoded = false;
+        }
+        if (!decoded) {
+          fallbackSongUrl = URL.createObjectURL(customSongFile);
+          fallbackSongAudio = document.createElement('audio');
+          fallbackSongAudio.src = fallbackSongUrl;
+          fallbackSongAudio.loop = true;
+          fallbackSongAudio.playsInline = true;
+          const songNode = audioCtx.createMediaElementSource(fallbackSongAudio);
+          const songGain = audioCtx.createGain();
+          songGain.gain.value = muteOriginal ? 0.92 : 0.72;
+          songNode.connect(songGain);
+          songGain.connect(audioDest);
+        }
+      }
+
       const capturedAudio = audioDest.stream.getAudioTracks();
       if (capturedAudio.length) {
         capturedAudio.forEach(tr => tracks.push(tr));
@@ -8047,6 +8348,10 @@ async function compressPlayVideoFile(file, onProgress) {
     if (audioCtx) { try { audioCtx.close(); } catch (err) {} }
     audioCtx = null;
     audioDest = null;
+    songBufferSource = null;
+    if (fallbackSongUrl) { try { URL.revokeObjectURL(fallbackSongUrl); } catch (err) {} }
+    fallbackSongAudio = null;
+    fallbackSongUrl = '';
   }
 
   // Fallback to video.captureStream audio track if AudioContext had none
@@ -8097,6 +8402,9 @@ async function compressPlayVideoFile(file, onProgress) {
 
   return new Promise((resolve, reject) => {
     const cleanupAudio = () => {
+      if (songBufferSource) { try { songBufferSource.stop(); } catch (e) {} songBufferSource = null; }
+      if (fallbackSongAudio) { try { fallbackSongAudio.pause(); } catch (e) {} fallbackSongAudio = null; }
+      if (fallbackSongUrl) { try { URL.revokeObjectURL(fallbackSongUrl); } catch (e) {} fallbackSongUrl = ''; }
       if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
     };
     recorder.onstop = async () => {
@@ -8123,13 +8431,18 @@ async function compressPlayVideoFile(file, onProgress) {
 
     vid.currentTime = 0;
     recorder.start(250);
+    if (songBufferSource) {
+      try { songBufferSource.start(0); } catch (e) {}
+    } else if (fallbackSongAudio) {
+      fallbackSongAudio.play().catch(() => {});
+    }
     vid.play().catch(err => {
       vid.muted = true;
       vid.play().catch(reject);
     });
 
     const drawLoop = () => {
-      if (vid.paused || vid.ended || vid.currentTime >= maxDur) {
+      if (vid.paused || vid.ended || vid.currentTime >= maxDur || (options?.shouldAbort && options.shouldAbort())) {
         try { vid.pause(); } catch (e) {}
         if (recorder.state !== 'inactive') recorder.stop();
         return;
@@ -8172,24 +8485,92 @@ function syncPlayUploadPreviewEffects() {
   if (!prev) return;
   const f = $('#playUploadFilterSelect')?.value || 'none';
   const spd = Math.min(2.5, Math.max(0.5, Number($('#playUploadSpeedSelect')?.value || 1)));
-  const muteOrig = Boolean($('#playUploadMuteOrigCheckbox')?.checked);
+  // If a custom song was baked into the video file, do not mute the preview's video audio track
+  const muteOrig = pendingUploadCustomSongFile ? false : Boolean($('#playUploadMuteOrigCheckbox')?.checked);
   prev.style.filter = getPlayVideoFilterCss(f);
   try { prev.playbackRate = spd; } catch (e) {}
   prev.muted = muteOrig;
+}
+
+async function recompressPendingUploadVideo() {
+  const file = pendingUploadSourceVideoFile;
+  if (!file) return;
+  const myJobId = ++pendingUploadJobSeq;
+  const msgEl = $('#playUploadMsg');
+  const nameEl = $('#playUploadFileName');
+  const pubBtn = $('#publishPlayVideoFileBtn');
+  const prev = $('#playUploadPreviewVideo');
+  const hasCustom = Boolean(pendingUploadCustomSongFile);
+  const muteOrig = Boolean($('#playUploadMuteOrigCheckbox')?.checked);
+
+  pendingUploadVideoDataUrl = '';
+  pendingUploadVideoAspect = 9 / 16;
+  if (pubBtn) pubBtn.disabled = true;
+  if (msgEl) msgEl.textContent = '';
+
+  try {
+    pendingUploadBusy = true;
+    if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) {
+      throw new Error('This browser cannot safely compress videos to 340p. Please try an up-to-date Safari or Chrome browser.');
+    }
+    const labelVerb = hasCustom ? 'Baking custom song & compressing' : 'Optimizing';
+    if (nameEl) nameEl.textContent = `${labelVerb} ${file.name} to 340p... 0%`;
+    const res = await compressPlayVideoFile(
+      file,
+      pct => {
+        if (myJobId === pendingUploadJobSeq && nameEl) {
+          nameEl.textContent = `${labelVerb} ${file.name} to 340p... ${pct}%`;
+        }
+      },
+      {
+        customSongFile: pendingUploadCustomSongFile,
+        muteOriginal: muteOrig,
+        shouldAbort: () => myJobId !== pendingUploadJobSeq
+      }
+    );
+    if (myJobId !== pendingUploadJobSeq) return;
+    pendingUploadVideoDataUrl = res.dataUrl;
+    pendingUploadVideoAspect = res.aspectRatio;
+    if (nameEl) {
+      nameEl.textContent = hasCustom
+        ? `${file.name} · Ready (340p with custom song baked in!)`
+        : `${file.name} · Ready (340p, original audio where supported)!`;
+    }
+    if (prev && pendingUploadVideoDataUrl) {
+      prev.src = pendingUploadVideoDataUrl;
+      prev.classList.remove('hidden');
+      syncPlayUploadPreviewEffects();
+    }
+    if (pubBtn && pendingUploadVideoDataUrl) pubBtn.disabled = false;
+  } catch (err) {
+    if (myJobId === pendingUploadJobSeq && msgEl) {
+      msgEl.textContent = err?.message || 'Could not process video file.';
+    }
+  } finally {
+    if (myJobId === pendingUploadJobSeq) {
+      pendingUploadBusy = false;
+      updatePlayUploadFeeUi();
+    }
+  }
 }
 
 async function openPlayVideoFileModal() {
   $('#playUploadChoiceModal')?.classList.add('hidden');
   stopVoiceoverRecorderIfActive();
   stopVoiceoverPreview();
+  stopCustomSongPreviewAudio();
   playVoiceoverState.uploadUrl = '';
   syncVoiceoverUi('upload');
 
+  pendingUploadJobSeq += 1;
+  pendingUploadSourceVideoFile = null;
+  pendingUploadCustomSongFile = null;
   pendingUploadVideoDataUrl = '';
   pendingUploadVideoAspect = 9 / 16;
   pendingUploadBusy = false;
   if ($('#playUploadTitleInput')) $('#playUploadTitleInput').value = '';
   if ($('#playUploadFileInput')) $('#playUploadFileInput').value = '';
+  if ($('#playUploadCustomSongInput')) $('#playUploadCustomSongInput').value = '';
   if ($('#playUploadFileName')) $('#playUploadFileName').textContent = 'No video selected';
   if ($('#playUploadMsg')) $('#playUploadMsg').textContent = '';
   if ($('#playUploadFilterSelect')) $('#playUploadFilterSelect').value = 'none';
@@ -8203,10 +8584,13 @@ async function openPlayVideoFileModal() {
   updatePlayUploadFeeUi();
   $('#playVideoFileModal')?.classList.remove('hidden');
   await populateMusicSelect($('#playUploadMusicSelect'), 'Original Video Audio (No extra music)');
+  syncCustomSongUi();
 }
 
 function closePlayVideoFileModal() {
+  pendingUploadJobSeq += 1;
   stopMusicPreviewAudio();
+  stopCustomSongPreviewAudio();
   stopVoiceoverRecorderIfActive();
   stopVoiceoverPreview();
   const prev = $('#playUploadPreviewVideo');
@@ -8219,48 +8603,77 @@ $('#closePlayVideoFileBtn')?.addEventListener('click', closePlayVideoFileModal);
 $('#cancelPlayVideoFileBtn')?.addEventListener('click', closePlayVideoFileModal);
 $('#playUploadFilterSelect')?.addEventListener('change', syncPlayUploadPreviewEffects);
 $('#playUploadSpeedSelect')?.addEventListener('change', syncPlayUploadPreviewEffects);
-$('#playUploadMuteOrigCheckbox')?.addEventListener('change', syncPlayUploadPreviewEffects);
+$('#playUploadMuteOrigCheckbox')?.addEventListener('change', () => {
+  if (pendingUploadCustomSongFile && pendingUploadSourceVideoFile) {
+    recompressPendingUploadVideo();
+  } else {
+    syncPlayUploadPreviewEffects();
+  }
+});
 $('#playUploadMusicPreviewBtn')?.addEventListener('click', () => {
   playSelectedMusicPreview($('#playUploadMusicSelect'), $('#playUploadMusicPreviewBtn'));
 });
 
+$('#playUploadCustomSongInput')?.addEventListener('change', async e => {
+  const audioFile = e.target.files?.[0];
+  stopCustomSongPreviewAudio();
+  if (!audioFile) return;
+  if (audioFile.size > 25 * 1024 * 1024) {
+    toast('Custom song file must be under 25 MB.');
+    e.target.value = '';
+    return;
+  }
+  stopMusicPreviewAudio();
+  pendingUploadCustomSongFile = audioFile;
+  syncCustomSongUi();
+  toast(`Selected custom song: ${audioFile.name}`);
+  if (pendingUploadSourceVideoFile) {
+    await recompressPendingUploadVideo();
+  }
+});
+
+$('#playUploadCustomSongPreviewBtn')?.addEventListener('click', () => {
+  if (pendingUploadCustomSongPreviewAudio) {
+    stopCustomSongPreviewAudio();
+    return;
+  }
+  if (!pendingUploadCustomSongFile) return;
+  stopMusicPreviewAudio();
+  const objUrl = URL.createObjectURL(pendingUploadCustomSongFile);
+  const audio = new Audio(objUrl);
+  audio.loop = true;
+  audio.volume = 0.72;
+  pendingUploadCustomSongPreviewUrl = objUrl;
+  pendingUploadCustomSongPreviewAudio = audio;
+  const prevBtn = $('#playUploadCustomSongPreviewBtn');
+  if (prevBtn) prevBtn.textContent = '■ Stop';
+  audio.play().catch(() => toast('Tap again to preview custom song'));
+});
+
+$('#playUploadCustomSongClearBtn')?.addEventListener('click', async () => {
+  stopCustomSongPreviewAudio();
+  const hadSong = Boolean(pendingUploadCustomSongFile);
+  pendingUploadCustomSongFile = null;
+  if ($('#playUploadCustomSongInput')) $('#playUploadCustomSongInput').value = '';
+  syncCustomSongUi();
+  if (hadSong && pendingUploadSourceVideoFile) {
+    await recompressPendingUploadVideo();
+  }
+});
+
 $('#playUploadFileInput')?.addEventListener('change', async e => {
   const file = e.target.files?.[0];
-  const msgEl = $('#playUploadMsg');
-  const nameEl = $('#playUploadFileName');
-  const pubBtn = $('#publishPlayVideoFileBtn');
-  const prev = $('#playUploadPreviewVideo');
-  pendingUploadVideoDataUrl = '';
-  pendingUploadVideoAspect = 9 / 16;
-  if (pubBtn) pubBtn.disabled = true;
-  if (!file) return;
-  if (msgEl) msgEl.textContent = '';
-  if (nameEl) nameEl.textContent = `${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`;
-
-  try {
-    pendingUploadBusy = true;
-    if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) {
-      throw new Error('This browser cannot safely compress videos to 340p. Please try an up-to-date Safari or Chrome browser.');
-    }
-    if (nameEl) nameEl.textContent = `Optimizing ${file.name} to 340p... 0%`;
-    const res = await compressPlayVideoFile(file, pct => {
-      if (nameEl) nameEl.textContent = `Optimizing ${file.name} to 340p... ${pct}%`;
-    });
-    pendingUploadVideoDataUrl = res.dataUrl;
-    pendingUploadVideoAspect = res.aspectRatio;
-    if (nameEl) nameEl.textContent = `${file.name} · Ready (340p, original audio where supported)!`;
-    if (prev && pendingUploadVideoDataUrl) {
-      prev.src = pendingUploadVideoDataUrl;
-      prev.classList.remove('hidden');
-      syncPlayUploadPreviewEffects();
-    }
-    if (pubBtn && pendingUploadVideoDataUrl) pubBtn.disabled = false;
-  } catch (err) {
-    if (msgEl) msgEl.textContent = err?.message || 'Could not process video file.';
-  } finally {
-    pendingUploadBusy = false;
-    updatePlayUploadFeeUi();
+  pendingUploadSourceVideoFile = file || null;
+  if (!file) {
+    pendingUploadVideoDataUrl = '';
+    pendingUploadVideoAspect = 9 / 16;
+    if ($('#publishPlayVideoFileBtn')) $('#publishPlayVideoFileBtn').disabled = true;
+    return;
   }
+  if ($('#playUploadFileName')) {
+    $('#playUploadFileName').textContent = `${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`;
+  }
+  await recompressPendingUploadVideo();
 });
 
 $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
@@ -8283,8 +8696,11 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
     return;
   }
 
-  const musicName = $('#playUploadMusicSelect')?.value || '';
-  const track = musicName ? (musicCache || []).find(t => t.name === musicName) : null;
+  const hasBakedSong = Boolean(pendingUploadCustomSongFile);
+  const musicName = hasBakedSong
+    ? cleanMediaDisplayName(pendingUploadCustomSongFile.name)
+    : ($('#playUploadMusicSelect')?.value || '');
+  const track = !hasBakedSong && musicName ? (musicCache || []).find(t => t.name === musicName) : null;
   const linkedId = $('#playUploadCoinSelect')?.value || '';
   const linkedCoin = linkedId ? (coins || []).find(c => String(c.id) === String(linkedId)) : null;
   const voUrl = playVoiceoverState.uploadUrl || '';
@@ -8310,10 +8726,10 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
     videoUrl: githubVideoUrl,
     videoFilter: $('#playUploadFilterSelect')?.value || 'none',
     playbackRate: Math.min(2.5, Math.max(0.5, Number($('#playUploadSpeedSelect')?.value || 1))),
-    muteOriginal: Boolean($('#playUploadMuteOrigCheckbox')?.checked),
-    musicName: track ? track.name : '',
-    musicUrl: track ? track.url : '',
-    musicFallbackUrl: track ? (track.fallbackUrl || '') : '',
+    muteOriginal: hasBakedSong ? false : Boolean($('#playUploadMuteOrigCheckbox')?.checked),
+    musicName: hasBakedSong ? musicName : (track ? track.name : ''),
+    musicUrl: hasBakedSong ? '' : (track ? track.url : ''),
+    musicFallbackUrl: hasBakedSong ? '' : (track ? (track.fallbackUrl || '') : ''),
     ...(voUrl ? { voiceoverUrl: voUrl } : {}),
     ...(linkedCoin ? { linkedCoinId: String(linkedCoin.id), linkedCoinName: linkedCoin.name, linkedCoinTicker: linkedCoin.ticker } : {}),
     ts: Date.now()
@@ -9586,6 +10002,8 @@ async function _fetchUserNotificationsFresh() {
           id: String(p.id),
           videoId: String(p.videoId),
           userId: rowUid,
+          parentId: p.parent_id ? String(p.parent_id) : null,
+          replyToUserId: p.reply_to_user_id ? String(p.reply_to_user_id) : null,
           text: cleanText,
           gifUrl: cleanGif,
           ts: Number(p.ts) || rowTs,
@@ -9654,24 +10072,50 @@ async function _fetchUserNotificationsFresh() {
     });
   });
 
+  const playCmtsById = new Map();
+  playCmts.forEach(pc => playCmtsById.set(pc.id, pc));
+
   playCmts.forEach(pc => {
     if (deletedPlayCmtIds.has(pc.id) || deletedPlayVidIds.has(pc.videoId) || delUsers.has(pc.userId)) return;
     if (pc.userId === uid) return;
     const vid = playVideosMap.get(pc.videoId);
-    if (!vid || vid.userId !== uid) return;
+    if (!vid) return;
     if (srvResetTs > 0 && pc.ts <= srvResetTs) return;
-    items.push({
-      id: 'pcmt_' + pc.id,
-      category: 'play_comment',
-      ts: pc.ts,
-      videoId: pc.videoId,
-      videoTitle: vid.title,
-      authorId: pc.userId,
-      authorProfile: { id: pc.userId, ...pc.profile },
-      authorName: pc.profile?.username || 'Trader',
-      body: pc.text || 'Sent a GIF',
-      gifUrl: pc.gifUrl
-    });
+    const parentPc = pc.parentId ? playCmtsById.get(pc.parentId) : null;
+    if (pc.parentId && (!parentPc || deletedPlayCmtIds.has(parentPc.id))) return;
+
+    const isReplyToMe = Boolean(
+      pc.parentId && (parentPc?.userId === uid || pc.replyToUserId === uid)
+    );
+    const isCommentOnMyVid = vid.userId === uid;
+
+    if (isReplyToMe) {
+      items.push({
+        id: 'prep_' + pc.id,
+        category: 'play_reply',
+        ts: pc.ts,
+        videoId: pc.videoId,
+        videoTitle: vid.title,
+        authorId: pc.userId,
+        authorProfile: { id: pc.userId, ...pc.profile },
+        authorName: pc.profile?.username || 'Trader',
+        body: pc.text || 'Sent a GIF',
+        gifUrl: pc.gifUrl
+      });
+    } else if (isCommentOnMyVid && !pc.parentId) {
+      items.push({
+        id: 'pcmt_' + pc.id,
+        category: 'play_comment',
+        ts: pc.ts,
+        videoId: pc.videoId,
+        videoTitle: vid.title,
+        authorId: pc.userId,
+        authorProfile: { id: pc.userId, ...pc.profile },
+        authorName: pc.profile?.username || 'Trader',
+        body: pc.text || 'Sent a GIF',
+        gifUrl: pc.gifUrl
+      });
+    }
   });
 
   playDonates.forEach(pd => {
@@ -9863,7 +10307,7 @@ function renderUserNotifsList() {
     if (userNotifFilter === 'update') return it.category === 'update';
     if (userNotifFilter === 'warning') return it.category === 'warning';
     if (userNotifFilter === 'social') {
-      return it.category === 'comment' || it.category === 'reply' || it.category === 'play_like' || it.category === 'play_comment' || it.category === 'play_follow';
+      return it.category === 'comment' || it.category === 'reply' || it.category === 'play_like' || it.category === 'play_comment' || it.category === 'play_reply' || it.category === 'play_follow';
     }
     if (userNotifFilter === 'donate') return it.category === 'play_donate';
     return true;
@@ -9938,6 +10382,16 @@ function renderUserNotifsList() {
       tagText = 'Video Like';
       headHtml = `<strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}${tierBadgeHtml(it.authorProfile)}</strong> <span class="muted">liked your video</span> <strong>“${escapeHtml(it.videoTitle || 'Play Video')}”</strong> <span style="color:var(--green);font-weight:800;">(+${money(PLAY_LIKE_PAYOUT)})</span>`;
       actionHtml = `<div class="request-actions"><button type="button" class="zoom-btn" data-notif-play-vid="${escapeHtml(it.videoId)}">▶ Watch Video</button></div>`;
+    } else if (it.category === 'play_reply') {
+      tagCls = 'reply';
+      tagText = 'Play Reply';
+      headHtml = `<strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}${tierBadgeHtml(it.authorProfile)}</strong> <span class="muted">replied to your comment on</span> <strong>“${escapeHtml(it.videoTitle || 'Play Video')}”</strong>`;
+      bodyHtml = `
+        <div class="report-details-box">
+          ${escapeHtml(it.body || '').replace(/\n/g, '<br>')}
+          ${it.gifUrl ? `<div class="comment-gif-wrap" style="margin-top:6px;"><img src="${escapeHtml(it.gifUrl)}" alt="GIF" loading="lazy"></div>` : ''}
+        </div>`;
+      actionHtml = `<div class="request-actions"><button type="button" class="zoom-btn" data-notif-play-cmt="${escapeHtml(it.videoId)}">💬 View Reply</button></div>`;
     } else if (it.category === 'play_comment') {
       tagCls = 'play-comment';
       tagText = 'Video Comment';
@@ -10860,15 +11314,19 @@ async function handleRealtimePremiumInsertPopup(row) {
       const p = JSON.parse(reason.slice('__PLAY_CMT__:'.length));
       if (!p?.videoId) return;
       const vid = playState.videosById.get(String(p.videoId));
-      if (!vid || String(vid.user_id) !== uid) return;
+      const isReplyToMe = Boolean(p.reply_to_user_id && String(p.reply_to_user_id) === uid);
+      const isVidOwner = Boolean(vid && String(vid.user_id) === uid);
+      if (!isReplyToMe && !isVidOwner) return;
       const txt = String(p.text || '').trim() || 'Sent a GIF';
       showLiveNotifPopup({
         key: 'pcmt_' + (p.id || row.id || p.ts),
         kind: 'comment',
         icon: '💬',
-        title: `${actorName} commented on your video`,
+        title: isReplyToMe
+          ? `${actorName} replied to your Play comment`
+          : `${actorName} commented on your video`,
         body: `"${txt}" — Tap to view comment`,
-        onClick: () => openPlayAtVideo(vid.id, true)
+        onClick: () => openPlayAtVideo(p.videoId, true)
       });
       playSound('commenting');
     } catch (e) {}

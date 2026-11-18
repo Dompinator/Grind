@@ -6148,6 +6148,76 @@ body[data-theme="rose-amethyst"] .featured-slot-badge {
   border-color: rgba(255, 255, 255, 0.72);
 }
 
+/* Coin-style threaded comments inside Play Comments Drawer */
+.play-comments-list .comment-item {
+  padding: 10px 11px;
+  gap: 10px;
+  border-radius: 12px;
+  background: rgba(16, 12, 26, 0.8);
+}
+.play-comments-list .comment-item.pinned {
+  border-color: rgba(251, 191, 36, 0.65);
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.1) 0%, rgba(16, 12, 26, 0.88) 80%);
+}
+.play-comments-list .comment-item.reply-item {
+  padding: 8px 10px;
+  background: rgba(12, 9, 20, 0.72);
+}
+.play-comments-list .comment-item > .avatar {
+  width: 30px;
+  height: 30px;
+  font-size: 12px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.play-comments-list .comment-text {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.play-comments-list .comment-actions {
+  gap: 6px;
+}
+.play-comments-list .cmt-action-btn {
+  padding: 4px 9px;
+  font-size: 11.5px;
+}
+.play-comments-list .cmt-reply-box {
+  margin-top: 8px;
+  gap: 8px;
+}
+.play-comments-list .cmt-reply-box > .avatar {
+  width: 26px;
+  height: 26px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.play-comments-list .cmt-replies-list {
+  margin-top: 8px;
+  padding-left: 10px;
+}
+
+/* Custom song picker inside Upload Video */
+.play-custom-song-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border-radius: 10px;
+  border: 1.5px solid rgba(192, 132, 252, 0.65);
+  background: rgba(168, 85, 247, 0.16);
+  color: #e9d5ff;
+  font-size: 12.5px;
+  font-weight: 800;
+  cursor: pointer;
+  margin: 0;
+  transition: transform 0.14s ease, background 0.14s ease;
+}
+.play-custom-song-btn:hover {
+  transform: translateY(-1px);
+  background: rgba(168, 85, 247, 0.28);
+}
+
+
 
 
 
