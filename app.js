@@ -1632,6 +1632,11 @@ function enterApp() {
   checkDailyLogin();
   flushPendingTierPromo();
   if (typeof refreshDirectMessages === 'function') refreshDirectMessages(false);
+  if (typeof loadTraderBattles === 'function') {
+    loadTraderBattles(true).then(() => {
+      if (typeof evaluateTraderBattles === 'function') evaluateTraderBattles();
+    });
+  }
 }
 
 function startTimeTracking() {
@@ -1697,6 +1702,7 @@ $('#logoutBtn')?.addEventListener('click', async () => {
   if (typeof cleanupPlay === 'function') cleanupPlay();
   if (typeof closeCoinWatchModal === 'function') closeCoinWatchModal(true);
   if (typeof resetDmStateOnLogout === 'function') resetDmStateOnLogout();
+  if (typeof resetTraderBattleStateOnLogout === 'function') resetTraderBattleStateOnLogout();
   closeTierPromoOverlay(true);
   pendingTierPromo = null;
   $('#authView').classList.remove('hidden');
@@ -3760,6 +3766,7 @@ async function updateNetWorth() {
   if (portEl) portEl.textContent = money(portValue);
   const totalEl = $('#totalValue');
   if (totalEl) totalEl.textContent = money(nw);
+  if (typeof checkActiveTraderBattleFloor === 'function') checkActiveTraderBattleFloor(nw);
 }
 
 async function freshCoin(coin) {
@@ -4760,7 +4767,12 @@ async function openProfileModal(userId) {
   if (!sb || !userId) return;
   const modal = $('#profileModal');
   const body = $('#profileModalBody');
+  const chalBtn = $('#profileChallengeBtn');
   if (!modal || !body) return;
+  if (chalBtn) {
+    chalBtn.classList.add('hidden');
+    chalBtn.onclick = null;
+  }
   body.innerHTML = '<p class="muted tiny">Loading profile...</p>';
   modal.classList.remove('hidden');
 
@@ -4768,7 +4780,8 @@ async function openProfileModal(userId) {
     loadProUserIds(),
     fetchAdminModerationState(),
     typeof loadTitleSystemState === 'function' ? loadTitleSystemState() : Promise.resolve(),
-    typeof loadPlayData === 'function' ? loadPlayData() : Promise.resolve()
+    typeof loadPlayData === 'function' ? loadPlayData() : Promise.resolve(),
+    typeof loadTraderBattles === 'function' ? loadTraderBattles(false) : Promise.resolve()
   ]);
   const { data: p } = await sb
     .from('profiles')
@@ -4793,6 +4806,27 @@ async function openProfileModal(userId) {
   const followersCount = typeof getFollowersCount === 'function' ? getFollowersCount(p.id) : 0;
   const isFollowingTarget = typeof isFollowingUser === 'function' ? isFollowingUser(p.id) : false;
   const showFollowBtn = Boolean(currentUser && String(p.id) !== String(currentUser.id));
+  if (chalBtn) {
+    const activeBattle = typeof getActiveTraderBattleForUser === 'function' ? getActiveTraderBattleForUser(p.id) : null;
+    const isOtherUser = Boolean(currentUser && String(p.id) !== String(currentUser.id));
+    if (activeBattle) {
+      chalBtn.classList.remove('hidden');
+      chalBtn.classList.add('is-view-battle');
+      chalBtn.textContent = '⚔️ View Battle';
+      chalBtn.onclick = () => {
+        if (typeof openTraderBattleInfoModal === 'function') openTraderBattleInfoModal(activeBattle.id);
+      };
+    } else if (isOtherUser && !isTargetBanned) {
+      chalBtn.classList.remove('hidden', 'is-view-battle');
+      chalBtn.textContent = '⚔️ Challenge';
+      chalBtn.onclick = () => {
+        if (typeof openTraderBattleChallengeModal === 'function') openTraderBattleChallengeModal(p);
+      };
+    } else {
+      chalBtn.classList.remove('is-view-battle');
+      chalBtn.classList.add('hidden');
+    }
+  }
 
   body.innerHTML = `
     <div class="profile-modal-hero">
@@ -5362,6 +5396,8 @@ const playState = {
   expandedCommentReplies: new Set(), // commentId set
   activeCommentReplyTarget: null,    // { parentId, replyToUserId, replyToUsername } | null
   pinnedCommentIdByVideo: new Map(), // videoId -> commentId
+  boostUntilByVideo: new Map(),      // videoId -> timestamp ms
+  pollVotesByVideo: new Map(),       // videoId -> Map(userId -> optionIdx)
   deletedIds: new Set(),
   rawRows: [],                 // Cached PLAY activity; only fetch rows newer than the last sync
   rawRowIds: new Set(),
@@ -5539,6 +5575,8 @@ async function loadPlayData(force = false) {
     const commentsMapByVideo = new Map();
     const commentVotesById = new Map();
     const pinnedCommentIdByVideo = new Map();
+    const boostUntilByVideo = new Map();
+    const pollVotesByVideo = new Map();
     const deletedCommentIds = new Set();
 
     data.forEach(r => {
@@ -5735,6 +5773,27 @@ async function loadPlayData(force = false) {
             else pinnedCommentIdByVideo.delete(vidId);
           }
         } catch (e) {}
+      } else if (reason.startsWith('__PLAY_BOOST__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_BOOST__:'.length));
+          const vidId = String(p?.videoId || '');
+          const until = Number(p?.boostUntil || 0);
+          if (!vidId || !Number.isFinite(until) || until <= 0) return;
+          if (srvResetTs > 0 && rowTs > 0 && rowTs <= srvResetTs) return;
+          const prevUntil = boostUntilByVideo.get(vidId) || 0;
+          if (until > prevUntil) boostUntilByVideo.set(vidId, until);
+        } catch (e) {}
+      } else if (reason.startsWith('__PLAY_POLL_VOTE__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_POLL_VOTE__:'.length));
+          const vidId = String(p?.videoId || '');
+          const optIdx = Number(p?.optionIndex);
+          if (!vidId || !Number.isInteger(optIdx) || optIdx < 0 || optIdx > 3) return;
+          if (srvResetTs > 0 && rowTs > 0 && rowTs <= srvResetTs) return;
+          let pm = pollVotesByVideo.get(vidId);
+          if (!pm) { pm = new Map(); pollVotesByVideo.set(vidId, pm); }
+          pm.set(uid, optIdx);
+        } catch (e) {}
       }
     });
 
@@ -5770,6 +5829,8 @@ async function loadPlayData(force = false) {
     playState.commentsByVideo = commentsMapByVideo;
     playState.commentVotesById = commentVotesById;
     playState.pinnedCommentIdByVideo = pinnedCommentIdByVideo;
+    playState.boostUntilByVideo = boostUntilByVideo;
+    playState.pollVotesByVideo = pollVotesByVideo;
     playState.lastSyncAt = Date.now();
   } catch (e) {
     console.warn('PLAY data sync failed:', e);
@@ -5778,6 +5839,121 @@ async function loadPlayData(force = false) {
   }
   })();
   return playState.syncPromise;
+}
+
+function getPlayBoostUntil(videoId) {
+  return Number(playState.boostUntilByVideo.get(String(videoId || '')) || 0);
+}
+
+function isPlayVideoBoosted(videoId) {
+  return getPlayBoostUntil(videoId) > Date.now();
+}
+
+function formatPlayBoostRemaining(ms) {
+  const rem = Math.max(0, Number(ms || 0));
+  if (rem <= 0) return 'Expired';
+  const totalMins = Math.ceil(rem / 60000);
+  const days = Math.floor(totalMins / 1440);
+  const hrs = Math.floor((totalMins % 1440) / 60);
+  const mins = totalMins % 60;
+  if (days > 0) return `${days}d ${hrs}h left`;
+  if (hrs > 0) return `${hrs}h ${mins}m left`;
+  return `${Math.max(1, mins)}m left`;
+}
+
+function getPlayPollSummary(videoId, pollEl) {
+  const opts = Array.isArray(pollEl?.options) ? pollEl.options.slice(0, 4) : [];
+  const counts = new Array(opts.length).fill(0);
+  const pm = videoId ? playState.pollVotesByVideo.get(String(videoId)) : null;
+  let totalVotes = 0;
+  let myOption = -1;
+  if (pm) {
+    pm.forEach((optIdx, uid) => {
+      if (optIdx >= 0 && optIdx < counts.length) {
+        counts[optIdx] += 1;
+        totalVotes += 1;
+        if (currentUser && uid === String(currentUser.id)) myOption = optIdx;
+      }
+    });
+  }
+  return {
+    question: String(pollEl?.question || 'Poll'),
+    options: opts,
+    counts,
+    totalVotes,
+    myOption
+  };
+}
+
+function renderPlayPollCardHtml(pollEl, videoId = '', editable = false) {
+  const sum = editable
+    ? {
+        question: String(pollEl?.question || 'Poll'),
+        options: Array.isArray(pollEl?.options) ? pollEl.options.slice(0, 4) : [],
+        counts: new Array((pollEl?.options || []).length).fill(0),
+        totalVotes: 0,
+        myOption: -1
+      }
+    : getPlayPollSummary(videoId, pollEl);
+  const showResults = !editable && (sum.totalVotes > 0 || sum.myOption >= 0);
+  return `
+    <div class="play-poll-card" ${videoId ? `data-play-poll-card="${escapeHtml(videoId)}"` : ''}>
+      <div class="play-poll-q">📊 ${escapeHtml(sum.question)}</div>
+      <div class="play-poll-opts">
+        ${sum.options.map((opt, idx) => {
+          const cnt = sum.counts[idx] || 0;
+          const pct = sum.totalVotes > 0 ? Math.round((cnt / sum.totalVotes) * 100) : 0;
+          const voted = sum.myOption === idx;
+          return `
+            <button type="button" class="play-poll-opt-btn ${voted ? 'is-voted' : ''}" ${!editable && videoId ? `data-play-poll-opt="${idx}" data-vid="${escapeHtml(videoId)}"` : 'disabled'}>
+              <span class="play-poll-bar" style="width:${showResults ? pct : 0}%;"></span>
+              <span class="play-poll-opt-label">${voted ? '✓ ' : ''}${escapeHtml(opt)}</span>
+              <span class="play-poll-opt-pct">${showResults ? `${pct}%` : ''}</span>
+            </button>`;
+        }).join('')}
+      </div>
+      <div class="play-poll-foot">${sum.totalVotes} vote${sum.totalVotes === 1 ? '' : 's'}</div>
+    </div>`;
+}
+
+async function handlePlayPollVote(videoId, optionIndex) {
+  if (!sb || !currentUser?.id || !videoId) return;
+  const vidId = String(videoId);
+  const vid = playState.videosById.get(vidId);
+  const pollEl = (vid?.elements || []).find(el => el && el.type === 'poll');
+  if (!pollEl || !Array.isArray(pollEl.options)) return;
+  const optIdx = Number(optionIndex);
+  if (!Number.isInteger(optIdx) || optIdx < 0 || optIdx >= pollEl.options.length) return;
+
+  const uid = String(currentUser.id);
+  let pm = playState.pollVotesByVideo.get(vidId);
+  if (!pm) { pm = new Map(); playState.pollVotesByVideo.set(vidId, pm); }
+  pm.set(uid, optIdx);
+
+  const updatedHtml = renderPlayPollCardHtml(pollEl, vidId, false);
+  document.querySelectorAll(`[data-play-poll-card="${CSS.escape(vidId)}"]`).forEach(cardEl => {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = updatedHtml.trim();
+    const fresh = wrap.firstElementChild;
+    if (fresh) {
+      cardEl.replaceWith(fresh);
+      fresh.querySelectorAll('[data-play-poll-opt]').forEach(btn => {
+        btn.addEventListener('click', e => {
+          e.stopPropagation();
+          handlePlayPollVote(btn.dataset.vid, Number(btn.dataset.playPollOpt));
+        });
+      });
+    }
+  });
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_POLL_VOTE__:' + JSON.stringify({ videoId: vidId, optionIndex: optIdx, ts: Date.now() }),
+    status: 'denied'
+  });
+  if (error) {
+    toast('Could not save poll vote: ' + error.message);
+  }
 }
 
 function getPlayVoteSummary(videoId) {
@@ -6144,7 +6320,7 @@ function cleanupPlay() {
   setPlayCommentGifPickerOpen(false);
 }
 
-function renderPlaySceneElementsHtml(elements = []) {
+function renderPlaySceneElementsHtml(elements = [], videoId = '') {
   return (Array.isArray(elements) ? elements : []).map(el => {
     const x = Math.min(94, Math.max(6, Number(el.x ?? 50)));
     const y = Math.min(92, Math.max(8, Number(el.y ?? 50)));
@@ -6154,6 +6330,12 @@ function renderPlaySceneElementsHtml(elements = []) {
     const animCls = ['pulse', 'float', 'spin'].includes(el.anim) ? ` play-anim-${el.anim}` : '';
     const transformStyle = `left:${x}%;top:${y}%;opacity:${opacity};transform:translate(-50%,-50%) scale(${scale}) rotate(${rot}deg);`;
 
+    if (el.type === 'poll' && el.question && Array.isArray(el.options) && el.options.length >= 2) {
+      return `
+        <div class="play-canvas-item is-poll${animCls}" style="${transformStyle}">
+          ${renderPlayPollCardHtml(el, videoId, false)}
+        </div>`;
+    }
     if (el.type === 'gif' && el.gifUrl) {
       const cleanUrl = typeof sanitizeGifUrl === 'function' ? sanitizeGifUrl(el.gifUrl) : '';
       if (!cleanUrl) return '';
@@ -6220,8 +6402,14 @@ function pickNextRandomPlayItem(lastUniqueKey = '') {
     return { slideType: 'ad', uniqueKey: 'ad:' + ad.name, id: 'ad_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6), ad };
   }
   const pool = availVideos.length ? availVideos : videos;
-  // Boost selection chance (3.5x weight) for creators the current user follows
-  const weights = pool.map(v => (isFollowingUser(v.user_id) ? 3.5 : 1));
+  // Boost selection chance (3.5x weight) for creators you follow OR boosted videos
+  const weights = pool.map(v => {
+    const fol = isFollowingUser(v.user_id);
+    const boosted = isPlayVideoBoosted(v.id);
+    if (fol && boosted) return 5.0;
+    if (fol || boosted) return 3.5;
+    return 1;
+  });
   const totalWeight = weights.reduce((acc, w) => acc + w, 0);
   let r = Math.random() * totalWeight;
   let vid = pool[pool.length - 1];
@@ -6398,6 +6586,7 @@ function createPlaySlideHtml(item, idx) {
   const canDel = currentUser && (String(currentUser.id) === String(v.user_id) || isDompinator());
   const isOwnVid = currentUser && String(currentUser.id) === String(v.user_id);
   const isFol = isFollowingUser(v.user_id);
+  const isBoosted = isPlayVideoBoosted(v.id);
   const arNum = parsePlayAspectRatio(v.aspectRatio, 9 / 16);
   const filterCss = getPlayVideoFilterCss(v.videoFilter);
   const forceMute = Boolean(v.muteOriginal);
@@ -6409,7 +6598,7 @@ function createPlaySlideHtml(item, idx) {
         <div class="play-media-surface" data-play-tap="${idx}" style="--play-ar-num:${arNum.toFixed(4)};aspect-ratio:${arNum.toFixed(4)};background:${v.kind === 'scene' ? escapeHtml(v.bgColor) : '#090710'};">
           ${v.kind === 'video'
             ? `<video class="play-media-video" src="${escapeHtml(v.videoUrl)}" playsinline loop preload="metadata" data-force-mute="${forceMute ? '1' : '0'}" style="filter:${escapeHtml(filterCss)};"></video>`
-            : `<div class="play-scene-layer">${renderPlaySceneElementsHtml(v.elements)}</div>`}
+            : `<div class="play-scene-layer">${renderPlaySceneElementsHtml(v.elements, v.id)}</div>`}
           <div class="play-pause-badge hidden">❚❚</div>
           <div class="play-scrim-bottom"></div>
           <div class="play-meta-bottom">
@@ -6421,6 +6610,7 @@ function createPlaySlideHtml(item, idx) {
                   ${!isOwnVid ? `<button type="button" class="play-follow-btn ${isFol ? 'is-following' : ''}" data-follow-user="${escapeHtml(v.user_id)}">${isFol ? '✓ Following' : 'Follow'}</button>` : ''}
                   <button type="button" class="play-donate-plus-btn" data-play-donate="${escapeHtml(v.id)}" data-donate-user="${escapeHtml(v.user_id)}" title="Donate to ${escapeHtml(uname)}" aria-label="Donate to ${escapeHtml(uname)}">＋</button>
                 </div>
+                ${isBoosted ? `<div class="play-boosted-subtext">⚡ Boosted</div>` : ''}
                 ${titleHtml ? `<div class="play-creator-title">${titleHtml}</div>` : ''}
               </div>
             </div>
@@ -6503,8 +6693,16 @@ function wirePlaySlideInteractions(slideEl) {
   // Tap to pause/play
   slideEl.querySelectorAll('[data-play-tap]').forEach(el => {
     el.addEventListener('click', e => {
-      if (e.target.closest('[data-play-profile],[data-follow-user],[data-play-donate],[data-play-coin],[data-play-song]')) return;
+      if (e.target.closest('[data-play-profile],[data-follow-user],[data-play-donate],[data-play-coin],[data-play-song],[data-play-poll-opt],.play-poll-card')) return;
       toggleActiveSlidePause(slideEl);
+    });
+  });
+
+  // Poll vote buttons
+  slideEl.querySelectorAll('[data-play-poll-opt]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      handlePlayPollVote(btn.dataset.vid, Number(btn.dataset.playPollOpt));
     });
   });
 
@@ -6828,18 +7026,21 @@ function renderAccountPlayVideos() {
   grid.innerHTML = mine.map(v => {
     const sum = getPlayVoteSummary(v.id);
     const earned = Math.round(((sum.paidLikersCount * PLAY_LIKE_PAYOUT) + (sum.paidViewersCount * PLAY_VIEW_PAYOUT)) * 100) / 100;
+    const boostUntil = getPlayBoostUntil(v.id);
+    const boosted = boostUntil > Date.now();
     return `
       <div class="account-play-video-card">
         <div class="account-play-thumb" data-acc-watch-vid="${escapeHtml(v.id)}" style="background:${v.kind === 'scene' ? escapeHtml(v.bgColor) : '#0d0917'};">
           ${v.kind === 'video'
             ? `<video src="${escapeHtml(v.videoUrl)}" muted playsinline preload="metadata"></video>`
-            : `<div class="play-scene-layer play-scene-thumb">${renderPlaySceneElementsHtml(v.elements)}</div>`}
+            : `<div class="play-scene-layer play-scene-thumb">${renderPlaySceneElementsHtml(v.elements, v.id)}</div>`}
         </div>
         <div class="account-play-meta">
           <div class="account-play-title">${escapeHtml(v.title || 'Untitled Short')}</div>
-          <div class="muted tiny">👁 ${sum.views} view${sum.views === 1 ? '' : 's'} · ♥ ${sum.likes} · 👎 ${sum.dislikes} · 💬 ${sum.commentsCount} · Earned <strong style="color:var(--green);">${money(earned)}</strong></div>
+          <div class="muted tiny">👁 ${sum.views} view${sum.views === 1 ? '' : 's'} · ♥ ${sum.likes} · 👎 ${sum.dislikes} · 💬 ${sum.commentsCount} · Earned <strong style="color:var(--green);">${money(earned)}</strong>${boosted ? ` · <span style="color:#c084fc;font-weight:800;">⚡ Boosted (${escapeHtml(formatPlayBoostRemaining(boostUntil - Date.now()))})</span>` : ''}</div>
           <div class="account-play-actions">
             <button type="button" class="zoom-btn" data-acc-watch-vid="${escapeHtml(v.id)}">▶ Watch</button>
+            <button type="button" class="play-boost-bolt-btn ${boosted ? 'is-boosted' : ''}" data-acc-boost-vid="${escapeHtml(v.id)}" title="Boost Video ($399 1d / $500 2d)">⚡${boosted ? ' Boosted' : ''}</button>
             <button type="button" class="deny-btn" data-acc-del-vid="${escapeHtml(v.id)}" style="padding:5px 11px;font-size:12px;">Delete</button>
           </div>
         </div>
@@ -6848,6 +7049,9 @@ function renderAccountPlayVideos() {
 
   $$('#accountPlayVideosGrid [data-acc-watch-vid]').forEach(el => {
     el.addEventListener('click', () => openPlayAtVideo(el.dataset.accWatchVid));
+  });
+  $$('#accountPlayVideosGrid [data-acc-boost-vid]').forEach(btn => {
+    btn.addEventListener('click', () => openPlayBoostModal(btn.dataset.accBoostVid));
   });
   $$('#accountPlayVideosGrid [data-acc-del-vid]').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -6867,6 +7071,112 @@ function renderAccountPlayVideos() {
     });
   });
 }
+
+// ---------- Play Video Boost ($399 1 Day / $500 2 Days) ----------
+let activeBoostVideoId = '';
+let playBoostBusy = false;
+
+function openPlayBoostModal(videoId) {
+  if (!currentUser || !videoId) return;
+  const vid = playState.videosById.get(String(videoId));
+  if (!vid || String(vid.user_id) !== String(currentUser.id)) return;
+  activeBoostVideoId = String(videoId);
+  const metaEl = $('#playBoostVideoMeta');
+  const noteEl = $('#playBoostStatusNote');
+  const cashEl = $('#playBoostCashAvail');
+  const msgEl = $('#playBoostMsg');
+  if (metaEl) metaEl.textContent = vid.title || 'Untitled Short';
+  if (msgEl) msgEl.textContent = '';
+  if (cashEl) cashEl.textContent = `Available cash: ${money(currentUser.cash || 0)}`;
+  const until = getPlayBoostUntil(activeBoostVideoId);
+  if (noteEl) {
+    if (until > Date.now()) {
+      noteEl.textContent = `⚡ Currently Boosted — ${formatPlayBoostRemaining(until - Date.now())}. Buying another boost extends this duration!`;
+      noteEl.classList.remove('hidden');
+    } else {
+      noteEl.classList.add('hidden');
+    }
+  }
+  $('#playBoostModal')?.classList.remove('hidden');
+}
+
+function closePlayBoostModal() {
+  activeBoostVideoId = '';
+  hideModalSmooth($('#playBoostModal'));
+}
+
+$('#closePlayBoostBtn')?.addEventListener('click', closePlayBoostModal);
+$('#playBoostModal')?.addEventListener('click', e => {
+  if (e.target === $('#playBoostModal')) closePlayBoostModal();
+});
+
+$$('#playBoostModal [data-boost-days]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (!sb || !currentUser?.id || !activeBoostVideoId || playBoostBusy) return;
+    const days = Number(btn.dataset.boostDays || 1);
+    const cost = Number(btn.dataset.boostCost || 399);
+    const msgEl = $('#playBoostMsg');
+    if (msgEl) msgEl.textContent = '';
+    playBoostBusy = true;
+    $$('#playBoostModal [data-boost-days]').forEach(b => { b.disabled = true; });
+
+    try {
+      const chargeRes = await runPlayCashUpdate(async () => {
+        let liveCash = Number(currentUser.cash || 0);
+        try {
+          const { data: prof } = await sb.from('profiles').select('cash').eq('id', currentUser.id).maybeSingle();
+          if (prof && prof.cash != null) liveCash = Number(prof.cash);
+        } catch (e) {}
+        if (liveCash + 0.0001 < cost) {
+          return { ok: false, error: `You need ${money(cost)} to boost for ${days} day${days === 1 ? '' : 's'} (you have ${money(liveCash)}).` };
+        }
+        const nextCash = Math.round(Math.max(0, liveCash - cost) * 100) / 100;
+        const { error: updErr } = await sb.from('profiles').update({ cash: nextCash }).eq('id', currentUser.id);
+        if (updErr) return { ok: false, error: updErr.message };
+        currentUser.cash = nextCash;
+        if ($('#topCash')) $('#topCash').textContent = money(nextCash);
+        if ($('#moneyCash')) $('#moneyCash').textContent = money(nextCash);
+        updateNetWorth();
+        return { ok: true, charged: cost };
+      });
+
+      if (!chargeRes.ok) {
+        if (msgEl) msgEl.textContent = chargeRes.error;
+        return;
+      }
+
+      const now = Date.now();
+      const baseUntil = Math.max(now, getPlayBoostUntil(activeBoostVideoId));
+      const boostUntil = baseUntil + days * 24 * 60 * 60 * 1000;
+      const { error: reqErr } = await sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__PLAY_BOOST__:' + JSON.stringify({
+          videoId: activeBoostVideoId,
+          days,
+          cost,
+          boostUntil,
+          ts: now
+        }),
+        status: 'denied'
+      });
+
+      if (reqErr) {
+        await refundPlayUploadFee(cost);
+        if (msgEl) msgEl.textContent = 'Boost failed: ' + reqErr.message;
+        return;
+      }
+
+      playState.boostUntilByVideo.set(activeBoostVideoId, boostUntil);
+      playSound('buy');
+      closePlayBoostModal();
+      renderAccountPlayVideos();
+      toast(`⚡ Video Boosted for ${days} day${days === 1 ? '' : 's'} (-${money(cost)})!`);
+    } finally {
+      playBoostBusy = false;
+      $$('#playBoostModal [data-boost-days]').forEach(b => { b.disabled = false; });
+    }
+  });
+});
 
 // ---------- Play Comments Drawer + Pinned Comments + GIPHY ----------
 function setPlayCommentGifPickerOpen(open) {
@@ -7934,7 +8244,7 @@ function renderEditorSelectionBar() {
     return;
   }
   bar.classList.remove('hidden');
-  const labels = { gif: 'GIF Layer', photo: 'Image Layer', sticker: 'Sticker', text: 'Text Layer' };
+  const labels = { gif: 'GIF Layer', photo: 'Image Layer', sticker: 'Sticker', text: 'Text Layer', poll: 'Poll Card' };
   if (lbl) lbl.textContent = labels[item.type] || 'Layer';
   if (animBtn) {
     const aMap = { none: '✨ Still', pulse: '💓 Pulse', float: '🎈 Float', spin: '🌀 Spin' };
@@ -7973,6 +8283,13 @@ function renderPlayEditorStage() {
     const animCls = ['pulse', 'float', 'spin'].includes(el.anim) ? ` play-anim-${el.anim}` : '';
     const posStyle = `left:${el.x}%;top:${el.y}%;opacity:${op};--el-inv-scale:${invScale};transform:translate(-50%,-50%) scale(${scaleVal}) rotate(${rot}deg);`;
     const resizeHandleHtml = `<span class="play-resize-handle" data-resize-el="${escapeHtml(el.id)}" title="Drag corner to resize">⤡</span>`;
+    if (el.type === 'poll') {
+      return `
+        <div class="play-canvas-item is-poll is-editable${animCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}">
+          ${renderPlayPollCardHtml(el, '', true)}
+          ${resizeHandleHtml}
+        </div>`;
+    }
     if (el.type === 'gif') {
       return `
         <div class="play-canvas-item is-gif is-editable${animCls} ${selCls}" data-edit-el="${escapeHtml(el.id)}" style="${posStyle}">
@@ -8229,6 +8546,8 @@ async function openPlayCreatorStudio(preloadedSong = null) {
   $('#playEditorTextPanel')?.classList.add('hidden');
   $('#playEditorStickerPanel')?.classList.add('hidden');
   $('#playEditorGifPanel')?.classList.add('hidden');
+  $('#playEditorPollPanel')?.classList.add('hidden');
+  if (typeof resetPlayEditorPollBuilder === 'function') resetPlayEditorPollBuilder();
   renderPlayStickerGrid();
   populatePlayCoinSelect($('#playEditorCoinSelect'), 'No Linked Coin (optional)');
   syncPlayEditorAspectUi();
@@ -8286,7 +8605,79 @@ function hideAllEditorSubpanels() {
   $('#playEditorTextPanel')?.classList.add('hidden');
   $('#playEditorStickerPanel')?.classList.add('hidden');
   $('#playEditorGifPanel')?.classList.add('hidden');
+  $('#playEditorPollPanel')?.classList.add('hidden');
 }
+
+function renderPlayEditorPollOptionRows(values = ['', '']) {
+  const wrap = $('#playEditorPollOptionsWrap');
+  const addBtn = $('#playEditorPollAddOptBtn');
+  if (!wrap) return;
+  const list = Array.isArray(values) ? values.slice(0, 4) : ['', ''];
+  while (list.length < 2) list.push('');
+  wrap.innerHTML = list.map((val, idx) => `
+    <div class="play-poll-opt-row">
+      <input class="play-poll-opt-input" maxlength="36" placeholder="Option ${idx + 1}" value="${escapeHtml(val)}">
+      ${list.length > 2 ? `<button type="button" class="zoom-btn play-poll-rem-opt" data-rem-idx="${idx}" title="Remove option">✕</button>` : ''}
+    </div>
+  `).join('');
+  wrap.querySelectorAll('.play-poll-rem-opt').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.remIdx);
+      const cur = Array.from(wrap.querySelectorAll('.play-poll-opt-input')).map(i => i.value);
+      cur.splice(idx, 1);
+      renderPlayEditorPollOptionRows(cur);
+    });
+  });
+  if (addBtn) {
+    addBtn.disabled = list.length >= 4;
+    addBtn.textContent = list.length >= 4 ? 'Max 4 Options' : `＋ Add Option (${list.length}/4)`;
+  }
+}
+
+function resetPlayEditorPollBuilder() {
+  if ($('#playEditorPollQuestionInput')) $('#playEditorPollQuestionInput').value = '';
+  renderPlayEditorPollOptionRows(['', '']);
+}
+
+$('#playEditorPollAddOptBtn')?.addEventListener('click', () => {
+  const wrap = $('#playEditorPollOptionsWrap');
+  if (!wrap) return;
+  const cur = Array.from(wrap.querySelectorAll('.play-poll-opt-input')).map(i => i.value);
+  if (cur.length >= 4) return toast('Polls can have a maximum of 4 options.');
+  cur.push('');
+  renderPlayEditorPollOptionRows(cur);
+  wrap.querySelectorAll('.play-poll-opt-input')[cur.length - 1]?.focus();
+});
+
+$('#playEditorAddPollConfirmBtn')?.addEventListener('click', () => {
+  const q = ($('#playEditorPollQuestionInput')?.value || '').trim().slice(0, 80);
+  const opts = Array.from($$('#playEditorPollOptionsWrap .play-poll-opt-input'))
+    .map(i => (i.value || '').trim().slice(0, 36))
+    .filter(Boolean)
+    .slice(0, 4);
+  if (!q) return toast('Enter a poll question first!');
+  if (opts.length < 2) return toast('Add at least 2 poll options (max 4)!');
+  pushPlayEditorHistory();
+  // Replace any existing poll element so each short stays clean with 1 interactive poll
+  playEditorState.elements = playEditorState.elements.filter(el => el.type !== 'poll');
+  const newId = 'el_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
+  playEditorState.elements.push({
+    id: newId,
+    type: 'poll',
+    x: 50,
+    y: 52,
+    scale: 1,
+    rot: 0,
+    opacity: 1,
+    anim: 'none',
+    question: q,
+    options: opts
+  });
+  playEditorState.selectedId = newId;
+  hideAllEditorSubpanels();
+  resetPlayEditorPollBuilder();
+  renderPlayEditorStage();
+});
 
 $('#playEditorPlusBtn')?.addEventListener('click', e => {
   e.stopPropagation();
@@ -8311,6 +8702,18 @@ $('#playAddStickerModeBtn')?.addEventListener('click', () => {
 $('#playAddPhotoModeBtn')?.addEventListener('click', () => {
   hideAllEditorSubpanels();
   $('#playEditorPhotoInput')?.click();
+});
+$('#playAddPollModeBtn')?.addEventListener('click', () => {
+  hideAllEditorSubpanels();
+  const existingPoll = playEditorState.elements.find(el => el.type === 'poll');
+  if (existingPoll) {
+    if ($('#playEditorPollQuestionInput')) $('#playEditorPollQuestionInput').value = existingPoll.question || '';
+    renderPlayEditorPollOptionRows(existingPoll.options || ['', '']);
+  } else {
+    resetPlayEditorPollBuilder();
+  }
+  $('#playEditorPollPanel')?.classList.remove('hidden');
+  setTimeout(() => $('#playEditorPollQuestionInput')?.focus(), 40);
 });
 
 async function addPlayEditorImageFile(file) {
@@ -8624,12 +9027,13 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
     title: ($('#playCreatorTitle')?.value || '').trim().slice(0, 60),
     bgColor: playEditorState.bgColor || '#161222',
     aspectRatio: playEditorState.aspectRatio || '9:16',
-    elements: playEditorState.elements.map(({ id, type, x, y, scale, rot, opacity, anim, gifUrl, photoUrl, emoji, text, color, style, font }) => ({
+    elements: playEditorState.elements.map(({ id, type, x, y, scale, rot, opacity, anim, gifUrl, photoUrl, emoji, text, color, style, font, question, options }) => ({
       id, type, x, y, scale, rot: Number(rot || 0), opacity: Number(opacity ?? 1), anim: anim || 'none',
       ...(gifUrl ? { gifUrl } : {}),
       ...(photoUrl ? { photoUrl } : {}),
       ...(emoji ? { emoji } : {}),
-      ...(text ? { text, color, style, font: font || 'sans' } : {})
+      ...(text ? { text, color, style, font: font || 'sans' } : {}),
+      ...(type === 'poll' && question && Array.isArray(options) ? { question: String(question).slice(0, 80), options: options.slice(0, 4).map(o => String(o).slice(0, 36)) } : {})
     })),
     musicName: customAudioUrl ? customAudioName : (track ? track.name : ''),
     musicUrl: customAudioUrl ? customAudioUrl : (track ? track.url : ''),
@@ -10688,7 +11092,8 @@ async function _fetchUserNotificationsFresh() {
       .or('reason.like.__PLAY_VOTE__:%,reason.like.__PLAY_CMT__:%,reason.like.__PLAY_CMT_DEL__:%,reason.like.__PLAY_FOLLOW__:%,reason.like.__PLAY_DONATE__:%,reason.like.__PLAY_DEL__:%')
       .order('created_at', { ascending: true })
       .limit(2000),
-    typeof loadPlayData === 'function' ? loadPlayData(false) : Promise.resolve()
+    typeof loadPlayData === 'function' ? loadPlayData(false) : Promise.resolve(),
+    typeof loadTraderBattles === 'function' ? loadTraderBattles(false) : Promise.resolve()
   ]);
 
   const notifUids = [];
@@ -11002,6 +11407,12 @@ async function _fetchUserNotificationsFresh() {
     });
   });
 
+  // 6. Trader Battles (Incoming challenges + Finished battle results)
+  if (typeof getTraderBattleNotifications === 'function') {
+    const tbItems = getTraderBattleNotifications(uid, delUsers);
+    tbItems.forEach(item => items.push(item));
+  }
+
   items.sort((a, b) => b.ts - a.ts);
   return items;
 }
@@ -11178,6 +11589,7 @@ function renderUserNotifsList() {
       return it.category === 'comment' || it.category === 'reply' || it.category === 'play_like' || it.category === 'play_comment' || it.category === 'play_reply' || it.category === 'play_follow';
     }
     if (userNotifFilter === 'donate') return it.category === 'play_donate';
+    if (userNotifFilter === 'battle') return it.category === 'tb_challenge' || it.category === 'tb_result';
     return true;
   });
 
@@ -11270,6 +11682,24 @@ function renderUserNotifsList() {
           ${it.gifUrl ? `<div class="comment-gif-wrap" style="margin-top:6px;"><img src="${escapeHtml(it.gifUrl)}" alt="GIF" loading="lazy"></div>` : ''}
         </div>`;
       actionHtml = `<div class="request-actions"><button type="button" class="zoom-btn" data-notif-play-cmt="${escapeHtml(it.videoId)}">💬 View Comment</button></div>`;
+    } else if (it.category === 'tb_challenge') {
+      tagCls = 'battle';
+      tagText = 'Trader Battle Request';
+      headHtml = `<span class="muted">Trader Battle Request From -</span> <strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}${tierBadgeHtml(it.authorProfile)}</strong>`;
+      bodyHtml = `<div class="report-details-box">Length: <strong>${escapeHtml(it.durationLabel)}</strong> · Prize Stake: <strong style="color:#fde68a;">${money(it.stake)}</strong></div>`;
+      actionHtml = it.isPending
+        ? `<div class="request-actions">
+            <button type="button" class="primary-btn" data-tb-accept="${escapeHtml(it.battleId)}" style="padding:6px 14px;font-size:12px;">⚔️ Yes</button>
+            <button type="button" class="deny-btn" data-tb-decline="${escapeHtml(it.battleId)}" style="padding:6px 14px;font-size:12px;">No</button>
+           </div>`
+        : `<div class="muted tiny">${escapeHtml(it.statusNote || 'Handled')}</div>`;
+    } else if (it.category === 'tb_result') {
+      tagCls = 'battle';
+      tagText = it.didWin ? 'Battle Won' : (it.isDraw ? 'Battle Draw' : 'Battle Lost');
+      const titleWord = it.didWin ? 'You won the battle!' : (it.isDraw ? 'Battle ended in a draw!' : 'You lost the battle!');
+      headHtml = `<strong style="color:${it.didWin ? 'var(--green)' : (it.isDraw ? '#e2e8f0' : '#fca5a5')};">${titleWord}</strong> <span class="muted">vs</span> <strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}</strong>`;
+      bodyHtml = `<div class="report-details-box">${escapeHtml(it.summaryLine)}</div>`;
+      actionHtml = `<div class="request-actions"><button type="button" class="zoom-btn" data-tb-view-result="${escapeHtml(it.battleId)}">View Breakdown</button></div>`;
     }
 
     return `
@@ -11306,6 +11736,21 @@ function renderUserNotifsList() {
   listEl.querySelectorAll('[data-notif-play-cmt]').forEach(el => {
     el.addEventListener('click', () => {
       if (el.dataset.notifPlayCmt) openPlayAtVideo(el.dataset.notifPlayCmt, true);
+    });
+  });
+  listEl.querySelectorAll('[data-tb-accept]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (typeof acceptTraderBattle === 'function') await acceptTraderBattle(btn.dataset.tbAccept);
+    });
+  });
+  listEl.querySelectorAll('[data-tb-decline]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (typeof declineTraderBattle === 'function') await declineTraderBattle(btn.dataset.tbDecline);
+    });
+  });
+  listEl.querySelectorAll('[data-tb-view-result]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (typeof openTraderBattleResultById === 'function') openTraderBattleResultById(btn.dataset.tbViewResult);
     });
   });
 }
@@ -12352,6 +12797,8 @@ function startRealtime() {
         changedReason.startsWith('__UPDATE__:') ||
         changedReason.startsWith('__REPORT__:') ||
         changedReason.startsWith('__PREM_REQ__:') ||
+        changedReason.startsWith('__TB_CHALLENGE__:') ||
+        changedReason.startsWith('__TB_RESULT__:') ||
         !changedReason.startsWith('__');
 
       if (isNotifEvent) {
@@ -12374,6 +12821,13 @@ function startRealtime() {
         if (dmOpen || involvesMe) {
           clearTimeout(dmRealtimeRefreshTimer);
           dmRealtimeRefreshTimer = setTimeout(() => refreshDirectMessages(true), 800);
+        }
+      }
+
+      // 11. Trader Battles: ONLY process events involving the current user
+      if (changedReason.startsWith('__TB_') && currentUser && typeof handleTraderBattleRealtimeEvent === 'function') {
+        if (!myUid || changedUid === myUid || changedReason.includes(myUid)) {
+          handleTraderBattleRealtimeEvent(payload);
         }
       }
     })
@@ -17178,6 +17632,1460 @@ $('#crateDoneBtn')?.addEventListener('click', closeCrateModal);
 $('#crateOpenModal')?.addEventListener('click', e => {
   if (e.target === $('#crateOpenModal') && !titleSystemState.isSpinning) closeCrateModal();
 });
+
+// ============================================================
+// ---------- TRADER BATTLE SYSTEM (2h–96h · SHRINKING BAR) ---
+// ============================================================
+const TB_ALLOWED_MINS = [120, 480, 720, 1440, 2880, 5760];
+const tbState = {
+  rawRows: [],
+  rawRowIds: new Set(),
+  lastRowCreatedAt: '',
+  battles: new Map(),
+  loaded: false,
+  lastSyncAt: 0,
+  syncPromise: null,
+  tickTimer: null,
+  challengeTarget: null,
+  selectedMins: 120,
+  maxStakeAllowed: 0,
+  targetFreshNw: 0,
+  myFreshNw: 0,
+  activeInfoBattleId: null,
+  settlingIds: new Set(),
+  payingIds: new Set(),
+  lsCacheKey: 'grind_tb_cache_v1',
+  lsResultShownPrefix: 'grind_tb_popup_shown_v1_'
+};
+
+function round2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+function floor2(n) {
+  return Math.floor(((Number(n) || 0) + 1e-9) * 100) / 100;
+}
+
+function formatTbDuration(mins) {
+  const m = Math.max(1, Math.round(Number(mins) || 120));
+  if (m >= 60 && m % 60 === 0) return `${m / 60}h`;
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    const rem = m % 60;
+    return rem ? `${h}h ${rem}m` : `${h}h`;
+  }
+  return `${m}m`;
+}
+
+function formatTbCountdown(msLeft) {
+  const s = Math.max(0, Math.floor((msLeft || 0) / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const pad = n => String(n).padStart(2, '0');
+  return `${h}:${pad(m)}:${pad(sec)}`;
+}
+
+function signedMoney(n) {
+  const v = round2(n);
+  if (v > 0) return `+${money(v)}`;
+  if (v < 0) return `-${money(Math.abs(v))}`;
+  return money(0);
+}
+
+function readTbLocalCache() {
+  try {
+    const raw = localStorage.getItem(tbState.lsCacheKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.rows)) return parsed;
+  } catch (e) {}
+  return null;
+}
+
+function writeTbLocalCache() {
+  try {
+    const trimmed = tbState.rawRows.slice(-400);
+    localStorage.setItem(tbState.lsCacheKey, JSON.stringify({
+      lastRowCreatedAt: tbState.lastRowCreatedAt || '',
+      rows: trimmed
+    }));
+  } catch (e) {}
+}
+
+function hasShownTbResultPopup(battleId) {
+  const uid = currentUser?.id ? String(currentUser.id) : '';
+  if (!uid || !battleId) return false;
+  try {
+    return localStorage.getItem(tbState.lsResultShownPrefix + uid + '_' + battleId) === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
+function markTbResultPopupShown(battleId) {
+  const uid = currentUser?.id ? String(currentUser.id) : '';
+  if (!uid || !battleId) return;
+  try {
+    localStorage.setItem(tbState.lsResultShownPrefix + uid + '_' + battleId, '1');
+  } catch (e) {}
+}
+
+function resetTraderBattleStateOnLogout() {
+  tbState.activeInfoBattleId = null;
+  tbState.challengeTarget = null;
+  if (tbState.tickTimer) {
+    clearInterval(tbState.tickTimer);
+    tbState.tickTimer = null;
+  }
+  $('#topBattlePill')?.classList.add('hidden');
+  $('#traderBattleModal')?.classList.add('hidden');
+  $('#traderBattleInfoModal')?.classList.add('hidden');
+  $('#traderBattleResultModal')?.classList.add('hidden');
+}
+
+function rebuildTraderBattlesFromRows() {
+  const srvResetTs = adminModStateCache.serverResetTs || 0;
+  const battles = new Map();
+
+  for (const r of tbState.rawRows) {
+    const reason = String(r.reason || '');
+    const rowTs = r.created_at ? new Date(r.created_at).getTime() : 0;
+    if (srvResetTs > 0 && rowTs > 0 && rowTs <= srvResetTs) continue;
+
+    if (reason.startsWith('__TB_CHALLENGE__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__TB_CHALLENGE__:'.length));
+        if (!p || !p.id || !p.challengerId || !p.opponentId) continue;
+        const ts = Number(p.ts) || rowTs || Date.now();
+        if (srvResetTs > 0 && ts <= srvResetTs) continue;
+        battles.set(String(p.id), {
+          id: String(p.id),
+          challengerId: String(p.challengerId),
+          opponentId: String(p.opponentId),
+          initialStake: round2(p.stake),
+          minStake: round2(p.stake),
+          durationMins: Math.max(1, Number(p.durationMins) || 120),
+          createdAt: ts,
+          startedAt: 0,
+          endsAt: 0,
+          challengerStartNw: 0,
+          opponentStartNw: 0,
+          status: 'pending',
+          declinedBy: null,
+          cancelledBy: null,
+          result: null,
+          paidUsers: new Set(),
+          barEvents: []
+        });
+      } catch (e) {}
+    } else if (reason.startsWith('__TB_ACCEPT__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__TB_ACCEPT__:'.length));
+        const b = p?.id ? battles.get(String(p.id)) : null;
+        if (!b || b.status !== 'pending') continue;
+        b.status = 'active';
+        b.startedAt = Number(p.startedAt) || rowTs || Date.now();
+        b.endsAt = Number(p.endsAt) || (b.startedAt + b.durationMins * 60000);
+        b.challengerStartNw = round2(p.challengerStartNw);
+        b.opponentStartNw = round2(p.opponentStartNw);
+        const accStake = round2(p.initialStake);
+        if (accStake >= 0 && accStake < b.minStake) b.minStake = accStake;
+      } catch (e) {}
+    } else if (reason.startsWith('__TB_DECLINE__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__TB_DECLINE__:'.length));
+        const b = p?.id ? battles.get(String(p.id)) : null;
+        if (!b || b.status !== 'pending') continue;
+        b.status = 'declined';
+        b.declinedBy = String(p.byId || r.user_id || '');
+      } catch (e) {}
+    } else if (reason.startsWith('__TB_CANCEL__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__TB_CANCEL__:'.length));
+        const b = p?.id ? battles.get(String(p.id)) : null;
+        // Never allow stopping a battle mid-battle once accepted/active!
+        if (!b || b.status !== 'pending') continue;
+        b.status = 'cancelled';
+        b.cancelledBy = String(p.byId || r.user_id || '');
+      } catch (e) {}
+    } else if (reason.startsWith('__TB_BAR__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__TB_BAR__:'.length));
+        const b = p?.id ? battles.get(String(p.id)) : null;
+        if (!b || b.status !== 'active') continue;
+        const newBar = Math.max(0, round2(p.stake));
+        if (newBar < b.minStake) b.minStake = newBar;
+        b.barEvents.push({ stake: newBar, byId: String(p.byId || ''), ts: Number(p.ts) || rowTs });
+      } catch (e) {}
+    } else if (reason.startsWith('__TB_RESULT__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__TB_RESULT__:'.length));
+        const b = p?.id ? battles.get(String(p.id)) : null;
+        if (!b || b.result) continue;
+        b.status = 'completed';
+        b.result = p;
+        b.minStake = Math.max(0, round2(p.finalPrize));
+      } catch (e) {}
+    } else if (reason.startsWith('__TB_PAID__:')) {
+      try {
+        const p = JSON.parse(reason.slice('__TB_PAID__:'.length));
+        const b = p?.id ? battles.get(String(p.id)) : null;
+        const uid = String(p?.userId || r.user_id || '');
+        if (b && uid) b.paidUsers.add(uid);
+      } catch (e) {}
+    }
+  }
+
+  tbState.battles = battles;
+}
+
+async function loadTraderBattles(force = false) {
+  if (!sb) return;
+  const now = Date.now();
+  if (tbState.syncPromise) return tbState.syncPromise;
+  if (!force && tbState.loaded && (now - tbState.lastSyncAt) < 12000) return;
+
+  tbState.syncPromise = (async () => {
+    try {
+      if (!tbState.loaded) {
+        const cached = readTbLocalCache();
+        if (cached) {
+          tbState.rawRows = cached.rows || [];
+          tbState.rawRowIds = new Set(tbState.rawRows.map(x => String(x.id)));
+          tbState.lastRowCreatedAt = cached.lastRowCreatedAt || '';
+          rebuildTraderBattlesFromRows();
+        }
+      }
+
+      let q = sb
+        .from('premium_requests')
+        .select('id, user_id, reason, created_at')
+        .like('reason', '__TB_%')
+        .order('created_at', { ascending: true })
+        .limit(400);
+
+      if (tbState.lastRowCreatedAt) {
+        q = q.gte('created_at', tbState.lastRowCreatedAt);
+      }
+
+      const { data: deltaRows, error } = await q;
+      if (!error && Array.isArray(deltaRows)) {
+        let added = 0;
+        for (const row of deltaRows) {
+          const rid = String(row.id || '');
+          if (rid && tbState.rawRowIds.has(rid)) continue;
+          if (rid) tbState.rawRowIds.add(rid);
+          tbState.rawRows.push(row);
+          if (row.created_at && (!tbState.lastRowCreatedAt || row.created_at > tbState.lastRowCreatedAt)) {
+            tbState.lastRowCreatedAt = row.created_at;
+          }
+          added++;
+        }
+        if (added > 0) writeTbLocalCache();
+      }
+
+      rebuildTraderBattlesFromRows();
+
+      const uids = [];
+      tbState.battles.forEach(b => {
+        uids.push(b.challengerId, b.opponentId);
+      });
+      if (uids.length) await ensureProfilesCached(uids);
+
+      tbState.loaded = true;
+      tbState.lastSyncAt = Date.now();
+      updateTraderBattleHud();
+    } catch (e) {
+      // Soft fail
+    } finally {
+      tbState.syncPromise = null;
+    }
+  })();
+
+  return tbState.syncPromise;
+}
+
+function getMyTraderBattles() {
+  const uid = currentUser?.id ? String(currentUser.id) : '';
+  if (!uid) return [];
+  const delUsers = adminModStateCache.deletedUserIds || new Set();
+  const out = [];
+  tbState.battles.forEach(b => {
+    if (b.challengerId !== uid && b.opponentId !== uid) return;
+    if (delUsers.has(b.challengerId) || delUsers.has(b.opponentId)) return;
+    out.push(b);
+  });
+  out.sort((a, b) => (b.startedAt || b.createdAt || 0) - (a.startedAt || a.createdAt || 0));
+  return out;
+}
+
+function getProfileSafe(userId) {
+  const uid = String(userId || '');
+  if (currentUser && String(currentUser.id) === uid) return currentUser;
+  return sharedProfilesCache.get(uid) || { id: uid, username: 'Trader', avatar_url: '', is_premium: false };
+}
+
+function updateTraderBattleHud() {
+  const pill = $('#topBattlePill');
+  if (!currentUser) {
+    pill?.classList.add('hidden');
+    if (tbState.tickTimer) {
+      clearInterval(tbState.tickTimer);
+      tbState.tickTimer = null;
+    }
+    return;
+  }
+
+  const uid = String(currentUser.id);
+  const mine = getMyTraderBattles();
+  const active = mine.filter(b => b.status === 'active');
+  const pendingIncoming = mine.filter(b => b.status === 'pending' && b.opponentId === uid);
+  const pendingOutgoing = mine.filter(b => b.status === 'pending' && b.challengerId === uid);
+
+  const primary = active[0] || pendingIncoming[0] || pendingOutgoing[0] || null;
+  if (pill) {
+    if (!primary) {
+      pill.classList.add('hidden');
+    } else if (primary.status === 'active') {
+      const msLeft = Math.max(0, primary.endsAt - Date.now());
+      pill.classList.remove('hidden', 'is-pending');
+      pill.textContent = `⚔️ ${formatTbCountdown(msLeft)} · ${money(primary.minStake)}`;
+      pill.onclick = () => openTraderBattleInfoModal(primary.id);
+    } else if (primary.opponentId === uid) {
+      const opp = getProfileSafe(primary.challengerId);
+      pill.classList.remove('hidden');
+      pill.classList.add('is-pending');
+      pill.textContent = `⚔️ Request (${opp.username || 'Trader'})`;
+      pill.onclick = () => openTraderBattleInfoModal(primary.id);
+    } else {
+      pill.classList.remove('hidden');
+      pill.classList.add('is-pending');
+      pill.textContent = `⚔️ Pending (${money(primary.initialStake)})`;
+      pill.onclick = () => openTraderBattleInfoModal(primary.id);
+    }
+  }
+
+  // Live countdown inside open Battle Info Modal
+  if (tbState.activeInfoBattleId && !$('#traderBattleInfoModal')?.classList.contains('hidden')) {
+    const countdownEl = $('#tbInfoCountdownValue');
+    const b = tbState.battles.get(tbState.activeInfoBattleId);
+    if (countdownEl && b && b.status === 'active') {
+      const left = Math.max(0, b.endsAt - Date.now());
+      countdownEl.textContent = left > 0 ? formatTbCountdown(left) : 'Settling...';
+    }
+  }
+
+  const needsTick = active.length > 0;
+  if (needsTick && !tbState.tickTimer) {
+    tbState.tickTimer = setInterval(() => {
+      updateTraderBattleHud();
+      const now = Date.now();
+      const myActive = getMyTraderBattles().filter(b => b.status === 'active');
+      if (myActive.some(b => now >= b.endsAt)) {
+        evaluateTraderBattles();
+      }
+    }, 1000);
+  } else if (!needsTick && tbState.tickTimer) {
+    clearInterval(tbState.tickTimer);
+    tbState.tickTimer = null;
+  }
+}
+
+async function openTraderBattleChallengeModal(opponentProfile) {
+  if (!currentUser || !sb) return toast('Log in to challenge traders.');
+  if (!opponentProfile?.id || String(opponentProfile.id) === String(currentUser.id)) return;
+  if (currentUser.is_banned) return toast('Your account is restricted.');
+
+  await loadTraderBattles(false);
+  const myUid = String(currentUser.id);
+  const oppUid = String(opponentProfile.id);
+
+  // Prevent duplicate pending or active battle against same opponent
+  const existing = getMyTraderBattles().find(b =>
+    (b.status === 'pending' || b.status === 'active') &&
+    ((b.challengerId === myUid && b.opponentId === oppUid) || (b.challengerId === oppUid && b.opponentId === myUid))
+  );
+  if (existing) {
+    return openTraderBattleInfoModal(existing.id);
+  }
+
+  tbState.challengeTarget = opponentProfile;
+  tbState.selectedMins = 120; // Default 2h
+
+  const modal = $('#traderBattleModal');
+  if (!modal) return;
+  $('#tbOpponentMeta').textContent = `Challenging @${opponentProfile.username || 'Trader'}`;
+  $('#tbStepLength')?.classList.remove('hidden');
+  $('#tbStepPrice')?.classList.add('hidden');
+  if ($('#tbLengthMsg')) $('#tbLengthMsg').textContent = '';
+  if ($('#tbPriceMsg')) $('#tbPriceMsg').textContent = '';
+  if ($('#tbStakeInput')) $('#tbStakeInput').value = '';
+
+  $$('#tbLengthPresets .tb-preset-chip').forEach(btn => {
+    btn.classList.toggle('active', Number(btn.dataset.tbMins) === tbState.selectedMins);
+  });
+
+  modal.classList.remove('hidden');
+}
+
+function closeTraderBattleModal() {
+  $('#traderBattleModal')?.classList.add('hidden');
+  tbState.challengeTarget = null;
+}
+
+async function proceedToTraderBattlePriceStep() {
+  if (!currentUser || !sb || !tbState.challengeTarget) return;
+  const opp = tbState.challengeTarget;
+  const lengthMsg = $('#tbLengthMsg');
+
+  if (!TB_ALLOWED_MINS.includes(tbState.selectedMins)) {
+    if (lengthMsg) lengthMsg.textContent = 'Select a valid battle length (2h, 8h, 12h, 24h, 48h, or 96h).';
+    return;
+  }
+  if (lengthMsg) lengthMsg.textContent = '';
+
+  const nextBtn = $('#tbNextToPriceBtn');
+  if (nextBtn) nextBtn.disabled = true;
+
+  try {
+    await updateNetWorth();
+    const [{ data: myProf }, { data: oppProf }] = await Promise.all([
+      sb.from('profiles').select('id, username, cash, net_worth').eq('id', currentUser.id).maybeSingle(),
+      sb.from('profiles').select('id, username, cash, net_worth').eq('id', opp.id).maybeSingle()
+    ]);
+
+    const myNw = Math.max(0, round2(myProf?.net_worth ?? currentUser.net_worth ?? currentUser.cash ?? 0));
+    const oppNw = Math.max(0, round2(oppProf?.net_worth ?? opp.net_worth ?? opp.cash ?? 0));
+    const maxAllowed = floor2(Math.min(myNw, oppNw));
+
+    tbState.myFreshNw = myNw;
+    tbState.targetFreshNw = oppNw;
+    tbState.maxStakeAllowed = maxAllowed;
+
+    const sumEl = $('#tbBalancesSummary');
+    if (sumEl) {
+      sumEl.innerHTML = `
+        <div class="tb-balance-card">
+          <div class="muted tiny">Your Total Money</div>
+          <strong>${money(myNw)}</strong>
+        </div>
+        <div class="tb-balance-card">
+          <div class="muted tiny">${escapeHtml(oppProf?.username || opp.username || 'Opponent')}</div>
+          <strong>${money(oppNw)}</strong>
+        </div>
+      `;
+    }
+
+    const stakeInput = $('#tbStakeInput');
+    if (stakeInput) {
+      stakeInput.max = String(maxAllowed);
+      const suggested = Math.min(maxAllowed, 50);
+      stakeInput.value = maxAllowed >= 1 ? String(suggested >= 1 ? suggested : maxAllowed) : '';
+    }
+
+    $$('#tbPricePresets .tb-preset-chip').forEach(btn => {
+      const raw = btn.dataset.tbStake;
+      if (raw === 'max') {
+        btn.disabled = maxAllowed < 1;
+        btn.classList.remove('active');
+      } else {
+        const val = Number(raw);
+        btn.disabled = maxAllowed < val;
+        btn.classList.toggle('active', stakeInput && Number(stakeInput.value) === val && !btn.disabled);
+      }
+    });
+
+    const priceMsg = $('#tbPriceMsg');
+    if (priceMsg) {
+      priceMsg.textContent = maxAllowed < 1
+        ? 'Both players need at least $1.00 total money to start a Trader Battle.'
+        : '';
+    }
+
+    const sendBtn = $('#tbSendChallengeBtn');
+    if (sendBtn) sendBtn.disabled = maxAllowed < 1;
+
+    $('#tbStepLength')?.classList.add('hidden');
+    $('#tbStepPrice')?.classList.remove('hidden');
+  } catch (e) {
+    toast('Could not load trader balances.');
+  } finally {
+    if (nextBtn) nextBtn.disabled = false;
+  }
+}
+
+async function sendTraderBattleChallenge() {
+  if (!currentUser || !sb || !tbState.challengeTarget) return;
+  const opp = tbState.challengeTarget;
+  const priceMsg = $('#tbPriceMsg');
+  const sendBtn = $('#tbSendChallengeBtn');
+  const stake = round2(Number($('#tbStakeInput')?.value || 0));
+
+  if (!Number.isFinite(stake) || stake < 1) {
+    if (priceMsg) priceMsg.textContent = 'Minimum battle stake is $1.00.';
+    return;
+  }
+  if (stake > tbState.maxStakeAllowed + 0.001) {
+    if (priceMsg) priceMsg.textContent = `Max stake both players can afford is ${money(tbState.maxStakeAllowed)}.`;
+    return;
+  }
+
+  if (sendBtn) sendBtn.disabled = true;
+  try {
+    // Re-check live net worths right before inserting
+    const [{ data: myProf }, { data: oppProf }] = await Promise.all([
+      sb.from('profiles').select('net_worth').eq('id', currentUser.id).maybeSingle(),
+      sb.from('profiles').select('net_worth').eq('id', opp.id).maybeSingle()
+    ]);
+    const liveMax = floor2(Math.min(Number(myProf?.net_worth || 0), Number(oppProf?.net_worth || 0)));
+    if (stake > liveMax + 0.001) {
+      tbState.maxStakeAllowed = liveMax;
+      if (priceMsg) priceMsg.textContent = `Balances updated — max stake is now ${money(liveMax)}.`;
+      if (sendBtn) sendBtn.disabled = false;
+      return;
+    }
+
+    const battleId = `tb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const payload = {
+      id: battleId,
+      challengerId: String(currentUser.id),
+      opponentId: String(opp.id),
+      stake,
+      durationMins: tbState.selectedMins,
+      ts: Date.now()
+    };
+
+    const { error } = await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: '__TB_CHALLENGE__:' + JSON.stringify(payload),
+      status: 'denied'
+    });
+    if (error) throw error;
+
+    await loadTraderBattles(true);
+    playSound('click');
+    toast(`⚔️ Battle request sent to @${opp.username || 'Trader'} (${formatTbDuration(tbState.selectedMins)} · ${money(stake)})!`);
+    closeTraderBattleModal();
+  } catch (e) {
+    if (priceMsg) priceMsg.textContent = 'Failed to send challenge: ' + (e?.message || 'Error');
+  } finally {
+    if (sendBtn) sendBtn.disabled = false;
+  }
+}
+
+async function acceptTraderBattle(battleId) {
+  if (!currentUser || !sb || !battleId) return;
+  await loadTraderBattles(true);
+  const b = tbState.battles.get(String(battleId));
+  if (!b) return toast('Battle not found.');
+  if (b.opponentId !== String(currentUser.id)) return;
+  if (b.status !== 'pending') {
+    toast(b.status === 'active' ? 'Battle already started!' : 'This battle request is no longer pending.');
+    await loadRequests();
+    return;
+  }
+
+  try {
+    await updateNetWorth();
+    const [{ data: cProf }, { data: oProf }] = await Promise.all([
+      sb.from('profiles').select('net_worth').eq('id', b.challengerId).maybeSingle(),
+      sb.from('profiles').select('net_worth').eq('id', b.opponentId).maybeSingle()
+    ]);
+
+    const cNw = Math.max(0, round2(cProf?.net_worth ?? 0));
+    const oNw = Math.max(0, round2(oProf?.net_worth ?? currentUser.net_worth ?? currentUser.cash ?? 0));
+    if (Math.min(cNw, oNw) < 1) {
+      toast('One player no longer has at least $1.00 to start this battle.');
+      return;
+    }
+
+    const initialStake = Math.max(1, floor2(Math.min(b.initialStake, cNw, oNw)));
+    const startedAt = Date.now();
+    const endsAt = startedAt + b.durationMins * 60000;
+
+    const { error } = await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: '__TB_ACCEPT__:' + JSON.stringify({
+        id: b.id,
+        startedAt,
+        endsAt,
+        challengerStartNw: cNw,
+        opponentStartNw: oNw,
+        initialStake,
+        ts: startedAt
+      }),
+      status: 'denied'
+    });
+    if (error) throw error;
+
+    await loadTraderBattles(true);
+    userNotificationsFetchedAt = 0;
+    if (currentPage === 'notifications') {
+      userNotifsCache = await fetchUserNotifications(true);
+      renderUserNotifsList();
+    }
+    updateNotificationsBadge();
+    playSound('buy');
+    toast(`⚔️ Trader Battle started! ${formatTbDuration(b.durationMins)} for ${money(initialStake)}!`);
+    openTraderBattleInfoModal(b.id);
+  } catch (e) {
+    toast('Failed to start battle: ' + (e?.message || 'Error'));
+  }
+}
+
+async function declineTraderBattle(battleId) {
+  if (!currentUser || !sb || !battleId) return;
+  await loadTraderBattles(true);
+  const b = tbState.battles.get(String(battleId));
+  if (!b || b.status !== 'pending' || b.opponentId !== String(currentUser.id)) return;
+
+  try {
+    const { error } = await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: '__TB_DECLINE__:' + JSON.stringify({
+        id: b.id,
+        byId: String(currentUser.id),
+        ts: Date.now()
+      }),
+      status: 'denied'
+    });
+    if (error) throw error;
+
+    await loadTraderBattles(true);
+    userNotificationsFetchedAt = 0;
+    if (currentPage === 'notifications') {
+      userNotifsCache = await fetchUserNotifications(true);
+      renderUserNotifsList();
+    }
+    updateNotificationsBadge();
+    if (tbState.activeInfoBattleId === b.id) $('#traderBattleInfoModal')?.classList.add('hidden');
+    toast('Declined Trader Battle request.');
+  } catch (e) {
+    toast('Could not decline battle.');
+  }
+}
+
+// Only permitted while STILL PENDING before opponent accepts; strictly blocked mid-battle!
+async function cancelPendingTraderBattle(battleId) {
+  if (!currentUser || !sb || !battleId) return;
+  await loadTraderBattles(true);
+  const b = tbState.battles.get(String(battleId));
+  if (!b || b.challengerId !== String(currentUser.id)) return;
+  if (b.status !== 'pending') {
+    return toast('You cannot stop a Trader Battle mid-battle!');
+  }
+  try {
+    const { error } = await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: '__TB_CANCEL__:' + JSON.stringify({
+        id: b.id,
+        byId: String(currentUser.id),
+        ts: Date.now()
+      }),
+      status: 'denied'
+    });
+    if (error) throw error;
+    await loadTraderBattles(true);
+    $('#traderBattleInfoModal')?.classList.add('hidden');
+    toast('Cancelled pending battle request.');
+  } catch (e) {
+    toast('Could not cancel pending request.');
+  }
+}
+
+function getActiveTraderBattleForUser(userId) {
+  const uid = String(userId || '');
+  if (!uid) return null;
+  const delUsers = adminModStateCache.deletedUserIds || new Set();
+  const matches = [];
+  tbState.battles.forEach(b => {
+    if (b.status !== 'active') return;
+    if (b.challengerId !== uid && b.opponentId !== uid) return;
+    if (delUsers.has(b.challengerId) || delUsers.has(b.opponentId)) return;
+    matches.push(b);
+  });
+  matches.sort((a, b) => (b.startedAt || b.createdAt || 0) - (a.startedAt || a.createdAt || 0));
+  return matches[0] || null;
+}
+
+async function openTraderBattleInfoModal(battleId) {
+  if (!sb || !battleId) return;
+  await loadTraderBattles(false);
+  const b = tbState.battles.get(String(battleId));
+  const modal = $('#traderBattleInfoModal');
+  const modalCard = modal?.querySelector('.tb-modal-card');
+  const body = $('#tbInfoModalBody');
+  if (!b || !modal || !body) return;
+
+  tbState.activeInfoBattleId = b.id;
+  const uid = currentUser?.id ? String(currentUser.id) : '';
+  const isParticipant = uid && (b.challengerId === uid || b.opponentId === uid);
+  const isChallenger = uid && b.challengerId === uid;
+  const oppId = isChallenger ? b.opponentId : b.challengerId;
+  const oppProf = getProfileSafe(oppId);
+  const oppName = oppProf.username || 'Trader';
+
+  if (b.status === 'pending') {
+    modalCard?.classList.remove('is-wide');
+    if (!currentUser || !isParticipant) return;
+    if (b.opponentId === uid) {
+      body.innerHTML = `
+        <div class="tb-result-banner">
+          <strong>Trader Battle Request From - ${escapeHtml(oppName)}</strong>
+          <span class="muted tiny">Length: <strong>${escapeHtml(formatTbDuration(b.durationMins))}</strong> · Stake: <strong style="color:#fde68a;">${money(b.initialStake)}</strong></span>
+        </div>
+        <p class="muted tiny" style="margin:0 0 12px;">If you press Yes, the battle starts immediately and cannot be stopped until time runs out.</p>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+          <button type="button" class="deny-btn" id="tbInfoDeclineBtn" style="padding:9px 16px;">No</button>
+          <button type="button" class="primary-btn" id="tbInfoAcceptBtn">⚔️ Yes — Start Battle</button>
+        </div>
+      `;
+      modal.classList.remove('hidden');
+      $('#tbInfoAcceptBtn')?.addEventListener('click', () => acceptTraderBattle(b.id));
+      $('#tbInfoDeclineBtn')?.addEventListener('click', () => declineTraderBattle(b.id));
+    } else {
+      body.innerHTML = `
+        <div class="tb-result-banner">
+          <strong>Waiting for @${escapeHtml(oppName)}</strong>
+          <span class="muted tiny">Length: <strong>${escapeHtml(formatTbDuration(b.durationMins))}</strong> · Stake: <strong style="color:#fde68a;">${money(b.initialStake)}</strong></span>
+        </div>
+        <p class="muted tiny" style="margin:0 0 12px;">Your challenge has been sent. Once @${escapeHtml(oppName)} accepts, the battle cannot be stopped mid-battle.</p>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+          <button type="button" class="zoom-btn" id="tbInfoWithdrawBtn" style="padding:9px 14px;">Withdraw Request</button>
+        </div>
+      `;
+      modal.classList.remove('hidden');
+      $('#tbInfoWithdrawBtn')?.addEventListener('click', () => cancelPendingTraderBattle(b.id));
+    }
+    return;
+  }
+
+  if (b.status === 'active') {
+    modalCard?.classList.add('is-wide');
+    modal.classList.remove('hidden');
+    body.innerHTML = `<p class="muted tiny">Loading live battle breakdown...</p>`;
+
+    const sinceIso = new Date(Math.max(0, (b.startedAt || Date.now()) - 2000)).toISOString();
+    let cProf = getProfileSafe(b.challengerId);
+    let oProf = getProfileSafe(b.opponentId);
+    let cNw = isChallenger ? round2(currentUser?.net_worth) : round2(cProf?.net_worth);
+    let oNw = (uid && b.opponentId === uid) ? round2(currentUser?.net_worth) : round2(oProf?.net_worth);
+    let battleTrades = [];
+    let battleHoldings = [];
+
+    try {
+      const [cpRes, opRes, trRes, hdRes] = await Promise.all([
+        sb.from('profiles').select('id, username, avatar_url, is_premium, net_worth').eq('id', b.challengerId).maybeSingle(),
+        sb.from('profiles').select('id, username, avatar_url, is_premium, net_worth').eq('id', b.opponentId).maybeSingle(),
+        sb.from('trades')
+          .select('id, coin_id, user_id, type, amount_usd, shares, price_after, created_at')
+          .in('user_id', [b.challengerId, b.opponentId])
+          .gte('created_at', sinceIso)
+          .order('created_at', { ascending: false })
+          .limit(120),
+        sb.from('holdings')
+          .select('user_id, coin_id, shares')
+          .in('user_id', [b.challengerId, b.opponentId])
+          .gt('shares', 0.000001)
+      ]);
+      if (cpRes?.data) {
+        cProf = cpRes.data;
+        saveSharedProfileToCache(cpRes.data);
+        if (cpRes.data.net_worth != null) cNw = round2(cpRes.data.net_worth);
+      }
+      if (opRes?.data) {
+        oProf = opRes.data;
+        saveSharedProfileToCache(opRes.data);
+        if (opRes.data.net_worth != null) oNw = round2(opRes.data.net_worth);
+      }
+      battleTrades = Array.isArray(trRes?.data) ? trRes.data : [];
+      battleHoldings = Array.isArray(hdRes?.data) ? hdRes.data : [];
+    } catch (e) {}
+
+    // Map all coins needed for trades & holdings
+    const coinsById = new Map();
+    (coins || []).forEach(c => coinsById.set(String(c.id), c));
+    const missingCoinIds = new Set();
+    battleTrades.forEach(t => { if (t?.coin_id && !coinsById.has(String(t.coin_id))) missingCoinIds.add(String(t.coin_id)); });
+    battleHoldings.forEach(h => { if (h?.coin_id && !coinsById.has(String(h.coin_id))) missingCoinIds.add(String(h.coin_id)); });
+    if (missingCoinIds.size > 0) {
+      try {
+        const { data: extraCoins } = await sb
+          .from('coins')
+          .select('id, name, ticker, image_url, price, created_at')
+          .in('id', Array.from(missingCoinIds));
+        (extraCoins || []).forEach(c => coinsById.set(String(c.id), c));
+      } catch (e) {}
+    }
+
+    // Shrink check if either participant dropped below bar (only participants insert __TB_BAR__)
+    const minLive = Math.min(cNw, oNw);
+    if (isParticipant && minLive < b.minStake - 0.01) {
+      const shrunk = Math.max(0, floor2(minLive));
+      b.minStake = shrunk;
+      sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__TB_BAR__:' + JSON.stringify({ id: b.id, stake: shrunk, byId: uid, ts: Date.now() }),
+        status: 'denied'
+      }).then(() => {});
+    }
+
+    const cScore = round2(cNw - b.challengerStartNw);
+    const oScore = round2(oNw - b.opponentStartNw);
+    const cPct = b.challengerStartNw > 0 ? ((cScore / b.challengerStartNw) * 100) : 0;
+    const oPct = b.opponentStartNw > 0 ? ((oScore / b.opponentStartNw) * 100) : 0;
+    const leftMs = Math.max(0, b.endsAt - Date.now());
+
+    const renderPlayerSide = (pObj, playerId, nwNow, startNw, score, pct, isLeading) => {
+      const pid = String(playerId);
+      const uname = pObj?.username || 'Trader';
+      const isMe = uid && pid === uid;
+      const pctCls = pct > 0.005 ? 'is-up' : (pct < -0.005 ? 'is-down' : 'is-flat');
+      const pctText = `${pct >= 0 ? '▲ +' : '▼ '}${pct.toFixed(2)}%`;
+
+      const pHoldings = battleHoldings
+        .filter(h => String(h.user_id) === pid && coinsById.has(String(h.coin_id)))
+        .map(h => {
+          const c = coinsById.get(String(h.coin_id));
+          const val = calcHoldingsValue(c?.price, h.shares);
+          return { coin: c, shares: Number(h.shares || 0), val };
+        })
+        .filter(x => x.val >= 0.01)
+        .sort((a, b2) => b2.val - a.val);
+
+      const pTrades = battleTrades.filter(t => String(t.user_id) === pid);
+
+      const holdingsHtml = pHoldings.length
+        ? `<div class="tb-held-coins-row">
+            ${pHoldings.slice(0, 8).map(h => `
+              <button type="button" class="tb-held-chip" data-tb-coin="${escapeHtml(h.coin.id)}" title="Open ${escapeHtml(h.coin.name)}">
+                <span>$${escapeHtml(h.coin.ticker || '?')}</span>
+                <span style="color:#fff;">${money(h.val)}</span>
+              </button>
+            `).join('')}
+           </div>`
+        : '';
+
+      const tradesHtml = pTrades.length
+        ? `<div class="tb-trades-list">
+            ${pTrades.map(t => {
+              const c = coinsById.get(String(t.coin_id));
+              const isBuy = t.type === 'buy';
+              const amt = round2(t.amount_usd);
+              const ts = t.created_at ? new Date(t.created_at).getTime() : 0;
+              return `
+                <div class="tb-trade-row" data-tb-coin="${escapeHtml(t.coin_id)}">
+                  <div class="tb-trade-left">
+                    <div class="tb-trade-logo">${c?.image_url ? `<img src="${escapeHtml(c.image_url)}" alt="">` : escapeHtml((c?.ticker || '?')[0])}</div>
+                    <div style="min-width:0;">
+                      <div style="display:flex;align-items:center;gap:5px;">
+                        <span class="tb-trade-type ${isBuy ? 'is-buy' : 'is-sell'}">${isBuy ? 'BUY' : 'SELL'}</span>
+                        <strong class="tiny" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">$${escapeHtml(c?.ticker || 'COIN')}</strong>
+                      </div>
+                      <div class="muted tiny">${ts ? escapeHtml(formatRelativeTime(ts)) : ''} · ${priceFmt(t.price_after || c?.price || 0)}</div>
+                    </div>
+                  </div>
+                  <div style="text-align:right;flex-shrink:0;">
+                    <strong class="tiny" style="color:${isBuy ? '#7dd3fc' : 'var(--green)'};">${isBuy ? '-' : '+'}${money(amt)}</strong>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+           </div>`
+        : `<div class="muted tiny" style="padding:8px 0;">No coin trades yet during this battle.</div>`;
+
+      return `
+        <div class="tb-side-card ${isLeading ? 'is-leading' : ''}">
+          <div class="tb-side-head">
+            <div class="tb-side-avatar profile-link" data-tb-profile="${escapeHtml(pid)}">
+              ${pObj?.avatar_url ? `<img src="${escapeHtml(pObj.avatar_url)}" alt="">` : escapeHtml((uname[0] || '?').toUpperCase())}
+            </div>
+            <div style="flex:1;min-width:0;">
+              <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
+                <strong class="profile-link" data-tb-profile="${escapeHtml(pid)}">@${escapeHtml(uname)}</strong>${tierBadgeHtml(pObj)}${isMe ? '<span class="muted tiny">(You)</span>' : ''}
+              </div>
+              <div class="muted tiny">Start ${money(startNw)} → Now <strong style="color:#fff;">${money(nwNow)}</strong></div>
+            </div>
+          </div>
+
+          <div class="tb-side-stats">
+            <div>
+              <div class="muted tiny">Gained During Battle</div>
+              <strong style="font-size:17px;color:${score >= 0 ? 'var(--green)' : '#fca5a5'};">${signedMoney(score)}</strong>
+            </div>
+            <span class="tb-pct-badge ${pctCls}">${pctText}</span>
+          </div>
+
+          ${holdingsHtml ? `<div><div class="muted tiny" style="margin-bottom:4px;">Active Coins Held</div>${holdingsHtml}</div>` : ''}
+          <div>
+            <div class="muted tiny" style="margin-bottom:5px;">Trades During Battle (${pTrades.length})</div>
+            ${tradesHtml}
+          </div>
+        </div>
+      `;
+    };
+
+    body.innerHTML = `
+      <div class="tb-result-banner">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <strong>⏱ Time Left: <span id="tbInfoCountdownValue">${leftMs > 0 ? formatTbCountdown(leftMs) : 'Settling...'}</span></strong>
+          <strong style="color:#fde68a;">🏆 Prize Money: ${money(b.minStake)}${b.minStake < b.initialStake ? ` <span class="muted tiny">(shrunk from ${money(b.initialStake)})</span>` : ''}</strong>
+        </div>
+        <span class="muted tiny">🔒 Battle is live (${escapeHtml(formatTbDuration(b.durationMins))}) — cannot be stopped mid-battle.</span>
+      </div>
+      <div class="tb-spectator-grid">
+        ${renderPlayerSide(cProf, b.challengerId, cNw, b.challengerStartNw, cScore, cPct, cScore > oScore)}
+        ${renderPlayerSide(oProf, b.opponentId, oNw, b.opponentStartNw, oScore, oPct, oScore > cScore)}
+      </div>
+    `;
+
+    body.querySelectorAll('[data-tb-profile]').forEach(el => {
+      el.addEventListener('click', () => {
+        if (el.dataset.tbProfile) {
+          modal.classList.add('hidden');
+          tbState.activeInfoBattleId = null;
+          openProfileModal(el.dataset.tbProfile);
+        }
+      });
+    });
+    body.querySelectorAll('[data-tb-coin]').forEach(el => {
+      el.addEventListener('click', () => {
+        if (el.dataset.tbCoin) {
+          modal.classList.add('hidden');
+          tbState.activeInfoBattleId = null;
+          $('#profileModal')?.classList.add('hidden');
+          openCoin(el.dataset.tbCoin);
+        }
+      });
+    });
+
+    if (leftMs <= 0 && isParticipant) evaluateTraderBattles();
+    return;
+  }
+
+  if (b.status === 'completed' && b.result) {
+    modalCard?.classList.remove('is-wide');
+    modal.classList.add('hidden');
+    showTraderBattleResultPopup(b);
+  }
+}
+
+function checkActiveTraderBattleFloor(liveNw) {
+  if (!currentUser || !sb || !Number.isFinite(liveNw)) return;
+  const uid = String(currentUser.id);
+  const mine = getMyTraderBattles().filter(b => b.status === 'active');
+  if (!mine.length) return;
+
+  for (const b of mine) {
+    if (liveNw < b.minStake - 0.01) {
+      const shrunk = Math.max(0, floor2(liveNw));
+      if (shrunk >= b.minStake) continue;
+      b.minStake = shrunk;
+      updateTraderBattleHud();
+      toast(`📉 Battle stake bar shrunk to ${money(shrunk)} to match minimum funds.`);
+      sb.from('premium_requests').insert({
+        user_id: currentUser.id,
+        reason: '__TB_BAR__:' + JSON.stringify({
+          id: b.id,
+          stake: shrunk,
+          byId: uid,
+          ts: Date.now()
+        }),
+        status: 'denied'
+      }).then(() => {});
+    }
+  }
+}
+
+async function deductTraderBattleLossQueued(prizeAmount, battleId) {
+  if (!sb || !currentUser?.id || !Number.isFinite(prizeAmount) || prizeAmount <= 0) return true;
+  const uid = String(currentUser.id);
+
+  return runPlayCashUpdate(async () => {
+    let liveCash = Number(currentUser.cash || 0);
+    try {
+      const { data: prof } = await sb.from('profiles').select('cash').eq('id', uid).maybeSingle();
+      if (prof && prof.cash != null) liveCash = Number(prof.cash);
+    } catch (e) {}
+
+    // If liquid cash is below the prize owed, liquidate own coin holdings cleanly via bonding curve
+    if (liveCash < prizeAmount) {
+      try {
+        const srvResetTs = adminModStateCache.serverResetTs || 0;
+        const delCoins = adminModStateCache.deletedCoinIds || new Set();
+        const { data: holds } = await sb
+          .from('holdings')
+          .select('coin_id, shares, coins(id, price, today_open_price, created_at)')
+          .eq('user_id', uid);
+
+        const validHolds = (holds || []).filter(h =>
+          Number(h.shares) > 1e-8 &&
+          !delCoins.has(String(h.coin_id)) &&
+          h.coins &&
+          (!srvResetTs || (h.coins.created_at && new Date(h.coins.created_at).getTime() > srvResetTs))
+        );
+
+        for (const h of validHolds) {
+          if (liveCash >= prizeAmount - 0.01) break;
+          const shortfall = round2(prizeAmount - liveCash);
+          const coin = h.coins;
+          const owned = Number(h.shares || 0);
+          const p = Math.max(Number(coin.price) || 1, 0.01);
+          const fullSale = calcCurveSell(p, owned);
+          if (fullSale.proceeds <= 0) continue;
+
+          let sellShares = owned;
+          if (fullSale.proceeds > shortfall) {
+            const targetPrice = Math.max(0.01, p - CURVE_K * shortfall);
+            const approxShares = Math.log(p / targetPrice) / CURVE_K;
+            sellShares = Math.min(owned, Math.max(0, approxShares * 1.001));
+          }
+          if (sellShares <= 1e-8) continue;
+
+          const { newPrice, proceeds } = calcCurveSell(p, sellShares);
+          const remainingShares = (owned - sellShares) < 1e-8 ? 0 : (owned - sellShares);
+          const prevOpen = Number(coin.today_open_price) || p;
+          const todayPct = prevOpen > 0 ? ((newPrice - prevOpen) / prevOpen) * 100 : 0;
+
+          await sb.from('holdings').update({ shares: remainingShares }).eq('user_id', uid).eq('coin_id', coin.id);
+          await sb.from('coins').update({ price: newPrice, change_pct: todayPct }).eq('id', coin.id);
+          await sb.from('trades').insert({
+            coin_id: coin.id,
+            user_id: uid,
+            type: 'sell',
+            amount_usd: proceeds,
+            shares: sellShares,
+            price_after: newPrice
+          });
+          liveCash = round2(liveCash + proceeds);
+        }
+      } catch (e) {}
+    }
+
+    const newCash = Math.max(0, round2(liveCash - prizeAmount));
+    const { error } = await sb.from('profiles').update({ cash: newCash }).eq('id', uid);
+    if (error) return false;
+
+    currentUser.cash = newCash;
+    if ($('#topCash')) $('#topCash').textContent = money(newCash);
+    if ($('#moneyCash')) $('#moneyCash').textContent = money(newCash);
+    await updateNetWorth();
+    return true;
+  });
+}
+
+async function applyOwnTraderBattleSettlement(battle) {
+  if (!currentUser || !sb || !battle?.result) return;
+  const uid = String(currentUser.id);
+  if (battle.challengerId !== uid && battle.opponentId !== uid) return;
+
+  const res = battle.result;
+  if (!battle.paidUsers.has(uid) && !tbState.payingIds.has(battle.id)) {
+    tbState.payingIds.add(battle.id);
+    try {
+      const prize = Math.max(0, round2(res.finalPrize));
+      const isWinner = !res.isDraw && String(res.winnerId) === uid;
+      const isLoser = !res.isDraw && String(res.loserId) === uid;
+
+      let paidOk = true;
+      if (isWinner && prize > 0) {
+        paidOk = await creditPlayCashQueued(prize, () => ([{
+          user_id: uid,
+          reason: '__TB_PAID__:' + JSON.stringify({
+            id: battle.id,
+            userId: uid,
+            role: 'winner',
+            prizeDelta: prize,
+            ts: Date.now()
+          }),
+          status: 'denied'
+        }]));
+        if (paidOk) battle.paidUsers.add(uid);
+      } else if (isLoser && prize > 0) {
+        paidOk = await deductTraderBattleLossQueued(prize, battle.id);
+        if (paidOk) {
+          battle.paidUsers.add(uid);
+          try {
+            await sb.from('premium_requests').insert({
+              user_id: uid,
+              reason: '__TB_PAID__:' + JSON.stringify({
+                id: battle.id,
+                userId: uid,
+                role: 'loser',
+                prizeDelta: -prize,
+                ts: Date.now()
+              }),
+              status: 'denied'
+            });
+          } catch (e) {}
+        }
+      } else {
+        battle.paidUsers.add(uid);
+        try {
+          await sb.from('premium_requests').insert({
+            user_id: uid,
+            reason: '__TB_PAID__:' + JSON.stringify({
+              id: battle.id,
+              userId: uid,
+              role: 'draw',
+              prizeDelta: 0,
+              ts: Date.now()
+            }),
+            status: 'denied'
+          });
+        } catch (e) {}
+      }
+      if (typeof loadCoins === 'function' && isLoser) loadCoins().catch(() => {});
+    } finally {
+      tbState.payingIds.delete(battle.id);
+    }
+  }
+
+  if (!hasShownTbResultPopup(battle.id)) {
+    markTbResultPopupShown(battle.id);
+    const isWin = !res.isDraw && String(res.winnerId) === uid;
+    playSound(isWin ? 'buy' : 'sell');
+    userNotificationsFetchedAt = 0;
+    updateNotificationsBadge();
+    showTraderBattleResultPopup(battle);
+  }
+}
+
+async function settleTraderBattle(battle) {
+  if (!currentUser || !sb || !battle || battle.status !== 'active') return;
+  if (tbState.settlingIds.has(battle.id)) return;
+  tbState.settlingIds.add(battle.id);
+
+  try {
+    // Re-sync so we don't duplicate __TB_RESULT__ if opponent settled milliseconds earlier
+    await loadTraderBattles(true);
+    const freshB = tbState.battles.get(battle.id);
+    if (!freshB || freshB.status !== 'active' || freshB.result) {
+      if (freshB?.result) await applyOwnTraderBattleSettlement(freshB);
+      return;
+    }
+
+    await updateNetWorth();
+    const [{ data: cProf }, { data: oProf }] = await Promise.all([
+      sb.from('profiles').select('net_worth').eq('id', freshB.challengerId).maybeSingle(),
+      sb.from('profiles').select('net_worth').eq('id', freshB.opponentId).maybeSingle()
+    ]);
+
+    const cEndNw = Math.max(0, round2(cProf?.net_worth ?? freshB.challengerStartNw));
+    const oEndNw = Math.max(0, round2(oProf?.net_worth ?? freshB.opponentStartNw));
+    const cTradePnl = round2(cEndNw - freshB.challengerStartNw);
+    const oTradePnl = round2(oEndNw - freshB.opponentStartNw);
+
+    const barPrize = Math.max(0, floor2(Math.min(freshB.minStake, cEndNw, oEndNw)));
+    const diff = round2(cTradePnl - oTradePnl);
+    const isDraw = Math.abs(diff) < 0.01;
+    const winnerId = isDraw ? null : (diff > 0 ? freshB.challengerId : freshB.opponentId);
+    const loserId = isDraw ? null : (diff > 0 ? freshB.opponentId : freshB.challengerId);
+    const finalPrize = isDraw ? 0 : barPrize;
+
+    const cTotalDelta = isDraw ? cTradePnl : round2(cTradePnl + (winnerId === freshB.challengerId ? finalPrize : -finalPrize));
+    const oTotalDelta = isDraw ? oTradePnl : round2(oTradePnl + (winnerId === freshB.opponentId ? finalPrize : -finalPrize));
+
+    const resultPayload = {
+      id: freshB.id,
+      challengerStartNw: freshB.challengerStartNw,
+      challengerEndNw: cEndNw,
+      challengerTradePnl: cTradePnl,
+      challengerTotalDelta: cTotalDelta,
+      opponentStartNw: freshB.opponentStartNw,
+      opponentEndNw: oEndNw,
+      opponentTradePnl: oTradePnl,
+      opponentTotalDelta: oTotalDelta,
+      winnerId,
+      loserId,
+      isDraw,
+      finalPrize,
+      settledAt: Date.now()
+    };
+
+    const { error } = await sb.from('premium_requests').insert({
+      user_id: currentUser.id,
+      reason: '__TB_RESULT__:' + JSON.stringify(resultPayload),
+      status: 'denied'
+    });
+    if (error) return;
+
+    await loadTraderBattles(true);
+    const settledB = tbState.battles.get(freshB.id);
+    if (settledB?.result) {
+      if (tbState.activeInfoBattleId === settledB.id) {
+        $('#traderBattleInfoModal')?.classList.add('hidden');
+      }
+      await applyOwnTraderBattleSettlement(settledB);
+    }
+  } finally {
+    tbState.settlingIds.delete(battle.id);
+  }
+}
+
+async function evaluateTraderBattles() {
+  if (!currentUser || !sb) return;
+  const now = Date.now();
+  const mine = getMyTraderBattles();
+
+  for (const b of mine) {
+    if (b.status === 'active' && b.endsAt > 0 && now >= b.endsAt) {
+      await settleTraderBattle(b);
+    } else if (b.status === 'completed' && b.result) {
+      const uid = String(currentUser.id);
+      if (!b.paidUsers.has(uid) || !hasShownTbResultPopup(b.id)) {
+        await applyOwnTraderBattleSettlement(b);
+      }
+    }
+  }
+  updateTraderBattleHud();
+}
+
+function showTraderBattleResultPopup(battle) {
+  if (!currentUser || !battle?.result) return;
+  const modal = $('#traderBattleResultModal');
+  const heading = $('#tbResultHeading');
+  const body = $('#tbResultModalBody');
+  const doneBtn = $('#tbResultDoneBtn');
+  if (!modal || !heading || !body) return;
+
+  const uid = String(currentUser.id);
+  const res = battle.result;
+  const isChallenger = battle.challengerId === uid;
+  const didWin = !res.isDraw && String(res.winnerId) === uid;
+  const isDraw = Boolean(res.isDraw);
+
+  const cProf = getProfileSafe(battle.challengerId);
+  const oProf = getProfileSafe(battle.opponentId);
+  const cName = battle.challengerId === uid ? `You (${cProf.username || 'Trader'})` : `@${cProf.username || 'Trader'}`;
+  const oName = battle.opponentId === uid ? `You (${oProf.username || 'Trader'})` : `@${oProf.username || 'Trader'}`;
+  const winnerProf = res.winnerId ? getProfileSafe(res.winnerId) : null;
+  const winnerLabel = isDraw ? 'Draw (Tie)' : (String(res.winnerId) === uid ? 'You' : `@${winnerProf?.username || 'Trader'}`);
+
+  heading.textContent = isDraw ? 'Battle ended in a draw!' : (didWin ? 'You won the battle!' : 'You lost the battle!');
+  if (doneBtn) doneBtn.textContent = didWin ? 'Claim Victory' : 'Close';
+
+  const bannerCls = isDraw ? '' : (didWin ? 'is-win' : 'is-loss');
+  const cWon = !isDraw && String(res.winnerId) === battle.challengerId;
+  const oWon = !isDraw && String(res.winnerId) === battle.opponentId;
+  const prize = round2(res.finalPrize);
+
+  body.innerHTML = `
+    <div class="tb-result-banner ${bannerCls}">
+      <strong>${isDraw ? 'Exact Tie — No prize money transferred.' : (didWin ? `🏆 Winner: ${escapeHtml(winnerLabel)} (+${money(prize)} prize won!)` : `🏆 Winner: ${escapeHtml(winnerLabel)} · You lost ${money(prize)} prize money.`)}</strong>
+      <span class="muted tiny">
+        ${isDraw
+          ? 'Both traders had identical trading scores.'
+          : `Prize transferred: ${money(prize)}${prize < battle.initialStake ? ` (shrunk from ${money(battle.initialStake)} initial bar)` : ''}`}
+      </span>
+    </div>
+    <div class="tb-score-grid">
+      <div class="tb-player-card ${cWon ? 'is-winner' : (!isDraw ? 'is-loser' : '')}">
+        <div class="muted tiny">${escapeHtml(cName)} ${cWon ? '🏆' : ''}</div>
+        <div><span class="muted tiny">Trading Score: </span><strong style="color:${res.challengerTradePnl >= 0 ? 'var(--green)' : '#fca5a5'};">${signedMoney(res.challengerTradePnl)}</strong></div>
+        <div><span class="muted tiny">Prize: </span><strong style="color:${cWon ? 'var(--green)' : '#fca5a5'};">${isDraw ? money(0) : (cWon ? '+' + money(prize) : '-' + money(prize))}</strong></div>
+        <div style="margin-top:4px;padding-top:4px;border-top:1px solid var(--line);">
+          <span class="muted tiny">Total Entire Battle (incl. prize): </span>
+          <strong style="color:${res.challengerTotalDelta >= 0 ? 'var(--green)' : '#fca5a5'};">${signedMoney(res.challengerTotalDelta)}</strong>
+        </div>
+      </div>
+      <div class="tb-player-card ${oWon ? 'is-winner' : (!isDraw ? 'is-loser' : '')}">
+        <div class="muted tiny">${escapeHtml(oName)} ${oWon ? '🏆' : ''}</div>
+        <div><span class="muted tiny">Trading Score: </span><strong style="color:${res.opponentTradePnl >= 0 ? 'var(--green)' : '#fca5a5'};">${signedMoney(res.opponentTradePnl)}</strong></div>
+        <div><span class="muted tiny">Prize: </span><strong style="color:${oWon ? 'var(--green)' : '#fca5a5'};">${isDraw ? money(0) : (oWon ? '+' + money(prize) : '-' + money(prize))}</strong></div>
+        <div style="margin-top:4px;padding-top:4px;border-top:1px solid var(--line);">
+          <span class="muted tiny">Total Entire Battle (incl. prize): </span>
+          <strong style="color:${res.opponentTotalDelta >= 0 ? 'var(--green)' : '#fca5a5'};">${signedMoney(res.opponentTotalDelta)}</strong>
+        </div>
+      </div>
+    </div>
+  `;
+
+  modal.classList.remove('hidden');
+}
+
+function openTraderBattleResultById(battleId) {
+  const b = tbState.battles.get(String(battleId || ''));
+  if (b?.result) {
+    showTraderBattleResultPopup(b);
+  } else {
+    toast('Battle result is loading...');
+  }
+}
+
+function getTraderBattleNotifications(uid, delUsers) {
+  const items = [];
+  const del = delUsers || new Set();
+  tbState.battles.forEach(b => {
+    if (del.has(b.challengerId) || del.has(b.opponentId)) return;
+
+    // Incoming challenges (and kept visible as handled after Yes/No)
+    if (b.opponentId === uid && (b.status === 'pending' || b.status === 'active' || b.status === 'declined')) {
+      const cProf = getProfileSafe(b.challengerId);
+      items.push({
+        id: 'tb_ch_' + b.id,
+        category: 'tb_challenge',
+        ts: Number(b.createdAt || 0),
+        battleId: b.id,
+        stake: b.initialStake,
+        durationLabel: formatTbDuration(b.durationMins),
+        isPending: b.status === 'pending',
+        statusNote: b.status === 'active' ? 'Battle started (accepted)' : 'Declined',
+        authorId: b.challengerId,
+        authorProfile: cProf,
+        authorName: cProf.username || 'Trader'
+      });
+    }
+
+    // Completed battle results for BOTH challenger & opponent
+    if (b.status === 'completed' && b.result && (b.challengerId === uid || b.opponentId === uid)) {
+      const res = b.result;
+      const isChallenger = b.challengerId === uid;
+      const oppId = isChallenger ? b.opponentId : b.challengerId;
+      const oppProf = getProfileSafe(oppId);
+      const didWin = !res.isDraw && String(res.winnerId) === uid;
+      const isDraw = Boolean(res.isDraw);
+      const myTradePnl = isChallenger ? res.challengerTradePnl : res.opponentTradePnl;
+      const oppTradePnl = isChallenger ? res.opponentTradePnl : res.challengerTradePnl;
+      const myTotal = isChallenger ? res.challengerTotalDelta : res.opponentTotalDelta;
+
+      items.push({
+        id: 'tb_res_' + b.id,
+        category: 'tb_result',
+        ts: Number(res.settledAt || b.endsAt || b.createdAt || 0),
+        battleId: b.id,
+        didWin,
+        isDraw,
+        authorId: oppId,
+        authorProfile: oppProf,
+        authorName: oppProf.username || 'Trader',
+        summaryLine: isDraw
+          ? `Draw! Score: You ${signedMoney(myTradePnl)} vs @${oppProf.username || 'Trader'} ${signedMoney(oppTradePnl)} · Total: ${signedMoney(myTotal)}`
+          : `Score: You ${signedMoney(myTradePnl)} vs @${oppProf.username || 'Trader'} ${signedMoney(oppTradePnl)} · Prize ${didWin ? 'won' : 'lost'}: ${money(res.finalPrize)} · Your Total (incl. prize): ${signedMoney(myTotal)}`
+      });
+    }
+  });
+  return items;
+}
+
+async function handleTraderBattleRealtimeEvent(payload) {
+  if (!currentUser || !sb || !payload?.new) return;
+  const row = payload.new;
+  const reason = String(row.reason || '');
+  const uid = String(currentUser.id);
+
+  await loadTraderBattles(true);
+
+  if (reason.startsWith('__TB_CHALLENGE__:')) {
+    try {
+      const p = JSON.parse(reason.slice('__TB_CHALLENGE__:'.length));
+      if (p && String(p.opponentId) === uid) {
+        await ensureProfilesCached([p.challengerId]);
+        const cProf = getProfileSafe(p.challengerId);
+        const cName = cProf.username || 'Trader';
+        playSound('buy');
+        showLiveNotifPopup({
+          key: 'tb_req_' + p.id,
+          kind: 'battle',
+          icon: '⚔️',
+          title: 'Trader Battle Request',
+          body: `Trader Battle Request From - ${cName} (${formatTbDuration(p.durationMins)} · ${money(p.stake)})`,
+          onClick: () => openTraderBattleInfoModal(p.id)
+        });
+        updateTraderBattleHud();
+        userNotificationsFetchedAt = 0;
+        updateNotificationsBadge();
+      }
+    } catch (e) {}
+  } else if (reason.startsWith('__TB_ACCEPT__:')) {
+    try {
+      const p = JSON.parse(reason.slice('__TB_ACCEPT__:'.length));
+      const b = p?.id ? tbState.battles.get(String(p.id)) : null;
+      if (b && b.challengerId === uid) {
+        const oProf = getProfileSafe(b.opponentId);
+        playSound('buy');
+        showLiveNotifPopup({
+          key: 'tb_acc_' + b.id,
+          kind: 'battle',
+          icon: '⚔️',
+          title: 'Trader Battle Is ON!',
+          body: `@${oProf.username || 'Trader'} pressed Yes! ${formatTbDuration(b.durationMins)} for ${money(b.minStake)}`,
+          onClick: () => openTraderBattleInfoModal(b.id)
+        });
+      }
+    } catch (e) {}
+  } else if (reason.startsWith('__TB_RESULT__:')) {
+    try {
+      const p = JSON.parse(reason.slice('__TB_RESULT__:'.length));
+      const b = p?.id ? tbState.battles.get(String(p.id)) : null;
+      if (b && (b.challengerId === uid || b.opponentId === uid)) {
+        await applyOwnTraderBattleSettlement(b);
+      }
+    } catch (e) {}
+  } else if (reason.startsWith('__TB_BAR__:')) {
+    try {
+      const p = JSON.parse(reason.slice('__TB_BAR__:'.length));
+      const b = p?.id ? tbState.battles.get(String(p.id)) : null;
+      if (b && String(p.byId) !== uid && (b.challengerId === uid || b.opponentId === uid)) {
+        toast(`📉 Opponent dropped below bar — battle stake shrunk to ${money(b.minStake)}`);
+      }
+    } catch (e) {}
+  }
+
+  updateTraderBattleHud();
+}
+
+// Trader Battle Modal Listeners
+$$('#tbLengthPresets .tb-preset-chip').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const mins = Number(btn.dataset.tbMins || 120);
+    if (!TB_ALLOWED_MINS.includes(mins)) return;
+    tbState.selectedMins = mins;
+    $$('#tbLengthPresets .tb-preset-chip').forEach(x => x.classList.toggle('active', x === btn));
+  });
+});
+
+$$('#tbPricePresets .tb-preset-chip').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.disabled) return;
+    const raw = btn.dataset.tbStake;
+    const val = raw === 'max' ? tbState.maxStakeAllowed : Number(raw);
+    if (!Number.isFinite(val) || val < 1) return;
+    if ($('#tbStakeInput')) $('#tbStakeInput').value = String(floor2(val));
+    $$('#tbPricePresets .tb-preset-chip').forEach(x => x.classList.toggle('active', x === btn));
+  });
+});
+
+$('#tbNextToPriceBtn')?.addEventListener('click', proceedToTraderBattlePriceStep);
+$('#tbBackToLengthBtn')?.addEventListener('click', () => {
+  $('#tbStepPrice')?.classList.add('hidden');
+  $('#tbStepLength')?.classList.remove('hidden');
+});
+$('#tbSendChallengeBtn')?.addEventListener('click', sendTraderBattleChallenge);
+$('#closeTraderBattleBtn')?.addEventListener('click', closeTraderBattleModal);
+$('#tbCancelLengthBtn')?.addEventListener('click', closeTraderBattleModal);
+$('#traderBattleModal')?.addEventListener('click', e => {
+  if (e.target === $('#traderBattleModal')) closeTraderBattleModal();
+});
+
+$('#closeTbInfoBtn')?.addEventListener('click', () => {
+  tbState.activeInfoBattleId = null;
+  $('#traderBattleInfoModal')?.classList.add('hidden');
+});
+$('#traderBattleInfoModal')?.addEventListener('click', e => {
+  if (e.target === $('#traderBattleInfoModal')) {
+    tbState.activeInfoBattleId = null;
+    $('#traderBattleInfoModal')?.classList.add('hidden');
+  }
+});
+
+$('#closeTbResultBtn')?.addEventListener('click', () => $('#traderBattleResultModal')?.classList.add('hidden'));
+$('#tbResultDoneBtn')?.addEventListener('click', () => $('#traderBattleResultModal')?.classList.add('hidden'));
+$('#traderBattleResultModal')?.addEventListener('click', e => {
+  if (e.target === $('#traderBattleResultModal')) $('#traderBattleResultModal')?.classList.add('hidden');
+});
+
 
 
 

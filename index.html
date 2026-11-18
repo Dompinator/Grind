@@ -89,6 +89,7 @@
           <h2 id="pageTitle">Discover currencies</h2>
         </div>
         <div class="top-right">
+          <button type="button" id="topBattlePill" class="battle-top-pill hidden" title="Active Trader Battle">⚔️ <span id="topBattlePillText">00:00</span></button>
           <div class="cash-pill"><small>CASH</small> <span id="topCash">$15.00</span></div>
           <button type="button" id="openDmBtn" class="dm-topbar-btn" title="Direct Messages" aria-label="Direct Messages">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -476,6 +477,7 @@
               <button type="button" class="feed-tab" data-unotif="warning">Warnings</button>
               <button type="button" class="feed-tab" data-unotif="social">Followers, Likes &amp; Comments</button>
               <button type="button" class="feed-tab" data-unotif="donate">Donations</button>
+              <button type="button" class="feed-tab" data-unotif="battle">⚔️ Battles</button>
             </div>
             <div id="userNotifsList" class="requests-list" style="margin-bottom:28px;"></div>
             <div id="emptyUserNotifs" class="empty-state hidden" style="padding:28px 20px;">
@@ -798,7 +800,10 @@
     <div class="modal-card profile-modal-card">
       <div class="modal-head">
         <div class="eyebrow purple-text">TRADER PROFILE</div>
-        <button class="zoom-btn" id="closeProfileBtn" type="button">✕</button>
+        <div class="profile-head-right-actions">
+          <button type="button" id="profileChallengeBtn" class="tb-challenge-btn hidden">⚔️ Challenge</button>
+          <button class="zoom-btn" id="closeProfileBtn" type="button">✕</button>
+        </div>
       </div>
       <div id="profileModalBody"></div>
     </div>
@@ -1310,6 +1315,7 @@
                   <button type="button" id="playAddTextModeBtn">𝐓 Add Text</button>
                   <button type="button" id="playAddStickerModeBtn">😎 Add Sticker / Emoji</button>
                   <button type="button" id="playAddPhotoModeBtn">🖼 Add Image</button>
+                  <button type="button" id="playAddPollModeBtn">📊 Add Poll (Max 4)</button>
                 </div>
               </div>
             </div>
@@ -1344,6 +1350,18 @@
               <div id="playEditorGifStatus" class="dm-gif-status hidden"></div>
               <div id="playEditorGifGrid" class="dm-gif-grid play-editor-gif-grid"></div>
               <div class="dm-giphy-attr">Powered by GIPHY</div>
+            </div>
+
+            <div id="playEditorPollPanel" class="play-editor-subpanel hidden">
+              <label style="margin-bottom:8px;">Poll question
+                <input id="playEditorPollQuestionInput" maxlength="80" placeholder="Ask viewers a question...">
+              </label>
+              <div class="tiny muted" style="margin-bottom:6px;">Options (2–4 options)</div>
+              <div id="playEditorPollOptionsWrap" class="play-poll-builder-opts"></div>
+              <div class="play-text-add-row" style="margin-top:8px;">
+                <button type="button" class="zoom-btn" id="playEditorPollAddOptBtn">＋ Add Option</button>
+                <button type="button" class="primary-btn" id="playEditorAddPollConfirmBtn">Place Poll</button>
+              </div>
             </div>
           </div>
 
@@ -1541,6 +1559,125 @@
     </div>
   </div>
 
+  <!-- PLAY VIDEO BOOST MODAL -->
+  <div id="playBoostModal" class="modal-backdrop hidden" style="z-index:124;" role="dialog" aria-modal="true" aria-labelledby="playBoostHeading">
+    <div class="modal-card play-boost-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow purple-text">⚡ PLAY BOOST</div>
+          <h3 id="playBoostHeading">Boost Video Reach</h3>
+          <p id="playBoostVideoMeta" class="muted tiny" style="margin:2px 0 0;">Selected video</p>
+        </div>
+        <button type="button" class="zoom-btn" id="closePlayBoostBtn" aria-label="Close">✕</button>
+      </div>
+      <div id="playBoostStatusNote" class="play-boost-status-note hidden"></div>
+      <p class="muted tiny" style="margin:0 0 12px;">Boosted videos show up in PLAY with the same high priority as creators users follow, and display a purple <strong>Boosted</strong> tag under your username.</p>
+      <div class="play-boost-plans-grid">
+        <button type="button" class="play-boost-plan-btn" data-boost-days="1" data-boost-cost="399">
+          <div class="play-boost-plan-top">
+            <span class="play-boost-bolt-badge">⚡ 1 DAY</span>
+            <strong class="play-boost-price">$399</strong>
+          </div>
+          <div class="muted tiny">Boosts your video in PLAY for 24 hours.</div>
+        </button>
+        <button type="button" class="play-boost-plan-btn is-featured" data-boost-days="2" data-boost-cost="500">
+          <div class="play-boost-plan-top">
+            <span class="play-boost-bolt-badge">⚡ 2 DAYS · BEST VALUE</span>
+            <strong class="play-boost-price">$500</strong>
+          </div>
+          <div class="muted tiny">Boosts your video in PLAY for 48 hours!</div>
+        </button>
+      </div>
+      <div class="muted tiny" id="playBoostCashAvail" style="margin-top:10px;">Available cash: $0.00</div>
+      <p id="playBoostMsg" class="form-message"></p>
+    </div>
+  </div>
+
+  <!-- TRADER BATTLE CHALLENGE MODAL (Step 1: Length, Step 2: Price) -->
+  <div id="traderBattleModal" class="modal-backdrop hidden" style="z-index:125;" role="dialog" aria-modal="true" aria-labelledby="tbModalHeading">
+    <div class="modal-card tb-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow purple-text">⚔️ TRADER BATTLE</div>
+          <h3 id="tbModalHeading">Challenge Trader</h3>
+          <p id="tbOpponentMeta" class="muted tiny" style="margin:2px 0 0;">Select battle length and stake.</p>
+        </div>
+        <button type="button" class="zoom-btn" id="closeTraderBattleBtn" aria-label="Close">✕</button>
+      </div>
+
+      <div id="tbStepLength">
+        <div class="tb-step-label">1. Length</div>
+        <p class="muted tiny" style="margin:2px 0 10px;">Choose how long the Trader Battle lasts once accepted (cannot be stopped mid-battle).</p>
+        <div class="tb-chips-grid" id="tbLengthPresets">
+          <button type="button" class="tb-preset-chip active" data-tb-mins="120">2h</button>
+          <button type="button" class="tb-preset-chip" data-tb-mins="480">8h</button>
+          <button type="button" class="tb-preset-chip" data-tb-mins="720">12h</button>
+          <button type="button" class="tb-preset-chip" data-tb-mins="1440">24h</button>
+          <button type="button" class="tb-preset-chip" data-tb-mins="2880">48h</button>
+          <button type="button" class="tb-preset-chip" data-tb-mins="5760">96h</button>
+        </div>
+        <p id="tbLengthMsg" class="form-message"></p>
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px;">
+          <button type="button" class="zoom-btn" id="tbCancelLengthBtn" style="padding:10px 16px;">Cancel</button>
+          <button type="button" class="primary-btn" id="tbNextToPriceBtn">Next: Price →</button>
+        </div>
+      </div>
+
+      <div id="tbStepPrice" class="hidden">
+        <div class="tb-step-label">2. Price (Prize Stake)</div>
+        <div id="tbBalancesSummary" class="tb-balances-box"></div>
+        <div class="tb-chips-grid" id="tbPricePresets" style="margin-top:10px;">
+          <button type="button" class="tb-preset-chip" data-tb-stake="10">$10</button>
+          <button type="button" class="tb-preset-chip" data-tb-stake="25">$25</button>
+          <button type="button" class="tb-preset-chip" data-tb-stake="50">$50</button>
+          <button type="button" class="tb-preset-chip" data-tb-stake="100">$100</button>
+          <button type="button" class="tb-preset-chip" data-tb-stake="500">$500</button>
+          <button type="button" class="tb-preset-chip" data-tb-stake="max">Max</button>
+        </div>
+        <label style="margin-top:10px;">Battle Stake Amount (USD)
+          <input id="tbStakeInput" type="number" min="1" step="0.01" placeholder="50.00">
+        </label>
+        <p class="muted tiny" style="margin:6px 0 0;">Both players must have this amount. If either player's money drops below this bar during the battle, the prize automatically shrinks to that minimum.</p>
+        <p id="tbPriceMsg" class="form-message"></p>
+        <div style="display:flex;justify-content:space-between;gap:10px;margin-top:14px;">
+          <button type="button" class="zoom-btn" id="tbBackToLengthBtn" style="padding:10px 16px;">← Length</button>
+          <button type="button" class="primary-btn" id="tbSendChallengeBtn">⚔️ Send Challenge</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ACTIVE / PENDING TRADER BATTLE STATUS MODAL -->
+  <div id="traderBattleInfoModal" class="modal-backdrop hidden" style="z-index:125;" role="dialog" aria-modal="true" aria-labelledby="tbInfoHeading">
+    <div class="modal-card tb-modal-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow purple-text">⚔️ TRADER BATTLE</div>
+          <h3 id="tbInfoHeading">Battle Status</h3>
+        </div>
+        <button type="button" class="zoom-btn" id="closeTbInfoBtn" aria-label="Close">✕</button>
+      </div>
+      <div id="tbInfoModalBody"></div>
+    </div>
+  </div>
+
+  <!-- TRADER BATTLE RESULT POPUP MODAL -->
+  <div id="traderBattleResultModal" class="modal-backdrop hidden" style="z-index:128;" role="dialog" aria-modal="true" aria-labelledby="tbResultHeading">
+    <div class="modal-card tb-result-card">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow purple-text">⚔️ BATTLE COMPLETE</div>
+          <h3 id="tbResultHeading">You won the battle!</h3>
+        </div>
+        <button type="button" class="zoom-btn" id="closeTbResultBtn" aria-label="Close">✕</button>
+      </div>
+      <div id="tbResultModalBody"></div>
+      <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+        <button type="button" class="primary-btn" id="tbResultDoneBtn">Awesome</button>
+      </div>
+    </div>
+  </div>
+
   <!-- REAL-TIME NOTIFICATION POPUP STACK -->
   <div id="liveNotifPopups" class="live-notif-popups-container" aria-live="polite"></div>
 
@@ -1548,6 +1685,6 @@
   <div id="rewardBurstLayer" class="reward-burst-layer" aria-hidden="true"></div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=60"></script>
+  <script src="app.js?v=61"></script>
 </body>
 </html>
