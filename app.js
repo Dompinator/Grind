@@ -5260,6 +5260,8 @@ async function loadPlayData(force = false) {
             musicName: String(p.musicName || ''),
             musicUrl: String(p.musicUrl || ''),
             musicFallbackUrl: String(p.musicFallbackUrl || ''),
+            musicAudioId: p.musicAudioId ? String(p.musicAudioId).slice(0, 100) : '',
+            musicBakedInVideo: Boolean(p.musicBakedInVideo),
             ts: Number(p.ts) || rowTs,
             profile: r.profiles || { id: uid, username: 'Trader' }
           };
@@ -5956,6 +5958,22 @@ function syncPlayMuteUi() {
   if (playState.activeVoiceAudio) playState.activeVoiceAudio.muted = playState.muted;
 }
 
+function createPlayableAudioElement(url, fallbackUrl = '') {
+  const s = String(url || '');
+  const isVideoCarrier = /\.(mp4|webm)(\?|$)/i.test(s) || s.startsWith('data:video/');
+  const el = isVideoCarrier ? document.createElement('video') : new Audio();
+  if (isVideoCarrier) el.playsInline = true;
+  el.src = s;
+  el.onerror = () => {
+    if (fallbackUrl && !el.dataset.fallbackTried) {
+      el.dataset.fallbackTried = '1';
+      el.src = fallbackUrl;
+      el.play().catch(() => {});
+    }
+  };
+  return el;
+}
+
 function activatePlaySlide(index) {
   const slides = $$('#playFeedTrack .play-slide');
   if (!slides.length || index < 0 || index >= slides.length) return;
@@ -5974,6 +5992,7 @@ function activatePlaySlide(index) {
   const vidEl = slideEl.querySelector('video.play-media-video');
   const musicUrl = item.slideType === 'video' ? item.video.musicUrl : '';
   const musicFallback = item.slideType === 'video' ? item.video.musicFallbackUrl : '';
+  const musicAlreadyBaked = item.slideType === 'video' && Boolean(item.video.musicBakedInVideo);
   const voiceUrl = item.slideType === 'video' ? item.video.voiceoverUrl : '';
   const muteOrig = item.slideType === 'video' ? Boolean(item.video.muteOriginal) : false;
   const speed = item.slideType === 'video' ? Math.min(2.5, Math.max(0.5, Number(item.video.playbackRate || 1))) : 1;
@@ -5992,18 +6011,11 @@ function activatePlaySlide(index) {
     });
   }
 
-  if (musicUrl) {
-    const audio = new Audio(musicUrl);
+  if (musicUrl && !musicAlreadyBaked) {
+    const audio = createPlayableAudioElement(musicUrl, musicFallback);
     audio.loop = true;
     audio.muted = playState.muted;
     audio.volume = voiceUrl ? 0.42 : 0.54;
-    audio.onerror = () => {
-      if (musicFallback && !audio.dataset.fallbackTried) {
-        audio.dataset.fallbackTried = '1';
-        audio.src = musicFallback;
-        audio.play().catch(() => {});
-      }
-    };
     playState.activeAudio = audio;
     audio.play().catch(() => {});
   }
@@ -6104,7 +6116,7 @@ function createPlaySlideHtml(item, idx) {
             ${v.title ? `<div class="play-video-title">${escapeHtml(v.title)} ${speedTag}</div>` : (speedTag ? `<div>${speedTag}</div>` : '')}
             <div class="play-chips-row">
               <span class="play-views-tag" data-play-views="${escapeHtml(v.id)}">👁 ${sum.views}</span>
-              ${v.musicName ? `<div class="play-music-chip">♫ ${escapeHtml(cleanMediaDisplayName(v.musicName))}</div>` : ''}
+              ${v.musicName ? `<button type="button" class="play-music-chip play-music-chip-btn" data-play-song="${escapeHtml(v.id)}" title="Download or use this sound">♫ ${escapeHtml(cleanMediaDisplayName(v.musicName))} <span class="play-chip-use-tag">Use</span></button>` : ''}
               ${v.voiceoverUrl ? `<div class="play-vo-chip">🎙 Voiceover</div>` : ''}
               ${v.linkedCoinId ? `<button type="button" class="play-linked-coin-chip" data-play-coin="${escapeHtml(v.linkedCoinId)}">◈ ${escapeHtml(v.linkedCoinName || 'Coin')} ($${escapeHtml(v.linkedCoinTicker || 'COIN')}) →</button>` : ''}
             </div>
@@ -6180,8 +6192,16 @@ function wirePlaySlideInteractions(slideEl) {
   // Tap to pause/play
   slideEl.querySelectorAll('[data-play-tap]').forEach(el => {
     el.addEventListener('click', e => {
-      if (e.target.closest('[data-play-profile],[data-follow-user],[data-play-donate],[data-play-coin]')) return;
+      if (e.target.closest('[data-play-profile],[data-follow-user],[data-play-donate],[data-play-coin],[data-play-song]')) return;
       toggleActiveSlidePause(slideEl);
+    });
+  });
+
+  // Song chip click (download / use sound)
+  slideEl.querySelectorAll('[data-play-song]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      if (btn.dataset.playSong) openPlayUseSongModal(btn.dataset.playSong);
     });
   });
 
@@ -6440,11 +6460,14 @@ async function deletePlayVideo(videoId) {
     toast('Could not delete video: ' + error.message);
     return;
   }
-  if (vid.kind === 'video' && /^https:\/\/raw\.githubusercontent\.com\//i.test(String(vid.videoUrl || ''))) {
+  if (
+    (vid.kind === 'video' && /^https:\/\/raw\.githubusercontent\.com\//i.test(String(vid.videoUrl || ''))) ||
+    (vid.musicAudioId && /^https:\/\/raw\.githubusercontent\.com\//i.test(String(vid.musicUrl || '')))
+  ) {
     try {
       await deletePlayVideoFileFromGitHub(vid);
     } catch (cleanupError) {
-      console.warn('PLAY video file cleanup failed:', cleanupError);
+      console.warn('PLAY media file cleanup failed:', cleanupError);
     }
   }
   playState.deletedIds.add(String(videoId));
@@ -7294,16 +7317,9 @@ function playSelectedMusicPreview(selectEl, btnEl) {
   if (!name) return toast('Pick a track from the Music folder first!');
   const track = (musicCache || []).find(t => t.name === name);
   if (!track) return;
-  const audio = new Audio(track.url);
+  const audio = createPlayableAudioElement(track.url, track.fallbackUrl || '');
   audio.loop = true;
   audio.volume = 0.55;
-  audio.onerror = () => {
-    if (track.fallbackUrl && !audio.dataset.fbTried) {
-      audio.dataset.fbTried = '1';
-      audio.src = track.fallbackUrl;
-      audio.play().catch(() => {});
-    }
-  };
   playState.previewAudio = audio;
   playState.previewBtnEl = btnEl;
   if (btnEl) btnEl.textContent = '■ Stop';
@@ -7821,12 +7837,65 @@ async function loadPlayEditorGifs(query = '') {
   });
 }
 
-async function openPlayCreatorStudio() {
+let pendingEditorAudioFile = null;
+let pendingEditorAudioPreviewEl = null;
+let pendingEditorAudioPreviewObjUrl = '';
+
+function stopEditorCustomAudioPreview() {
+  if (pendingEditorAudioPreviewEl) {
+    try { pendingEditorAudioPreviewEl.pause(); } catch (e) {}
+    pendingEditorAudioPreviewEl = null;
+  }
+  if (pendingEditorAudioPreviewObjUrl) {
+    try { URL.revokeObjectURL(pendingEditorAudioPreviewObjUrl); } catch (e) {}
+    pendingEditorAudioPreviewObjUrl = '';
+  }
+  const prevBtn = $('#playEditorCustomAudioPreviewBtn');
+  if (prevBtn) prevBtn.textContent = '▶ Test';
+}
+
+function syncEditorCustomAudioUi() {
+  const prevBtn = $('#playEditorCustomAudioPreviewBtn');
+  const clearBtn = $('#playEditorCustomAudioClearBtn');
+  const nameInp = $('#playEditorCustomAudioNameInput');
+  const statusEl = $('#playEditorCustomAudioStatus');
+  const musicSel = $('#playEditorMusicSelect');
+  const hasAudio = Boolean(pendingEditorAudioFile);
+
+  if (prevBtn) {
+    prevBtn.classList.toggle('hidden', !hasAudio);
+    prevBtn.textContent = pendingEditorAudioPreviewEl ? '■ Stop' : '▶ Test';
+  }
+  if (clearBtn) clearBtn.classList.toggle('hidden', !hasAudio);
+  if (nameInp) nameInp.classList.toggle('hidden', !hasAudio);
+  if (musicSel) {
+    musicSel.disabled = hasAudio;
+    if (hasAudio) musicSel.value = '';
+  }
+  if (statusEl) {
+    statusEl.textContent = hasAudio
+      ? `♪ ${pendingEditorAudioFile.name} — attached only to this video (viewers can download & use it too!).`
+      : 'Optional — attach your own audio file to this video. Viewers can click the song in the corner to download & use it!';
+  }
+}
+
+async function openPlayCreatorStudio(preloadedSong = null) {
   $('#playUploadChoiceModal')?.classList.add('hidden');
+  stopActivePlayMedia();
+  stopMusicPreviewAudio();
+  stopEditorCustomAudioPreview();
   stopVoiceoverRecorderIfActive();
   stopVoiceoverPreview();
   playVoiceoverState.creatorUrl = '';
   syncVoiceoverUi('creator');
+
+  pendingEditorAudioFile = preloadedSong?.file || null;
+  if ($('#playEditorCustomAudioInput')) $('#playEditorCustomAudioInput').value = '';
+  if ($('#playEditorCustomAudioNameInput')) {
+    $('#playEditorCustomAudioNameInput').value = pendingEditorAudioFile
+      ? cleanMediaDisplayName(preloadedSong?.name || pendingEditorAudioFile.name)
+      : '';
+  }
 
   playEditorState.bgColor = '#161222';
   playEditorState.aspectRatio = '9:16';
@@ -7853,14 +7922,21 @@ async function openPlayCreatorStudio() {
   populatePlayCoinSelect($('#playEditorCoinSelect'), 'No Linked Coin (optional)');
   syncPlayEditorAspectUi();
   renderPlayEditorStage();
+  syncEditorCustomAudioUi();
   $('#playCreatorModal')?.classList.remove('hidden');
   await populateMusicSelect($('#playEditorMusicSelect'), 'No Music');
+  if (!pendingEditorAudioFile && preloadedSong?.builtInTrackName && $('#playEditorMusicSelect')) {
+    $('#playEditorMusicSelect').value = preloadedSong.builtInTrackName;
+  }
+  syncEditorCustomAudioUi();
 }
 
 function closePlayCreatorStudio() {
   stopMusicPreviewAudio();
+  stopEditorCustomAudioPreview();
   stopVoiceoverRecorderIfActive();
   stopVoiceoverPreview();
+  pendingEditorAudioFile = null;
   hideModalSmooth($('#playCreatorModal'));
 }
 
@@ -8127,6 +8203,50 @@ $('#playEditorMusicPreviewBtn')?.addEventListener('click', () => {
   playSelectedMusicPreview($('#playEditorMusicSelect'), $('#playEditorMusicPreviewBtn'));
 });
 
+$('#playEditorCustomAudioInput')?.addEventListener('change', e => {
+  const audioFile = e.target.files?.[0];
+  stopEditorCustomAudioPreview();
+  if (!audioFile) return;
+  if (audioFile.size > 25 * 1024 * 1024) {
+    toast('Audio file must be under 25 MB.');
+    e.target.value = '';
+    return;
+  }
+  stopMusicPreviewAudio();
+  pendingEditorAudioFile = audioFile;
+  if ($('#playEditorCustomAudioNameInput')) {
+    $('#playEditorCustomAudioNameInput').value = cleanMediaDisplayName(audioFile.name);
+  }
+  syncEditorCustomAudioUi();
+  toast(`Attached audio: ${audioFile.name}`);
+});
+
+$('#playEditorCustomAudioPreviewBtn')?.addEventListener('click', () => {
+  if (pendingEditorAudioPreviewEl) {
+    stopEditorCustomAudioPreview();
+    return;
+  }
+  if (!pendingEditorAudioFile) return;
+  stopMusicPreviewAudio();
+  const objUrl = URL.createObjectURL(pendingEditorAudioFile);
+  const audio = createPlayableAudioElement(objUrl);
+  audio.loop = true;
+  audio.volume = 0.72;
+  pendingEditorAudioPreviewObjUrl = objUrl;
+  pendingEditorAudioPreviewEl = audio;
+  const prevBtn = $('#playEditorCustomAudioPreviewBtn');
+  if (prevBtn) prevBtn.textContent = '■ Stop';
+  audio.play().catch(() => toast('Tap again to preview audio'));
+});
+
+$('#playEditorCustomAudioClearBtn')?.addEventListener('click', () => {
+  stopEditorCustomAudioPreview();
+  pendingEditorAudioFile = null;
+  if ($('#playEditorCustomAudioInput')) $('#playEditorCustomAudioInput').value = '';
+  if ($('#playEditorCustomAudioNameInput')) $('#playEditorCustomAudioNameInput').value = '';
+  syncEditorCustomAudioUi();
+});
+
 $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
   if (!sb || !currentUser?.id || playEditorState.saving) return;
   const msgEl = $('#playCreatorMsg');
@@ -8155,12 +8275,33 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
     return;
   }
 
+  const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  let customAudioName = '';
+  let customAudioUrl = '';
+  let customAudioId = '';
+  if (pendingEditorAudioFile) {
+    customAudioName = cleanMediaDisplayName(
+      ($('#playEditorCustomAudioNameInput')?.value || '').trim() || pendingEditorAudioFile.name
+    ) || 'Custom Audio';
+    customAudioId = 'paud_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    try {
+      if (msgEl) msgEl.textContent = 'Saving custom audio to GitHub...';
+      customAudioUrl = await uploadPlayAudioToGitHub(pendingEditorAudioFile, customAudioId);
+    } catch (audErr) {
+      if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
+      playEditorState.saving = false;
+      if (finishBtn) finishBtn.disabled = false;
+      updatePlayUploadFeeUi();
+      if (msgEl) msgEl.textContent = 'Audio upload failed: ' + (audErr?.message || 'Unknown error');
+      return;
+    }
+  }
+
   const musicName = $('#playEditorMusicSelect')?.value || '';
-  const track = musicName ? (musicCache || []).find(t => t.name === musicName) : null;
+  const track = !customAudioUrl && musicName ? (musicCache || []).find(t => t.name === musicName) : null;
   const linkedId = $('#playEditorCoinSelect')?.value || '';
   const linkedCoin = linkedId ? (coins || []).find(c => String(c.id) === String(linkedId)) : null;
   const voUrl = playVoiceoverState.creatorUrl || '';
-  const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
   const payload = {
     id: newVidId,
     kind: 'scene',
@@ -8174,9 +8315,10 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
       ...(emoji ? { emoji } : {}),
       ...(text ? { text, color, style, font: font || 'sans' } : {})
     })),
-    musicName: track ? track.name : '',
-    musicUrl: track ? track.url : '',
-    musicFallbackUrl: track ? (track.fallbackUrl || '') : '',
+    musicName: customAudioUrl ? customAudioName : (track ? track.name : ''),
+    musicUrl: customAudioUrl ? customAudioUrl : (track ? track.url : ''),
+    musicFallbackUrl: customAudioUrl ? '' : (track ? (track.fallbackUrl || '') : ''),
+    ...(customAudioId ? { musicAudioId: customAudioId } : {}),
     ...(voUrl ? { voiceoverUrl: voUrl } : {}),
     ...(linkedCoin ? { linkedCoinId: String(linkedCoin.id), linkedCoinName: linkedCoin.name, linkedCoinTicker: linkedCoin.ticker } : {}),
     ts: Date.now()
@@ -8191,6 +8333,9 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
   if (finishBtn) finishBtn.disabled = false;
   updatePlayUploadFeeUi();
   if (error) {
+    if (customAudioId) {
+      try { await deletePlayVideoFileFromGitHub({ id: customAudioId, user_id: currentUser.id, musicAudioId: customAudioId }); } catch (e) {}
+    }
     if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
     if (msgEl) msgEl.textContent = 'Publish error: ' + error.message;
     return;
@@ -8467,13 +8612,196 @@ async function uploadPlayVideoToGitHub(dataUrl, videoId) {
   return data.url;
 }
 
+function inferPlayAudioMimeType(file) {
+  const raw = String(file?.type || '').toLowerCase().split(';')[0].trim();
+  const valid = new Set(['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/webm']);
+  if (valid.has(raw)) return raw;
+  const n = String(file?.name || '').toLowerCase();
+  if (n.endsWith('.mp3')) return 'audio/mpeg';
+  if (n.endsWith('.m4a')) return 'audio/mp4';
+  if (n.endsWith('.aac')) return 'audio/aac';
+  if (n.endsWith('.ogg')) return 'audio/ogg';
+  if (n.endsWith('.wav')) return 'audio/wav';
+  if (n.endsWith('.webm')) return 'audio/webm';
+  return '';
+}
+
+async function encodeAudioToMediaContainerDataUrl(audioFile) {
+  const objectUrl = URL.createObjectURL(audioFile);
+  const el = createPlayableAudioElement(objectUrl);
+  el.preload = 'auto';
+  el.playsInline = true;
+  el.muted = false;
+  el.volume = 1;
+
+  await new Promise((resolve, reject) => {
+    const done = () => resolve();
+    if (el.readyState >= 1) return done();
+    el.onloadedmetadata = done;
+    el.onerror = () => reject(new Error('Could not read audio file'));
+  });
+
+  const maxDur = Math.min(Number(el.duration || 20) || 20, 42);
+  const canvas = document.createElement('canvas');
+  canvas.width = 16;
+  canvas.height = 16;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#090710';
+    ctx.fillRect(0, 0, 16, 16);
+  }
+  const tracks = [];
+  if (canvas.captureStream) {
+    tracks.push(...canvas.captureStream(1).getVideoTracks());
+  }
+
+  let audioCtx = null;
+  let audioDest = null;
+  let songBufferSource = null;
+  let hasAudioTrack = false;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) {
+      audioCtx = new AC();
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume().catch(() => {});
+      }
+      audioDest = audioCtx.createMediaStreamDestination();
+      let decoded = false;
+      try {
+        const arrBuf = await audioFile.arrayBuffer();
+        const audioBuf = await audioCtx.decodeAudioData(arrBuf);
+        songBufferSource = audioCtx.createBufferSource();
+        songBufferSource.buffer = audioBuf;
+        const g = audioCtx.createGain();
+        g.gain.value = 1;
+        songBufferSource.connect(g);
+        g.connect(audioDest);
+        decoded = true;
+      } catch (decodeErr) {
+        decoded = false;
+      }
+      if (!decoded) {
+        const srcNode = audioCtx.createMediaElementSource(el);
+        const g = audioCtx.createGain();
+        g.gain.value = 1;
+        srcNode.connect(g);
+        g.connect(audioDest);
+      }
+      const cap = audioDest.stream.getAudioTracks();
+      if (cap.length) {
+        tracks.push(...cap);
+        hasAudioTrack = true;
+      }
+    }
+  } catch (e) {
+    if (audioCtx) { try { audioCtx.close(); } catch (err) {} }
+    audioCtx = null;
+    audioDest = null;
+    songBufferSource = null;
+  }
+
+  if (!hasAudioTrack) {
+    URL.revokeObjectURL(objectUrl);
+    throw new Error('This browser cannot encode custom audio.');
+  }
+
+  const stream = new MediaStream(tracks);
+  const preferredMimes = [
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+    'video/mp4'
+  ];
+  const mime = preferredMimes.find(m => {
+    try { return MediaRecorder.isTypeSupported(m); } catch (e) { return false; }
+  }) || '';
+
+  const recorder = new MediaRecorder(stream, {
+    ...(mime ? { mimeType: mime } : {}),
+    videoBitsPerSecond: 16000,
+    audioBitsPerSecond: 64000
+  });
+  const chunks = [];
+  let totalBytes = 0;
+  recorder.ondataavailable = ev => {
+    if (ev.data && ev.data.size > 0) {
+      chunks.push(ev.data);
+      totalBytes += ev.data.size;
+      if (totalBytes > 2.4 * 1024 * 1024 && recorder.state !== 'inactive') {
+        try { recorder.stop(); } catch (e) {}
+      }
+    }
+  };
+
+  return new Promise((resolve, reject) => {
+    let stopTimer = null;
+    const cleanup = () => {
+      if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
+      try { el.pause(); } catch (e) {}
+      URL.revokeObjectURL(objectUrl);
+      if (songBufferSource) { try { songBufferSource.stop(); } catch (e) {} songBufferSource = null; }
+      if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+    };
+    recorder.onstop = async () => {
+      cleanup();
+      const outMime = String(recorder.mimeType || mime || chunks[0]?.type || 'video/webm').split(';')[0];
+      const blob = new Blob(chunks, { type: outMime });
+      if (blob.size > 2.8 * 1024 * 1024) {
+        reject(new Error('Custom audio exceeds 2.8 MB after compression. Try a shorter clip.'));
+        return;
+      }
+      const dataUrl = await readFileAsDataUrlPromise(blob);
+      resolve({ dataUrl, mimeType: outMime });
+    };
+    recorder.onerror = () => {
+      cleanup();
+      reject(new Error('Audio encoding failed.'));
+    };
+
+    recorder.start(250);
+    if (songBufferSource) {
+      try { songBufferSource.start(0); } catch (e) {}
+    } else {
+      el.currentTime = 0;
+      el.play().catch(() => {});
+    }
+    stopTimer = setTimeout(() => {
+      if (recorder.state !== 'inactive') {
+        try { recorder.stop(); } catch (e) {}
+      }
+    }, Math.max(1000, Math.round(maxDur * 1000)));
+  });
+}
+
+async function uploadPlayAudioToGitHub(audioFile, songId) {
+  if (!sb || !currentUser?.id) throw new Error('Please sign in again before uploading.');
+  const mime = inferPlayAudioMimeType(audioFile);
+  if (mime && audioFile.size <= 2.65 * 1024 * 1024) {
+    let rawDataUrl = await readFileAsDataUrlPromise(audioFile);
+    if (!rawDataUrl.startsWith('data:audio/')) {
+      const idx = rawDataUrl.indexOf(',');
+      if (idx > 0) rawDataUrl = `data:${mime};base64,${rawDataUrl.slice(idx + 1)}`;
+    }
+    const { data, error } = await sb.functions.invoke('play-video-storage', {
+      body: { action: 'upload_audio', videoId: String(songId), dataUrl: rawDataUrl }
+    });
+    if (!error && data?.url && /^https:\/\/raw\.githubusercontent\.com\//i.test(data.url)) {
+      return data.url;
+    }
+  }
+  const encoded = await encodeAudioToMediaContainerDataUrl(audioFile);
+  return await uploadPlayVideoToGitHub(encoded.dataUrl, 'aud_' + String(songId));
+}
+
 async function deletePlayVideoFileFromGitHub(video) {
   if (!sb || !currentUser?.id || !video?.id || !video?.user_id) return;
   const { data, error } = await sb.functions.invoke('play-video-storage', {
     body: {
       action: 'delete',
       videoId: String(video.id),
-      ownerId: String(video.user_id)
+      ownerId: String(video.user_id),
+      ...(video.musicAudioId ? { audioId: String(video.musicAudioId) } : {})
     }
   });
   if (error) throw new Error(error.message || 'Could not remove the GitHub video file.');
@@ -8554,8 +8882,10 @@ async function recompressPendingUploadVideo() {
   }
 }
 
-async function openPlayVideoFileModal() {
+async function openPlayVideoFileModal(preloadedSong = null) {
   $('#playUploadChoiceModal')?.classList.add('hidden');
+  stopActivePlayMedia();
+  stopMusicPreviewAudio();
   stopVoiceoverRecorderIfActive();
   stopVoiceoverPreview();
   stopCustomSongPreviewAudio();
@@ -8564,7 +8894,7 @@ async function openPlayVideoFileModal() {
 
   pendingUploadJobSeq += 1;
   pendingUploadSourceVideoFile = null;
-  pendingUploadCustomSongFile = null;
+  pendingUploadCustomSongFile = preloadedSong?.file || null;
   pendingUploadVideoDataUrl = '';
   pendingUploadVideoAspect = 9 / 16;
   pendingUploadBusy = false;
@@ -8584,6 +8914,9 @@ async function openPlayVideoFileModal() {
   updatePlayUploadFeeUi();
   $('#playVideoFileModal')?.classList.remove('hidden');
   await populateMusicSelect($('#playUploadMusicSelect'), 'Original Video Audio (No extra music)');
+  if (!pendingUploadCustomSongFile && preloadedSong?.builtInTrackName && $('#playUploadMusicSelect')) {
+    $('#playUploadMusicSelect').value = preloadedSong.builtInTrackName;
+  }
   syncCustomSongUi();
 }
 
@@ -8598,7 +8931,7 @@ function closePlayVideoFileModal() {
   hideModalSmooth($('#playVideoFileModal'));
 }
 
-$('#playChooseUploadBtn')?.addEventListener('click', openPlayVideoFileModal);
+$('#playChooseUploadBtn')?.addEventListener('click', () => openPlayVideoFileModal());
 $('#closePlayVideoFileBtn')?.addEventListener('click', closePlayVideoFileModal);
 $('#cancelPlayVideoFileBtn')?.addEventListener('click', closePlayVideoFileModal);
 $('#playUploadFilterSelect')?.addEventListener('change', syncPlayUploadPreviewEffects);
@@ -8706,9 +9039,20 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
   const voUrl = playVoiceoverState.uploadUrl || '';
   const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
   let githubVideoUrl = '';
+  let sharedAudioUrl = '';
+  let sharedAudioId = '';
   try {
     if (msgEl) msgEl.textContent = 'Uploading compressed video to GRIND...';
     githubVideoUrl = await uploadPlayVideoToGitHub(pendingUploadVideoDataUrl, newVidId);
+    if (hasBakedSong) {
+      try {
+        sharedAudioId = 'paud_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+        sharedAudioUrl = await uploadPlayAudioToGitHub(pendingUploadCustomSongFile, sharedAudioId);
+      } catch (audioShareErr) {
+        sharedAudioUrl = '';
+        sharedAudioId = '';
+      }
+    }
   } catch (uploadError) {
     if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
     pubBtn.disabled = false;
@@ -8728,8 +9072,10 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
     playbackRate: Math.min(2.5, Math.max(0.5, Number($('#playUploadSpeedSelect')?.value || 1))),
     muteOriginal: hasBakedSong ? false : Boolean($('#playUploadMuteOrigCheckbox')?.checked),
     musicName: hasBakedSong ? musicName : (track ? track.name : ''),
-    musicUrl: hasBakedSong ? '' : (track ? track.url : ''),
+    musicUrl: hasBakedSong ? sharedAudioUrl : (track ? track.url : ''),
     musicFallbackUrl: hasBakedSong ? '' : (track ? (track.fallbackUrl || '') : ''),
+    ...(hasBakedSong ? { musicBakedInVideo: true } : {}),
+    ...(sharedAudioId ? { musicAudioId: sharedAudioId } : {}),
     ...(voUrl ? { voiceoverUrl: voUrl } : {}),
     ...(linkedCoin ? { linkedCoinId: String(linkedCoin.id), linkedCoinName: linkedCoin.name, linkedCoinTicker: linkedCoin.ticker } : {}),
     ts: Date.now()
@@ -8744,7 +9090,7 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
   pubBtn.disabled = false;
   updatePlayUploadFeeUi();
   if (error) {
-    try { await deletePlayVideoFileFromGitHub({ id: newVidId, user_id: currentUser.id }); } catch (cleanupError) {}
+    try { await deletePlayVideoFileFromGitHub({ id: newVidId, user_id: currentUser.id, musicAudioId: sharedAudioId }); } catch (cleanupError) {}
     if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
     if (msgEl) msgEl.textContent = 'Upload failed: ' + error.message;
     return;
@@ -8755,6 +9101,216 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
   await loadPlayData(true);
   renderAccountPlayVideos();
   openPlayAtVideo(newVidId);
+});
+
+// ---------- Use / Download Sound Modal (from bottom-corner PLAY song button) ----------
+const playUseSongState = {
+  videoId: '',
+  songTitle: '',
+  creatorName: '',
+  sourceUrl: '',
+  fallbackUrl: '',
+  builtInTrackName: '',
+  downloadedFile: null,
+  downloading: false,
+  previewEl: null,
+  previewObjUrl: ''
+};
+
+function stopPlayUseSongPreview() {
+  if (playUseSongState.previewEl) {
+    try { playUseSongState.previewEl.pause(); } catch (e) {}
+    playUseSongState.previewEl = null;
+  }
+  if (playUseSongState.previewObjUrl) {
+    try { URL.revokeObjectURL(playUseSongState.previewObjUrl); } catch (e) {}
+    playUseSongState.previewObjUrl = '';
+  }
+  const btn = $('#playUseSongPreviewBtn');
+  if (btn) btn.textContent = '▶ Preview Sound';
+}
+
+function closePlayUseSongModal() {
+  stopPlayUseSongPreview();
+  hideModalSmooth($('#playUseSongModal'));
+}
+
+async function ensurePlayUseSongDownloadedFile() {
+  if (playUseSongState.downloadedFile) return playUseSongState.downloadedFile;
+  const candidates = [playUseSongState.sourceUrl, playUseSongState.fallbackUrl].filter(Boolean);
+  if (!candidates.length) {
+    throw new Error('This video has no downloadable audio URL.');
+  }
+  let lastErr = null;
+  for (const url of candidates) {
+    try {
+      const resp = await fetch(url, { mode: 'cors' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const rawType = String(blob.type || '').split(';')[0] || 'audio/mpeg';
+      const extFromUrl = (url.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1] || '').toLowerCase();
+      const extMap = { 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/mp4': 'm4a', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/webm': 'webm', 'video/webm': 'webm', 'video/mp4': 'mp4' };
+      const ext = extFromUrl || extMap[rawType] || 'mp3';
+      const safeBase = (playUseSongState.songTitle || 'grind_sound').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 42) || 'grind_sound';
+      const file = new File([blob], `${safeBase}.${ext}`, { type: rawType });
+      playUseSongState.downloadedFile = file;
+      return file;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('Could not download sound.');
+}
+
+async function openPlayUseSongModal(videoId) {
+  const vid = playState.videosById.get(String(videoId));
+  if (!vid || !vid.musicName) return;
+
+  stopPlayUseSongPreview();
+  const title = cleanMediaDisplayName(vid.musicName) || 'Sound';
+  const creator = vid.profile?.username || 'Creator';
+  const builtInMatch = (musicCache || []).find(t => t.name === vid.musicName || cleanMediaDisplayName(t.name) === title);
+  const srcUrl = vid.musicUrl || builtInMatch?.url || (vid.kind === 'video' ? vid.videoUrl : '');
+  const fbUrl = vid.musicFallbackUrl || builtInMatch?.fallbackUrl || '';
+
+  playUseSongState.videoId = vid.id;
+  playUseSongState.songTitle = title;
+  playUseSongState.creatorName = creator;
+  playUseSongState.sourceUrl = srcUrl;
+  playUseSongState.fallbackUrl = fbUrl;
+  playUseSongState.builtInTrackName = builtInMatch && !/^https:\/\/raw\.githubusercontent\.com\/.+\/(?:PLAY|PLAY_AUDIO)\//i.test(String(srcUrl || '')) ? builtInMatch.name : '';
+  playUseSongState.downloadedFile = null;
+  playUseSongState.downloading = true;
+
+  if ($('#playUseSongHeading')) $('#playUseSongHeading').textContent = `♫ ${title}`;
+  if ($('#playUseSongSub')) $('#playUseSongSub').textContent = `Used by @${creator}`;
+  if ($('#playUseSongMsg')) $('#playUseSongMsg').textContent = '';
+  if ($('#playUseSongStatus')) $('#playUseSongStatus').textContent = 'Downloading sound from GitHub...';
+  if ($('#playUseSongDownloadBtn')) $('#playUseSongDownloadBtn').disabled = true;
+  $('#playUseSongModal')?.classList.remove('hidden');
+
+  try {
+    const file = await ensurePlayUseSongDownloadedFile();
+    if (playUseSongState.videoId !== vid.id) return;
+    playUseSongState.downloading = false;
+    const kb = Math.max(1, Math.round(file.size / 1024));
+    if ($('#playUseSongStatus')) {
+      $('#playUseSongStatus').textContent = `Downloaded (${kb} KB) — ready to preview, save, or use in your video!`;
+    }
+    if ($('#playUseSongDownloadBtn')) $('#playUseSongDownloadBtn').disabled = false;
+  } catch (err) {
+    if (playUseSongState.videoId !== vid.id) return;
+    playUseSongState.downloading = false;
+    if ($('#playUseSongStatus')) $('#playUseSongStatus').textContent = 'Ready — click Preview or Use Sound.';
+    if ($('#playUseSongDownloadBtn')) $('#playUseSongDownloadBtn').disabled = false;
+    if ($('#playUseSongMsg')) $('#playUseSongMsg').textContent = err?.message || '';
+  }
+}
+
+$('#closePlayUseSongBtn')?.addEventListener('click', closePlayUseSongModal);
+$('#playUseSongModal')?.addEventListener('click', e => {
+  if (e.target === $('#playUseSongModal')) closePlayUseSongModal();
+});
+
+$('#playUseSongPreviewBtn')?.addEventListener('click', () => {
+  if (playUseSongState.previewEl) {
+    stopPlayUseSongPreview();
+    return;
+  }
+  stopActivePlayMedia();
+  const prevBtn = $('#playUseSongPreviewBtn');
+  let url = playUseSongState.sourceUrl;
+  if (playUseSongState.downloadedFile) {
+    const objUrl = URL.createObjectURL(playUseSongState.downloadedFile);
+    playUseSongState.previewObjUrl = objUrl;
+    url = objUrl;
+  }
+  if (!url) return toast('No audio preview available');
+  const el = createPlayableAudioElement(url, playUseSongState.fallbackUrl);
+  el.loop = true;
+  el.volume = 0.72;
+  playUseSongState.previewEl = el;
+  if (prevBtn) prevBtn.textContent = '■ Stop';
+  el.play().catch(() => toast('Tap again to preview sound'));
+});
+
+$('#playUseSongDownloadBtn')?.addEventListener('click', async () => {
+  const msgEl = $('#playUseSongMsg');
+  const dlBtn = $('#playUseSongDownloadBtn');
+  if (msgEl) msgEl.textContent = '';
+  if (dlBtn) { dlBtn.disabled = true; dlBtn.textContent = 'Downloading...'; }
+  try {
+    const file = await ensurePlayUseSongDownloadedFile();
+    const objUrl = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = objUrl;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => { try { URL.revokeObjectURL(objUrl); } catch (e) {} }, 2500);
+    toast(`Downloaded ${file.name}`);
+  } catch (err) {
+    if (msgEl) msgEl.textContent = err?.message || 'Download failed.';
+  } finally {
+    if (dlBtn) { dlBtn.disabled = false; dlBtn.textContent = '⬇ Download Audio'; }
+  }
+});
+
+$('#playUseSongInEditorBtn')?.addEventListener('click', async () => {
+  if (!currentUser) {
+    closePlayUseSongModal();
+    toast('Sign in to create a video with this sound!');
+    return;
+  }
+  const msgEl = $('#playUseSongMsg');
+  const btn = $('#playUseSongInEditorBtn');
+  if (msgEl) msgEl.textContent = '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading Sound...'; }
+  try {
+    const builtIn = playUseSongState.builtInTrackName;
+    const file = builtIn ? null : await ensurePlayUseSongDownloadedFile();
+    const songName = playUseSongState.songTitle;
+    closePlayUseSongModal();
+    await openPlayCreatorStudio({
+      file,
+      name: songName,
+      builtInTrackName: builtIn || ''
+    });
+    toast(`♫ "${songName}" ready in Video Editor!`);
+  } catch (err) {
+    if (msgEl) msgEl.textContent = err?.message || 'Could not load sound into Video Editor.';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🎬 Use in Video Editor'; }
+  }
+});
+
+$('#playUseSongInUploadBtn')?.addEventListener('click', async () => {
+  if (!currentUser) {
+    closePlayUseSongModal();
+    toast('Sign in to upload a video with this sound!');
+    return;
+  }
+  const msgEl = $('#playUseSongMsg');
+  const btn = $('#playUseSongInUploadBtn');
+  if (msgEl) msgEl.textContent = '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading Sound...'; }
+  try {
+    const builtIn = playUseSongState.builtInTrackName;
+    const file = builtIn ? null : await ensurePlayUseSongDownloadedFile();
+    const songName = playUseSongState.songTitle;
+    closePlayUseSongModal();
+    await openPlayVideoFileModal({
+      file,
+      name: songName,
+      builtInTrackName: builtIn || ''
+    });
+    toast(`♫ "${songName}" ready in Upload Video!`);
+  } catch (err) {
+    if (msgEl) msgEl.textContent = err?.message || 'Could not load sound into Upload Video.';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '📤 Use in Upload Video'; }
+  }
 });
 
 // ---------- Username (Account menu) ----------
@@ -15296,6 +15852,10 @@ window.addEventListener('keydown', e => {
   }
   if (!$('#crateOpenModal')?.classList.contains('hidden')) {
     if (!titleSystemState.isSpinning) closeCrateModal();
+    return;
+  }
+  if (!$('#playUseSongModal')?.classList.contains('hidden')) {
+    closePlayUseSongModal();
     return;
   }
   if (!$('#playCreatorModal')?.classList.contains('hidden')) {
