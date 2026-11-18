@@ -560,8 +560,11 @@ async function loadProfile() {
 
 let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map(), serverResetTs: 0, resetDoneMap: new Map(), deletedCoinIds: new Set(), deletedUserIds: new Set(), premiumOverrides: new Map(), selfSoldCoins: new Map() };
 let pendingWarnAckTs = 0;
+let adminModStateFetchedAt = 0;
+let adminModStatePromise = null;
+const ADMIN_MOD_STATE_TTL_MS = 30000;
 
-async function fetchAdminModerationState() {
+async function _fetchAdminModerationStateFresh() {
   const bans = new Map();
   const resets = new Map();
   const warnings = new Map();
@@ -680,6 +683,25 @@ async function fetchAdminModerationState() {
   } catch (e) {}
   adminModStateCache = { bans, resets, warnings, serverResetTs, resetDoneMap, deletedCoinIds, deletedUserIds, premiumOverrides, selfSoldCoins };
   return adminModStateCache;
+}
+
+async function fetchAdminModerationState(force = false) {
+  if (!sb) return adminModStateCache;
+  if (adminModStatePromise) return adminModStatePromise;
+  if (!force && adminModStateFetchedAt && Date.now() - adminModStateFetchedAt < ADMIN_MOD_STATE_TTL_MS) {
+    return adminModStateCache;
+  }
+  adminModStatePromise = _fetchAdminModerationStateFresh()
+    .then(result => {
+      adminModStateFetchedAt = Date.now();
+      return result;
+    })
+    .finally(() => { adminModStatePromise = null; });
+  return adminModStatePromise;
+}
+
+function invalidateAdminModerationStateCache() {
+  adminModStateFetchedAt = 0;
 }
 
 function showBannedScreen(reason) {
@@ -1439,6 +1461,11 @@ function enterApp() {
   showPage('feed');
   startRealtime();
   loadCoins();
+  if (notificationPollInterval) clearInterval(notificationPollInterval);
+  updateNotificationsBadge();
+  notificationPollInterval = setInterval(() => {
+    if (currentUser && !document.hidden) updateNotificationsBadge();
+  }, NOTIFICATION_SCAN_TTL_MS);
   startTimeTracking();
   checkDailyLogin();
   flushPendingTierPromo();
@@ -1484,6 +1511,12 @@ $('#logoutBtn')?.addEventListener('click', async () => {
   if (passTickerInterval) clearInterval(passTickerInterval);
   if (sb) await sb.auth.signOut();
   currentUser = null;
+  if (notificationPollInterval) clearInterval(notificationPollInterval);
+  notificationPollInterval = null;
+  userNotificationsFetchedAt = 0;
+  adminNotificationsFetchedAt = 0;
+  userNotifsCache = [];
+  adminNotificationsCache = { reports: [], pendingRequests: [] };
   grindBotHistory = [];
   if (realtimeChannel && sb) sb.removeChannel(realtimeChannel);
   $('#appView').classList.add('hidden');
@@ -1817,7 +1850,32 @@ $('#saveFeaturedBtn')?.addEventListener('click', async () => {
   toast('Featured coins updated for everyone!');
 });
 
+let loadCoinsPromise = null;
+let loadCoinsQueued = false;
+
 async function loadCoins() {
+  if (!sb) return;
+  if (loadCoinsPromise) {
+    loadCoinsQueued = true;
+    return loadCoinsPromise;
+  }
+  loadCoinsPromise = (async () => {
+    loadCoinsQueued = false;
+    await _loadCoinsFresh();
+    // At most one follow-up fetch for a burst of realtime events.
+    if (loadCoinsQueued) {
+      loadCoinsQueued = false;
+      await _loadCoinsFresh();
+    }
+  })();
+  try {
+    await loadCoinsPromise;
+  } finally {
+    loadCoinsPromise = null;
+  }
+}
+
+async function _loadCoinsFresh() {
   if (!sb) return;
   await Promise.all([loadProUserIds(), fetchAdminModerationState()]);
   await fetchFeaturedCoins();
@@ -1860,12 +1918,18 @@ async function loadCoins() {
         .select('coin_id, created_at')
         .gte('created_at', startOfTodayIso)
         .limit(1000);
+      let previousPriceQ = sb.from('trades')
+        .select('coin_id, price_after, created_at')
+        .lt('created_at', startOfTodayIso)
+        .order('created_at', { ascending: false })
+        .limit(1000);
       if (srvResetTs > 0) {
         const srvIso = new Date(srvResetTs).toISOString();
         buyQ = buyQ.gt('created_at', srvIso);
         todayQ = todayQ.gt('created_at', srvIso);
+        previousPriceQ = previousPriceQ.gt('created_at', srvIso);
       }
-      const [{ data: buyRows }, { data: todayRows }] = await Promise.all([buyQ, todayQ]);
+      const [{ data: buyRows }, { data: todayRows }, { data: previousPriceRows }] = await Promise.all([buyQ, todayQ, previousPriceQ]);
       const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
       (buyRows || []).forEach(t => {
         if (!t.coin_id) return;
@@ -1879,21 +1943,24 @@ async function loadCoins() {
       });
       const tradedTodayIds = [...new Set((todayRows || []).map(t => t.coin_id).filter(Boolean))];
       tradedTodayIds.forEach(id => tradedTodaySet.add(id));
-      if (tradedTodayIds.length > 0) {
-        const prevResults = await Promise.all(
-          tradedTodayIds.map(id =>
-            sb.from('trades')
-              .select('price_after')
-              .eq('coin_id', id)
-              .lt('created_at', startOfTodayIso)
-              .order('created_at', { ascending: false })
-              .limit(1)
-              .maybeSingle()
-          )
-        );
-        prevResults.forEach((r, idx) => {
-          const cid = tradedTodayIds[idx];
-          openPriceMap.set(cid, r.data && r.data.price_after != null ? Number(r.data.price_after) : 1);
+      (previousPriceRows || []).forEach(row => {
+        if (!row.coin_id || openPriceMap.has(row.coin_id)) return;
+        openPriceMap.set(row.coin_id, row.price_after != null ? Number(row.price_after) : 1);
+      });
+      const missingOpenPriceIds = tradedTodayIds.filter(id => !openPriceMap.has(id));
+      if (missingOpenPriceIds.length) {
+        const fallbackPrices = await Promise.all(missingOpenPriceIds.map(id =>
+          sb.from('trades')
+            .select('price_after')
+            .eq('coin_id', id)
+            .lt('created_at', startOfTodayIso)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+        ));
+        fallbackPrices.forEach((result, index) => {
+          const id = missingOpenPriceIds[index];
+          openPriceMap.set(id, result.data?.price_after != null ? Number(result.data.price_after) : 1);
         });
       }
     } catch (e) {}
@@ -5030,6 +5097,10 @@ const playState = {
   commentsByVideo: new Map(),        // videoId -> Array
   pinnedCommentIdByVideo: new Map(), // videoId -> commentId
   deletedIds: new Set(),
+  rawRows: [],                 // Cached PLAY activity; only fetch rows newer than the last sync
+  rawRowIds: new Set(),
+  lastRowCreatedAt: '',
+  syncPromise: null,
   lastSyncAt: 0,
   payingLikes: false,
   payingViews: false,
@@ -5090,27 +5161,52 @@ async function creditPlayCashQueued(deltaAmount, onSuccessInsertRowsFn) {
 async function loadPlayData(force = false) {
   if (!sb) return;
   const now = Date.now();
-  if (!force && (now - playState.lastSyncAt) < 5000 && playState.videos.length) return;
+  // Coalesce callers and keep the feed warm while avoiding repeated full-history downloads.
+  if (playState.syncPromise) return playState.syncPromise;
+  if (!force && (now - playState.lastSyncAt) < 15000 && playState.videos.length) return;
 
+  playState.syncPromise = (async () => {
   try {
     const srvResetTs = adminModStateCache.serverResetTs || 0;
-    let res = await sb
+    let query = sb
       .from('premium_requests')
-      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
       .like('reason', '__PLAY_%')
       .order('created_at', { ascending: true })
       .limit(5000);
 
+    // First load gets the existing history. Later loads only transfer newly-created PLAY rows.
+    if (playState.rawRows.length && playState.lastRowCreatedAt) {
+      query = query.gte('created_at', playState.lastRowCreatedAt);
+    }
+    let res = await query;
+
     if (res?.error) {
-      res = await sb
+      let fallbackQuery = sb
         .from('premium_requests')
-        .select('user_id, reason, created_at')
+        .select('id, user_id, reason, created_at')
         .like('reason', '__PLAY_%')
         .order('created_at', { ascending: true })
         .limit(5000);
+      if (playState.rawRows.length && playState.lastRowCreatedAt) {
+        fallbackQuery = fallbackQuery.gte('created_at', playState.lastRowCreatedAt);
+      }
+      res = await fallbackQuery;
     }
-    const data = res?.data;
-    if (res?.error || !Array.isArray(data)) return;
+    const incoming = res?.data;
+    if (res?.error || !Array.isArray(incoming)) return;
+
+    for (const row of incoming) {
+      const rowId = String(row.id || (String(row.created_at || '') + '|' + String(row.user_id || '') + '|' + String(row.reason || '')));
+      if (playState.rawRowIds.has(rowId)) continue;
+      playState.rawRowIds.add(rowId);
+      playState.rawRows.push(row);
+      if (row.created_at && (!playState.lastRowCreatedAt || row.created_at > playState.lastRowCreatedAt)) {
+        playState.lastRowCreatedAt = row.created_at;
+      }
+    }
+    playState.rawRows.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+    const data = playState.rawRows;
 
     const videosMap = new Map();
     const deletedIds = new Set();
@@ -5343,7 +5439,13 @@ async function loadPlayData(force = false) {
     playState.commentsByVideo = commentsMapByVideo;
     playState.pinnedCommentIdByVideo = pinnedCommentIdByVideo;
     playState.lastSyncAt = Date.now();
-  } catch (e) {}
+  } catch (e) {
+    console.warn('PLAY data sync failed:', e);
+  } finally {
+    playState.syncPromise = null;
+  }
+  })();
+  return playState.syncPromise;
 }
 
 function getPlayVoteSummary(videoId) {
@@ -6198,7 +6300,7 @@ function renderPlayFeed(focusVideoId = null) {
   requestAnimationFrame(() => activatePlaySlide(0));
 }
 
-async function startPlayPage(focusVideoId = null, openComments = false) {
+async function startPlayPage(focusVideoId = null, openComments = false, forceRefresh = false) {
   cleanupPlay();
   const track = $('#playFeedTrack');
   if (track) {
@@ -6206,7 +6308,7 @@ async function startPlayPage(focusVideoId = null, openComments = false) {
   }
   const [adsList] = await Promise.all([
     loadAdsList(false),
-    loadPlayData(true),
+    loadPlayData(forceRefresh),
     loadMusicList(false)
   ]);
   syncAllPlayEarnings();
@@ -6317,6 +6419,13 @@ async function deletePlayVideo(videoId) {
   if (error) {
     toast('Could not delete video: ' + error.message);
     return;
+  }
+  if (vid.kind === 'video' && /^https:\/\/raw\.githubusercontent\.com\//i.test(String(vid.videoUrl || ''))) {
+    try {
+      await deletePlayVideoFileFromGitHub(vid);
+    } catch (cleanupError) {
+      console.warn('PLAY video file cleanup failed:', cleanupError);
+    }
   }
   playState.deletedIds.add(String(videoId));
   playState.videos = playState.videos.filter(v => v.id !== String(videoId));
@@ -6634,7 +6743,7 @@ $('#playCommentForm')?.addEventListener('submit', async e => {
 
 // Play Topbar & Scroll Controls
 $('#playBackBtn')?.addEventListener('click', () => showPage('feed'));
-$('#playRefreshBtn')?.addEventListener('click', () => startPlayPage());
+$('#playRefreshBtn')?.addEventListener('click', () => startPlayPage(null, false, true));
 $('#playMuteAllBtn')?.addEventListener('click', () => {
   playState.muted = !playState.muted;
   syncPlayMuteUi();
@@ -7905,10 +8014,11 @@ async function compressPlayVideoFile(file, onProgress) {
   const natW = vid.videoWidth || 360;
   const natH = vid.videoHeight || 640;
   const aspectRatio = Math.min(2.6, Math.max(0.35, Number((natW / natH).toFixed(4))));
-  const scale = Math.min(1, 640 / Math.max(natW, natH));
+  // Every uploaded PLAY video is re-encoded with its longest edge capped at 340px.
+  const scale = Math.min(1, 340 / Math.max(natW, natH));
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(160, Math.round((natW * scale) / 2) * 2);
-  canvas.height = Math.max(160, Math.round((natH * scale) / 2) * 2);
+  canvas.width = Math.max(2, Math.round((natW * scale) / 2) * 2);
+  canvas.height = Math.max(2, Math.round((natH * scale) / 2) * 2);
   const ctx = canvas.getContext('2d');
   const canvasStream = canvas.captureStream(24);
   const tracks = [...canvasStream.getVideoTracks()];
@@ -7955,21 +8065,32 @@ async function compressPlayVideoFile(file, onProgress) {
 
   const stream = new MediaStream(tracks);
   const preferredMimes = hasAudioTrack
-    ? ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm']
-    : ['video/webm;codecs=vp8', 'video/webm'];
+    ? [
+        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+        'video/mp4',
+        'video/webm;codecs=vp8,opus',
+        'video/webm;codecs=vp9,opus',
+        'video/webm'
+      ]
+    : [
+        'video/mp4;codecs=avc1.42E01E',
+        'video/mp4',
+        'video/webm;codecs=vp8',
+        'video/webm'
+      ];
   const mime = preferredMimes.find(m => {
     try { return MediaRecorder.isTypeSupported(m); } catch (e) { return false; }
-  }) || 'video/webm';
+  }) || '';
 
   let recorder = null;
   try {
     recorder = new MediaRecorder(stream, {
-      mimeType: mime,
-      videoBitsPerSecond: 580000,
+      ...(mime ? { mimeType: mime } : {}),
+      videoBitsPerSecond: 320000,
       ...(hasAudioTrack ? { audioBitsPerSecond: 48000 } : {})
     });
   } catch (e) {
-    recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 580000 });
+    recorder = new MediaRecorder(stream, { videoBitsPerSecond: 320000 });
   }
   const chunks = [];
   recorder.ondataavailable = ev => { if (ev.data && ev.data.size > 0) chunks.push(ev.data); };
@@ -7981,13 +8102,18 @@ async function compressPlayVideoFile(file, onProgress) {
     recorder.onstop = async () => {
       URL.revokeObjectURL(objectUrl);
       cleanupAudio();
-      const blob = new Blob(chunks, { type: 'video/webm' });
-      if (blob.size > 2.6 * 1024 * 1024) {
-        reject(new Error('Video is too large after compression. Please pick a shorter clip (under 15s).'));
+      const outputMime = String(recorder.mimeType || mime || chunks[0]?.type || 'video/webm').split(';')[0];
+      if (!['video/webm', 'video/mp4'].includes(outputMime)) {
+        reject(new Error('This browser could not create a supported MP4/WebM video. Please try another browser.'));
+        return;
+      }
+      const blob = new Blob(chunks, { type: outputMime });
+      if (blob.size > 2.8 * 1024 * 1024) {
+        reject(new Error('Video is too large after 340p compression. Please choose a shorter clip (under 15 seconds).'));
         return;
       }
       const dataUrl = await readFileAsDataUrlPromise(blob);
-      resolve({ dataUrl, aspectRatio });
+      resolve({ dataUrl, aspectRatio, mimeType: outputMime });
     };
     recorder.onerror = () => {
       URL.revokeObjectURL(objectUrl);
@@ -8014,6 +8140,31 @@ async function compressPlayVideoFile(file, onProgress) {
     };
     requestAnimationFrame(drawLoop);
   });
+}
+
+async function uploadPlayVideoToGitHub(dataUrl, videoId) {
+  if (!sb || !currentUser?.id) throw new Error('Please sign in again before uploading.');
+  const { data, error } = await sb.functions.invoke('play-video-storage', {
+    body: { action: 'upload', videoId: String(videoId), dataUrl }
+  });
+  if (error) throw new Error(error.message || 'Could not upload video to GitHub.');
+  if (!data?.url || !/^https:\/\/raw\.githubusercontent\.com\//i.test(data.url)) {
+    throw new Error(data?.error || 'GitHub returned an invalid video URL.');
+  }
+  return data.url;
+}
+
+async function deletePlayVideoFileFromGitHub(video) {
+  if (!sb || !currentUser?.id || !video?.id || !video?.user_id) return;
+  const { data, error } = await sb.functions.invoke('play-video-storage', {
+    body: {
+      action: 'delete',
+      videoId: String(video.id),
+      ownerId: String(video.user_id)
+    }
+  });
+  if (error) throw new Error(error.message || 'Could not remove the GitHub video file.');
+  return Boolean(data?.deleted);
 }
 
 function syncPlayUploadPreviewEffects() {
@@ -8088,25 +8239,16 @@ $('#playUploadFileInput')?.addEventListener('change', async e => {
 
   try {
     pendingUploadBusy = true;
-    if (file.size <= 2.2 * 1024 * 1024) {
-      const [ar, dataUrl] = await Promise.all([
-        probeVideoAspectRatio(file),
-        readFileAsDataUrlPromise(file)
-      ]);
-      pendingUploadVideoAspect = ar;
-      pendingUploadVideoDataUrl = dataUrl;
-    } else {
-      if (typeof MediaRecorder === 'undefined') {
-        throw new Error('Please choose a smaller video clip under 2.2 MB.');
-      }
-      if (nameEl) nameEl.textContent = `Optimizing ${file.name} for Play... 0%`;
-      const res = await compressPlayVideoFile(file, pct => {
-        if (nameEl) nameEl.textContent = `Optimizing ${file.name} for Play... ${pct}%`;
-      });
-      pendingUploadVideoDataUrl = res.dataUrl;
-      pendingUploadVideoAspect = res.aspectRatio;
-      if (nameEl) nameEl.textContent = `${file.name} · Ready (with original audio)!`;
+    if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) {
+      throw new Error('This browser cannot safely compress videos to 340p. Please try an up-to-date Safari or Chrome browser.');
     }
+    if (nameEl) nameEl.textContent = `Optimizing ${file.name} to 340p... 0%`;
+    const res = await compressPlayVideoFile(file, pct => {
+      if (nameEl) nameEl.textContent = `Optimizing ${file.name} to 340p... ${pct}%`;
+    });
+    pendingUploadVideoDataUrl = res.dataUrl;
+    pendingUploadVideoAspect = res.aspectRatio;
+    if (nameEl) nameEl.textContent = `${file.name} · Ready (340p, original audio where supported)!`;
     if (prev && pendingUploadVideoDataUrl) {
       prev.src = pendingUploadVideoDataUrl;
       prev.classList.remove('hidden');
@@ -8147,12 +8289,25 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
   const linkedCoin = linkedId ? (coins || []).find(c => String(c.id) === String(linkedId)) : null;
   const voUrl = playVoiceoverState.uploadUrl || '';
   const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  let githubVideoUrl = '';
+  try {
+    if (msgEl) msgEl.textContent = 'Uploading compressed video to GRIND...';
+    githubVideoUrl = await uploadPlayVideoToGitHub(pendingUploadVideoDataUrl, newVidId);
+  } catch (uploadError) {
+    if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
+    pubBtn.disabled = false;
+    pubBtn.textContent = 'Publish';
+    updatePlayUploadFeeUi();
+    if (msgEl) msgEl.textContent = 'Video upload failed: ' + (uploadError?.message || 'Unknown error');
+    return;
+  }
+
   const payload = {
     id: newVidId,
     kind: 'video',
     title: ($('#playUploadTitleInput')?.value || '').trim().slice(0, 60),
     aspectRatio: pendingUploadVideoAspect || (9 / 16),
-    videoUrl: pendingUploadVideoDataUrl,
+    videoUrl: githubVideoUrl,
     videoFilter: $('#playUploadFilterSelect')?.value || 'none',
     playbackRate: Math.min(2.5, Math.max(0.5, Number($('#playUploadSpeedSelect')?.value || 1))),
     muteOriginal: Boolean($('#playUploadMuteOrigCheckbox')?.checked),
@@ -8173,6 +8328,7 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
   pubBtn.disabled = false;
   updatePlayUploadFeeUi();
   if (error) {
+    try { await deletePlayVideoFileFromGitHub({ id: newVidId, user_id: currentUser.id }); } catch (cleanupError) {}
     if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
     if (msgEl) msgEl.textContent = 'Upload failed: ' + error.message;
     return;
@@ -8380,33 +8536,144 @@ function renderThemeSettings() {
 }
 
 // ---------- Premium requests ----------
-function updatePremiumSection() {
+const PREMIUM_REQUEST_STATUS_TTL_MS = 30000;
+let premiumRequestStatus = { userId: null, pending: false, checkedAt: 0 };
+let premiumRequestStatusPromise = null;
+let premiumRequestSending = false;
+let premiumRequestPollTimer = null;
+
+async function _checkOwnPremiumRequestPending(uid) {
+  const { data: pendingRow, error: pendingError } = await sb
+    .from('premium_requests')
+    .select('id')
+    .eq('user_id', uid)
+    .eq('status', 'pending')
+    .limit(1)
+    .maybeSingle();
+  if (pendingError) throw pendingError;
+  if (pendingRow) return true;
+
+  // Older installations may store requests as __PREM_REQ__ markers when
+  // the normal pending insert is blocked by Row Level Security.
+  const [{ data: legacyRows, error: legacyError }, { data: doneRows, error: doneError }] = await Promise.all([
+    sb.from('premium_requests')
+      .select('reason')
+      .eq('user_id', uid)
+      .like('reason', '__PREM_REQ__:%')
+      .order('created_at', { ascending: false })
+      .limit(100),
+    sb.from('premium_requests')
+      .select('reason')
+      .like('reason', '__PREM_REQ_DONE__:%')
+      .limit(300)
+  ]);
+  if (legacyError) throw legacyError;
+  if (doneError) throw doneError;
+
+  const doneIds = new Set((doneRows || []).map(row =>
+    String(row.reason || '').slice('__PREM_REQ_DONE__:'.length).trim()
+  ));
+  return (legacyRows || []).some(row => {
+    try {
+      const parsed = JSON.parse(String(row.reason || '').slice('__PREM_REQ__:'.length));
+      return Boolean(parsed?.id) && !doneIds.has(String(parsed.id));
+    } catch (e) {
+      return false;
+    }
+  });
+}
+
+async function refreshOwnPremiumRequestStatus(force = false) {
+  if (!sb || !currentUser?.id) {
+    premiumRequestStatus = { userId: null, pending: false, checkedAt: 0 };
+    return false;
+  }
+  const uid = String(currentUser.id);
+  if (premiumRequestStatusPromise) return premiumRequestStatusPromise;
+  if (!force && premiumRequestStatus.userId === uid &&
+      Date.now() - premiumRequestStatus.checkedAt < PREMIUM_REQUEST_STATUS_TTL_MS) {
+    return premiumRequestStatus.pending;
+  }
+
+  premiumRequestStatusPromise = _checkOwnPremiumRequestPending(uid)
+    .then(pending => {
+      premiumRequestStatus = { userId: uid, pending, checkedAt: Date.now() };
+      return pending;
+    })
+    .finally(() => { premiumRequestStatusPromise = null; });
+  return premiumRequestStatusPromise;
+}
+
+function updatePremiumSection(checkStatus = true) {
   if (!currentUser) return;
   const statusEl = $('#premiumStatus');
   const form = $('#requestForm');
+  const reasonEl = $('#premiumReason');
+  const btn = $('#sendRequestBtn');
   const tier = getUserTier(currentUser);
+
   if (tier === 'premium') {
     statusEl.textContent = 'You have Premium! Max 3 coins, Blue Star icon, and 2X daily rewards.';
     form.classList.add('hidden');
-  } else if (tier === 'pro') {
-    statusEl.textContent = 'You have PRO! Max 2 coins, Gold Crown icon, and 2X daily rewards. Request Premium for 3 coins and Blue Star.';
-    form.classList.remove('hidden');
   } else {
-    statusEl.textContent = 'Member account: max 1 coin. Unlock PRO on Daily Login Day 7 or request Premium for up to 3.';
     form.classList.remove('hidden');
+    if (premiumRequestStatus.userId === String(currentUser.id) && premiumRequestStatus.pending) {
+      statusEl.textContent = 'Your Premium request is waiting for Dompinator to approve or deny it. You can send another request after a decision has been made.';
+    } else if (tier === 'pro') {
+      statusEl.textContent = 'You have PRO! Max 2 coins, Gold Crown icon, and 2X daily rewards. Request Premium for 3 coins and Blue Star.';
+    } else {
+      statusEl.textContent = 'Member account: max 1 coin. Unlock PRO on Daily Login Day 7 or request Premium for up to 3.';
+    }
+  }
+
+  const isPending = tier !== 'premium' &&
+    premiumRequestStatus.userId === String(currentUser.id) &&
+    premiumRequestStatus.pending;
+  if (reasonEl) reasonEl.disabled = isPending || premiumRequestSending;
+  if (btn) {
+    btn.disabled = isPending || premiumRequestSending || tier === 'premium';
+    btn.textContent = premiumRequestSending ? 'Sending...' : (isPending ? 'Request pending' : 'Send request');
+  }
+
+  if (premiumRequestPollTimer) {
+    clearInterval(premiumRequestPollTimer);
+    premiumRequestPollTimer = null;
+  }
+  if (isPending && currentPage === 'account') {
+    premiumRequestPollTimer = setInterval(async () => {
+      if (currentPage !== 'account' || !currentUser) {
+        clearInterval(premiumRequestPollTimer);
+        premiumRequestPollTimer = null;
+        return;
+      }
+      try {
+        await refreshOwnPremiumRequestStatus(true);
+        updatePremiumSection(false);
+      } catch (e) {
+        console.warn('Premium request status check note:', e);
+      }
+    }, 60000);
+  }
+
+  if (checkStatus && tier !== 'premium') {
+    refreshOwnPremiumRequestStatus(false)
+      .then(() => updatePremiumSection(false))
+      .catch(e => {
+        console.warn('Premium request status check note:', e);
+        if (statusEl) statusEl.textContent = 'Could not verify your request status. Please try again in a moment.';
+      });
   }
 }
 
 $('#sendRequestBtn')?.addEventListener('click', async () => {
   if (!sb || !currentUser) return toast('Please log in first.');
+  if (premiumRequestSending) return;
   const reason = ($('#premiumReason')?.value || '').trim();
   if (!reason) return toast('Write a reason.');
 
   const btn = $('#sendRequestBtn');
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Sending...';
-  }
+  premiumRequestSending = true;
+  updatePremiumSection(false);
 
   try {
     let { data: authData } = await sb.auth.getUser();
@@ -8414,9 +8681,23 @@ $('#sendRequestBtn')?.addEventListener('click', async () => {
       const { data: refData } = await sb.auth.refreshSession();
       authData = { user: refData?.user || refData?.session?.user || null };
     }
-    const uid = authData?.user?.id || currentUser.id;
+    const uid = String(authData?.user?.id || currentUser.id || '');
     if (!uid) {
       toast('Session expired. Please log out and log back in.');
+      return;
+    }
+
+    let alreadyPending;
+    try {
+      alreadyPending = await refreshOwnPremiumRequestStatus(true);
+    } catch (statusError) {
+      toast('Could not check your existing Premium request. Please try again.');
+      console.warn('Premium request status check note:', statusError);
+      return;
+    }
+    if (alreadyPending) {
+      updatePremiumSection(false);
+      toast('You already have a Premium request waiting for Dompinator.');
       return;
     }
 
@@ -8445,14 +8726,14 @@ $('#sendRequestBtn')?.addEventListener('click', async () => {
       return;
     }
 
-    toast('Request sent to Dompinator!');
+    premiumRequestStatus = { userId: uid, pending: true, checkedAt: Date.now() };
+    toast('Request sent to Dompinator! You can send another after it is approved or denied.');
     if ($('#premiumReason')) $('#premiumReason').value = '';
+    updatePremiumSection(false);
     if (isDompinator()) updateNotificationsBadge();
   } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = 'Send request';
-    }
+    premiumRequestSending = false;
+    updatePremiumSection(false);
   }
 });
 
@@ -9070,6 +9351,7 @@ $('#submitReportBtn')?.addEventListener('click', async () => {
 });
 
 // ---------- NOTIFICATIONS (ALL USERS + DOMPINATOR INBOX) ----------
+let notificationPollInterval = null;
 let notifReportsCache = [];
 let notifReportFilter = 'all';
 let userNotifsCache = [];
@@ -9104,7 +9386,7 @@ function setNotificationsBadgeCount(total) {
   }
 }
 
-async function fetchUserNotifications() {
+async function _fetchUserNotificationsFresh() {
   if (!sb || !currentUser) return [];
   const uid = String(currentUser.id);
   await fetchAdminModerationState();
@@ -9412,7 +9694,27 @@ async function fetchUserNotifications() {
   return items;
 }
 
-async function fetchReportsAndPending() {
+let userNotificationsFetchedAt = 0;
+let userNotificationsPromise = null;
+const NOTIFICATION_SCAN_TTL_MS = 60000;
+
+async function fetchUserNotifications(force = false) {
+  if (!sb || !currentUser) return [];
+  if (userNotificationsPromise) return userNotificationsPromise;
+  if (!force && userNotificationsFetchedAt && Date.now() - userNotificationsFetchedAt < NOTIFICATION_SCAN_TTL_MS) {
+    return userNotifsCache;
+  }
+  userNotificationsPromise = _fetchUserNotificationsFresh()
+    .then(items => {
+      userNotifsCache = items || [];
+      userNotificationsFetchedAt = Date.now();
+      return userNotifsCache;
+    })
+    .finally(() => { userNotificationsPromise = null; });
+  return userNotificationsPromise;
+}
+
+async function _fetchReportsAndPendingFresh() {
   if (!sb || !isDompinator()) return { reports: [], pendingRequests: [] };
   await fetchAdminModerationState();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
@@ -9502,14 +9804,33 @@ async function fetchReportsAndPending() {
   return { reports, pendingRequests };
 }
 
+let adminNotificationsFetchedAt = 0;
+let adminNotificationsPromise = null;
+async function fetchReportsAndPending(force = false) {
+  if (!sb || !isDompinator()) return { reports: [], pendingRequests: [] };
+  if (adminNotificationsPromise) return adminNotificationsPromise;
+  if (!force && adminNotificationsFetchedAt && Date.now() - adminNotificationsFetchedAt < NOTIFICATION_SCAN_TTL_MS) {
+    return adminNotificationsCache;
+  }
+  adminNotificationsPromise = _fetchReportsAndPendingFresh()
+    .then(result => {
+      adminNotificationsCache = result;
+      adminNotificationsFetchedAt = Date.now();
+      return result;
+    })
+    .finally(() => { adminNotificationsPromise = null; });
+  return adminNotificationsPromise;
+}
+let adminNotificationsCache = { reports: [], pendingRequests: [] };
+
 async function updateNotificationsBadge() {
   if (!sb || !currentUser) return;
   try {
     const seenTs = getUserNotifSeenTs();
-    const userItems = await fetchUserNotifications();
+    const userItems = await fetchUserNotifications(false);
     const unreadUserCount = userItems.filter(it => Number(it.ts || 0) > seenTs).length;
     if (isDompinator()) {
-      const { reports, pendingRequests } = await fetchReportsAndPending();
+      const { reports, pendingRequests } = await fetchReportsAndPending(false);
       setNotificationsBadgeCount(unreadUserCount + reports.length + pendingRequests.length);
     } else {
       setNotificationsBadgeCount(unreadUserCount);
@@ -9740,11 +10061,11 @@ async function loadRequests() {
     if (sub) sub.textContent = 'Updates, warnings, coin & video likes, comments, replies, and donations.';
   }
 
-  userNotifsCache = await fetchUserNotifications();
+  userNotifsCache = await fetchUserNotifications(true);
   renderUserNotifsList();
 
   if (isDompinator()) {
-    const { reports, pendingRequests } = await fetchReportsAndPending();
+    const { reports, pendingRequests } = await fetchReportsAndPending(true);
     notifReportsCache = reports;
     renderReportsList();
 
@@ -10555,6 +10876,7 @@ async function handleRealtimePremiumInsertPopup(row) {
 }
 
 // ---------- Realtime ----------
+let playRealtimeRefreshTimer = null;
 function startRealtime() {
   if (!sb) return;
   realtimeChannel = sb.channel('grind-live', { config: { broadcast: { self: false } } })
@@ -10569,6 +10891,12 @@ function startRealtime() {
       if (currentPage === 'global' && lbMode === 'weekly' && Date.now() > lbAnimatingUntil) renderLeaderboard();
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, payload => {
+      const changedReason = String(payload?.new?.reason || payload?.old?.reason || '');
+      if (/^__(ADMIN_CMD|SERVER_RESET|RESET_DONE|COIN_DEL|ACCOUNT_DELETED|COIN_SELF_SELL)__/.test(changedReason)) {
+        invalidateAdminModerationStateCache();
+        userNotificationsFetchedAt = 0;
+        adminNotificationsFetchedAt = 0;
+      }
       if (payload?.eventType === 'INSERT' && payload?.new) {
         handleRealtimePremiumInsertPopup(payload.new);
       }
@@ -10584,18 +10912,22 @@ function startRealtime() {
           if (currentPage === 'global' && Date.now() > lbAnimatingUntil) renderLeaderboard();
         });
       }
-      if (typeof loadPlayData === 'function') {
-        loadPlayData(true).then(() => {
-          if (typeof syncAllPlayEarnings === 'function') syncAllPlayEarnings();
-          else {
-            if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
-            if (typeof syncPlayDonations === 'function') syncPlayDonations();
-          }
-          if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
-          if (currentPage === 'account' && typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
-          if (currentPage === 'global' && lbMode === 'creators' && Date.now() > lbAnimatingUntil) renderLeaderboard();
-          if (playState.openCommentsVideoId && typeof renderPlayCommentsDrawerList === 'function') renderPlayCommentsDrawerList();
-        });
+      // Only PLAY activity can change PLAY state. Other premium_requests rows are unrelated.
+      if (changedReason.startsWith('__PLAY_') && typeof loadPlayData === 'function') {
+        clearTimeout(playRealtimeRefreshTimer);
+        playRealtimeRefreshTimer = setTimeout(() => {
+          loadPlayData(true).then(() => {
+            if (typeof syncAllPlayEarnings === 'function') syncAllPlayEarnings();
+            else {
+              if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
+              if (typeof syncPlayDonations === 'function') syncPlayDonations();
+            }
+            if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+            if (currentPage === 'account' && typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
+            if (currentPage === 'global' && lbMode === 'creators' && Date.now() > lbAnimatingUntil) renderLeaderboard();
+            if (playState.openCommentsVideoId && typeof renderPlayCommentsDrawerList === 'function') renderPlayCommentsDrawerList();
+          });
+        }, 900);
       }
       if (currentPage === 'notifications') loadRequests();
       else if (currentUser) updateNotificationsBadge();
