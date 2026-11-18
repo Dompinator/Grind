@@ -5097,6 +5097,10 @@ const playState = {
   commentsByVideo: new Map(),        // videoId -> Array
   pinnedCommentIdByVideo: new Map(), // videoId -> commentId
   deletedIds: new Set(),
+  rawRows: [],                 // Cached PLAY activity; only fetch rows newer than the last sync
+  rawRowIds: new Set(),
+  lastRowCreatedAt: '',
+  syncPromise: null,
   lastSyncAt: 0,
   payingLikes: false,
   payingViews: false,
@@ -5157,27 +5161,52 @@ async function creditPlayCashQueued(deltaAmount, onSuccessInsertRowsFn) {
 async function loadPlayData(force = false) {
   if (!sb) return;
   const now = Date.now();
-  if (!force && (now - playState.lastSyncAt) < 5000 && playState.videos.length) return;
+  // Coalesce callers and keep the feed warm while avoiding repeated full-history downloads.
+  if (playState.syncPromise) return playState.syncPromise;
+  if (!force && (now - playState.lastSyncAt) < 15000 && playState.videos.length) return;
 
+  playState.syncPromise = (async () => {
   try {
     const srvResetTs = adminModStateCache.serverResetTs || 0;
-    let res = await sb
+    let query = sb
       .from('premium_requests')
-      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
       .like('reason', '__PLAY_%')
       .order('created_at', { ascending: true })
       .limit(5000);
 
+    // First load gets the existing history. Later loads only transfer newly-created PLAY rows.
+    if (playState.rawRows.length && playState.lastRowCreatedAt) {
+      query = query.gte('created_at', playState.lastRowCreatedAt);
+    }
+    let res = await query;
+
     if (res?.error) {
-      res = await sb
+      let fallbackQuery = sb
         .from('premium_requests')
-        .select('user_id, reason, created_at')
+        .select('id, user_id, reason, created_at')
         .like('reason', '__PLAY_%')
         .order('created_at', { ascending: true })
         .limit(5000);
+      if (playState.rawRows.length && playState.lastRowCreatedAt) {
+        fallbackQuery = fallbackQuery.gte('created_at', playState.lastRowCreatedAt);
+      }
+      res = await fallbackQuery;
     }
-    const data = res?.data;
-    if (res?.error || !Array.isArray(data)) return;
+    const incoming = res?.data;
+    if (res?.error || !Array.isArray(incoming)) return;
+
+    for (const row of incoming) {
+      const rowId = String(row.id || (String(row.created_at || '') + '|' + String(row.user_id || '') + '|' + String(row.reason || '')));
+      if (playState.rawRowIds.has(rowId)) continue;
+      playState.rawRowIds.add(rowId);
+      playState.rawRows.push(row);
+      if (row.created_at && (!playState.lastRowCreatedAt || row.created_at > playState.lastRowCreatedAt)) {
+        playState.lastRowCreatedAt = row.created_at;
+      }
+    }
+    playState.rawRows.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+    const data = playState.rawRows;
 
     const videosMap = new Map();
     const deletedIds = new Set();
@@ -5410,7 +5439,13 @@ async function loadPlayData(force = false) {
     playState.commentsByVideo = commentsMapByVideo;
     playState.pinnedCommentIdByVideo = pinnedCommentIdByVideo;
     playState.lastSyncAt = Date.now();
-  } catch (e) {}
+  } catch (e) {
+    console.warn('PLAY data sync failed:', e);
+  } finally {
+    playState.syncPromise = null;
+  }
+  })();
+  return playState.syncPromise;
 }
 
 function getPlayVoteSummary(videoId) {
@@ -6265,7 +6300,7 @@ function renderPlayFeed(focusVideoId = null) {
   requestAnimationFrame(() => activatePlaySlide(0));
 }
 
-async function startPlayPage(focusVideoId = null, openComments = false) {
+async function startPlayPage(focusVideoId = null, openComments = false, forceRefresh = false) {
   cleanupPlay();
   const track = $('#playFeedTrack');
   if (track) {
@@ -6273,7 +6308,7 @@ async function startPlayPage(focusVideoId = null, openComments = false) {
   }
   const [adsList] = await Promise.all([
     loadAdsList(false),
-    loadPlayData(true),
+    loadPlayData(forceRefresh),
     loadMusicList(false)
   ]);
   syncAllPlayEarnings();
@@ -6708,7 +6743,7 @@ $('#playCommentForm')?.addEventListener('submit', async e => {
 
 // Play Topbar & Scroll Controls
 $('#playBackBtn')?.addEventListener('click', () => showPage('feed'));
-$('#playRefreshBtn')?.addEventListener('click', () => startPlayPage());
+$('#playRefreshBtn')?.addEventListener('click', () => startPlayPage(null, false, true));
 $('#playMuteAllBtn')?.addEventListener('click', () => {
   playState.muted = !playState.muted;
   syncPlayMuteUi();
@@ -10841,6 +10876,7 @@ async function handleRealtimePremiumInsertPopup(row) {
 }
 
 // ---------- Realtime ----------
+let playRealtimeRefreshTimer = null;
 function startRealtime() {
   if (!sb) return;
   realtimeChannel = sb.channel('grind-live', { config: { broadcast: { self: false } } })
@@ -10876,18 +10912,22 @@ function startRealtime() {
           if (currentPage === 'global' && Date.now() > lbAnimatingUntil) renderLeaderboard();
         });
       }
-      if (typeof loadPlayData === 'function') {
-        loadPlayData(true).then(() => {
-          if (typeof syncAllPlayEarnings === 'function') syncAllPlayEarnings();
-          else {
-            if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
-            if (typeof syncPlayDonations === 'function') syncPlayDonations();
-          }
-          if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
-          if (currentPage === 'account' && typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
-          if (currentPage === 'global' && lbMode === 'creators' && Date.now() > lbAnimatingUntil) renderLeaderboard();
-          if (playState.openCommentsVideoId && typeof renderPlayCommentsDrawerList === 'function') renderPlayCommentsDrawerList();
-        });
+      // Only PLAY activity can change PLAY state. Other premium_requests rows are unrelated.
+      if (changedReason.startsWith('__PLAY_') && typeof loadPlayData === 'function') {
+        clearTimeout(playRealtimeRefreshTimer);
+        playRealtimeRefreshTimer = setTimeout(() => {
+          loadPlayData(true).then(() => {
+            if (typeof syncAllPlayEarnings === 'function') syncAllPlayEarnings();
+            else {
+              if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
+              if (typeof syncPlayDonations === 'function') syncPlayDonations();
+            }
+            if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+            if (currentPage === 'account' && typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
+            if (currentPage === 'global' && lbMode === 'creators' && Date.now() > lbAnimatingUntil) renderLeaderboard();
+            if (playState.openCommentsVideoId && typeof renderPlayCommentsDrawerList === 'function') renderPlayCommentsDrawerList();
+          });
+        }, 900);
       }
       if (currentPage === 'notifications') loadRequests();
       else if (currentUser) updateNotificationsBadge();
