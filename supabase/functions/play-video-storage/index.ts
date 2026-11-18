@@ -23,12 +23,11 @@ Deno.serve(async (req) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const githubToken = Deno.env.get("GITHUB_TOKEN")!;
     const owner = Deno.env.get("GITHUB_OWNER") || "Dompinator";
     const repo = Deno.env.get("GITHUB_REPO") || "Grind";
     const branch = Deno.env.get("GITHUB_BRANCH") || "main";
-    if (!supabaseUrl || !anonKey || !serviceKey || !githubToken) {
+    if (!supabaseUrl || !anonKey || !githubToken) {
       return json({ error: "PLAY video storage is not configured yet." }, 503);
     }
 
@@ -85,17 +84,12 @@ Deno.serve(async (req) => {
 
     if (action === "delete") {
       const ownerId = String(body?.ownerId || user.id);
+      // Only the authenticated owner may delete their own stored video.
+      // Admin moderation may remove the PLAY post, but cannot use a mutable
+      // profile username as authorization to delete another user's GitHub file.
       if (ownerId !== user.id) {
-        const adminClient = createClient(supabaseUrl, serviceKey, {
-          auth: { persistSession: false, autoRefreshToken: false },
-        });
-        const { data: profile } = await adminClient.from("profiles")
-          .select("username").eq("id", user.id).maybeSingle();
-        if (String(profile?.username || "").toLowerCase() !== "dompinator") {
-          return json({ error: "Not allowed to delete this video." }, 403);
-        }
+        return json({ error: "Not allowed to delete this video." }, 403);
       }
-      if (!/^[0-9a-f-]{20,60}$/i.test(ownerId)) return json({ error: "Invalid owner ID." }, 400);
 
       let deleted = false;
       for (const extension of ["webm", "mp4"]) {
