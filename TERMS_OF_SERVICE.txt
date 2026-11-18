@@ -1,5 +1,5 @@
 GRIND — TERMS OF SERVICE
-Last Updated: November 17, 2026
+Last Updated: November 18, 2026
 
 Welcome to GRIND ("Grind your way through the market"). By creating an account or accessing GRIND, you agree to be bound by these Terms of Service. If you do not agree to these rules, you may not use the service.
 
@@ -31,7 +31,12 @@ Welcome to GRIND ("Grind your way through the market"). By creating an account o
 - You may NOT upload copyrighted videos, movies, TV clips, copyrighted songs/audio tracks, copyrighted images, or any third-party intellectual property unless you own the rights or have explicit legal permission to upload it.
 - Any Play Short, uploaded video, image, or voiceover/audio found to infringe copyright will be removed immediately, and the uploader may lose Play earnings and receive a warning, account reset, or permanent ban.
 
-7. MODERATION & ENFORCEMENT
+7. DISRUPTIVE DEPOSIT & WITHDRAWAL ACTIVITY
+- Repeatedly depositing or adding an amount and then withdrawing or removing the same amount, when done solely to troll, spam, confuse other users, or disrupt GRIND's activity, is prohibited.
+- This rule applies even if the same amount is put in and taken out and there is no intended net gain.
+- Repeated or deliberate violations may result in an account warning, temporary or permanent ban, or full account reset.
+
+8. MODERATION & ENFORCEMENT
 - Administrators (including Dompinator) reserve the right to monitor activity and take moderation action at their sole discretion to protect the market and community.
 - Violations of these Terms may result in:
   * Official account warnings
@@ -39,6 +44,6 @@ Welcome to GRIND ("Grind your way through the market"). By creating an account o
   * Full account reset
   * Temporary or permanent account ban
 
-8. SERVICE CHANGES & AVAILABILITY
+9. SERVICE CHANGES & AVAILABILITY
 - GRIND is provided "as is" without warranties of any kind. Features, pricing formulas, rewards, and data may be updated, balanced, reset, or discontinued at any time.
 - We may update these Terms of Service at any time. Continued use of GRIND after changes or an in-app update notice constitutes acceptance of the updated Terms.
