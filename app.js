@@ -48,6 +48,167 @@ let passScrollInitDone = false;
 let grindBotHistory = [];
 let grindBotSending = false;
 
+// ---------- Egress Reduction: Shared Profile & Coin Image Caches ----------
+const PROFILES_CACHE_LS_KEY = 'grind_profiles_cache_v1';
+const COIN_IMAGES_CACHE_LS_KEY = 'grind_coin_imgs_v1';
+const PLAY_CACHE_LS_KEY = 'grind_play_cache_v2';
+const SHARED_PROFILE_TTL_MS = 10 * 60 * 1000;
+const sharedProfilesCache = new Map();
+const sharedCoinImagesCache = new Map();
+let sharedProfilesLastBulkFetchAt = 0;
+let sharedProfilesBulkPromise = null;
+let sharedProfilesPersistTimer = null;
+let sharedCoinImagesPersistTimer = null;
+let proUserIdsFetchedAt = 0;
+let proUserIdsPromise = null;
+let featuredCoinsFetchedAt = 0;
+let featuredCoinsPromise = null;
+let coinsTradeStatsCache = null;
+let coinsTradeStatsFetchedAt = 0;
+let coinsTradeStatsDirty = true;
+
+(function hydrateSharedCachesFromStorage() {
+  try {
+    const rawProf = localStorage.getItem(PROFILES_CACHE_LS_KEY);
+    if (rawProf) {
+      const parsed = JSON.parse(rawProf);
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.bulkAt === 'number') sharedProfilesLastBulkFetchAt = parsed.bulkAt;
+        if (Array.isArray(parsed.entries)) {
+          parsed.entries.forEach(p => {
+            if (p && p.id) sharedProfilesCache.set(String(p.id), p);
+          });
+        }
+      }
+    }
+  } catch (e) {}
+  try {
+    const rawImgs = localStorage.getItem(COIN_IMAGES_CACHE_LS_KEY);
+    if (rawImgs) {
+      const parsed = JSON.parse(rawImgs);
+      if (parsed && typeof parsed === 'object') {
+        Object.entries(parsed).forEach(([cid, url]) => {
+          sharedCoinImagesCache.set(String(cid), url || null);
+        });
+      }
+    }
+  } catch (e) {}
+})();
+
+function schedulePersistSharedProfiles() {
+  if (sharedProfilesPersistTimer) return;
+  sharedProfilesPersistTimer = setTimeout(() => {
+    sharedProfilesPersistTimer = null;
+    try {
+      const entries = Array.from(sharedProfilesCache.values())
+        .sort((a, b) => (b._cachedAt || 0) - (a._cachedAt || 0))
+        .slice(0, 120);
+      localStorage.setItem(PROFILES_CACHE_LS_KEY, JSON.stringify({
+        bulkAt: sharedProfilesLastBulkFetchAt,
+        entries
+      }));
+    } catch (e) {}
+  }, 500);
+}
+
+function schedulePersistCoinImages() {
+  if (sharedCoinImagesPersistTimer) return;
+  sharedCoinImagesPersistTimer = setTimeout(() => {
+    sharedCoinImagesPersistTimer = null;
+    try {
+      const obj = {};
+      const entries = Array.from(sharedCoinImagesCache.entries()).slice(-120);
+      entries.forEach(([k, v]) => { obj[k] = v || null; });
+      localStorage.setItem(COIN_IMAGES_CACHE_LS_KEY, JSON.stringify(obj));
+    } catch (e) {}
+  }, 500);
+}
+
+function saveSharedProfileToCache(p) {
+  if (!p || !p.id) return;
+  const pid = String(p.id);
+  const prev = sharedProfilesCache.get(pid) || {};
+  const next = {
+    id: pid,
+    username: p.username || prev.username || 'Trader',
+    avatar_url: p.avatar_url !== undefined ? p.avatar_url : (prev.avatar_url ?? null),
+    is_premium: p.is_premium !== undefined ? Boolean(p.is_premium) : Boolean(prev.is_premium),
+    _cachedAt: Date.now()
+  };
+  sharedProfilesCache.set(pid, next);
+  schedulePersistSharedProfiles();
+}
+
+function saveSharedCoinImageToCache(coinId, imageUrl) {
+  if (!coinId) return;
+  sharedCoinImagesCache.set(String(coinId), imageUrl || null);
+  schedulePersistCoinImages();
+}
+
+function getCachedProfile(userId, fallback = null) {
+  const uid = String(userId || fallback?.id || '');
+  if (!uid) return fallback || { id: '', username: 'Trader', avatar_url: null, is_premium: false };
+  if (currentUser && String(currentUser.id) === uid) {
+    return currentUser;
+  }
+  const cached = sharedProfilesCache.get(uid);
+  if (!cached && !fallback) return { id: uid, username: 'Trader', avatar_url: null, is_premium: false };
+  if (!cached) return { id: uid, username: 'Trader', avatar_url: null, ...fallback };
+  if (!fallback) return cached;
+  return {
+    ...cached,
+    ...fallback,
+    id: uid,
+    username: fallback.username || cached.username || 'Trader',
+    avatar_url: fallback.avatar_url !== undefined ? fallback.avatar_url : (cached.avatar_url ?? null),
+    is_premium: fallback.is_premium !== undefined ? fallback.is_premium : cached.is_premium
+  };
+}
+
+async function ensureProfilesCached(userIds = [], forceBulk = false) {
+  if (!sb) return;
+  const now = Date.now();
+  const ids = Array.isArray(userIds) ? [...new Set(userIds.map(x => String(x || '')).filter(Boolean))] : [];
+
+  if (ids.length > 0) {
+    const missing = ids.filter(uid => {
+      if (currentUser && String(currentUser.id) === uid) return false;
+      const c = sharedProfilesCache.get(uid);
+      return !c || !c._cachedAt || (now - c._cachedAt > SHARED_PROFILE_TTL_MS);
+    });
+    if (!missing.length) return;
+    for (let i = 0; i < missing.length; i += 60) {
+      const batch = missing.slice(i, i + 60);
+      try {
+        const { data } = await sb
+          .from('profiles')
+          .select('id, username, avatar_url, is_premium')
+          .in('id', batch);
+        (data || []).forEach(saveSharedProfileToCache);
+      } catch (e) {}
+    }
+    return;
+  }
+
+  if (sharedProfilesBulkPromise) return sharedProfilesBulkPromise;
+  if (!forceBulk && sharedProfilesCache.size > 0 && (now - sharedProfilesLastBulkFetchAt) < 180000) {
+    return;
+  }
+  sharedProfilesBulkPromise = (async () => {
+    try {
+      const { data } = await sb
+        .from('profiles')
+        .select('id, username, avatar_url, is_premium')
+        .order('username', { ascending: true })
+        .limit(250);
+      (data || []).forEach(saveSharedProfileToCache);
+      sharedProfilesLastBulkFetchAt = Date.now();
+      schedulePersistSharedProfiles();
+    } catch (e) {}
+  })().finally(() => { sharedProfilesBulkPromise = null; });
+  return sharedProfilesBulkPromise;
+}
+
 const PASS_STEP_SECONDS = 300; // 5 minutes between every reward
 const PASS_REWARDS = [
   { tier: 1, minutes: 5, type: 'cash', amount: 5, title: '$5', desc: 'Instant $5.00 cash bonus' },
@@ -158,13 +319,13 @@ function formatTime(seconds) {
   return `${m}m`;
 }
 
-// Compress uploaded images using canvas so any image works regardless of file size
+// Compress uploaded images tightly (128x128 @ 0.72 JPEG) to keep Supabase egress low
 function compressImg(file, cb) {
   const r = new FileReader();
   r.onload = () => {
     const img = new Image();
     img.onload = () => {
-      const max = 256;
+      const max = 128;
       let w = img.width, h = img.height;
       if (w > h) {
         if (w > max) { h = Math.round(h * max / w); w = max; }
@@ -176,7 +337,7 @@ function compressImg(file, cb) {
       canvas.height = h;
       const ctx = canvas.getContext('2d');
       ctx.drawImage(img, 0, 0, w, h);
-      cb(canvas.toDataURL('image/jpeg', 0.85));
+      cb(canvas.toDataURL('image/jpeg', 0.72));
     };
     img.src = r.result;
   };
@@ -510,6 +671,7 @@ async function loadProfile() {
   const prevMemTier = currentUser && currentUser.id === user.id ? getUserTier(currentUser) : null;
   currentUser = data;
   currentUser.auth_created_at = user.created_at || data.created_at || null;
+  saveSharedProfileToCache(currentUser);
 
   // Auto-sync approved premium & PRO status
   await loadProUserIds();
@@ -562,7 +724,7 @@ let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map
 let pendingWarnAckTs = 0;
 let adminModStateFetchedAt = 0;
 let adminModStatePromise = null;
-const ADMIN_MOD_STATE_TTL_MS = 30000;
+const ADMIN_MOD_STATE_TTL_MS = 120000;
 
 async function _fetchAdminModerationStateFresh() {
   const bans = new Map();
@@ -1478,13 +1640,13 @@ function startTimeTracking() {
   if (timeInterval) clearInterval(timeInterval);
   if (passTickerInterval) clearInterval(passTickerInterval);
   timeInterval = setInterval(async () => {
-    if (!currentUser || !sb) return;
-    const add = 30; // seconds
+    if (!currentUser || !sb || document.hidden) return;
+    const add = 120; // seconds (2-min cadence cuts DB writes & broadcasts by 75%)
     const newTime = (currentUser.time_played || 0) + add;
     currentUser.time_played = newTime;
     await sb.from('profiles').update({ time_played: newTime }).eq('id', currentUser.id);
     incrementPassTime(add);
-  }, 30000);
+  }, 120000);
   passTickerInterval = setInterval(() => {
     if (!currentUser || currentUser.is_banned) return;
     if (currentPage === 'pass') updatePassLiveClock();
@@ -1671,50 +1833,65 @@ $('#feedSearch')?.addEventListener('input', e => {
   renderFeed();
 });
 
-async function loadProUserIds() {
+async function loadProUserIds(force = false) {
   if (!sb) return;
-  try {
-    let q = sb
-      .from('premium_requests')
-      .select('user_id, created_at')
-      .eq('status', 'approved')
-      .eq('reason', '__PRO_TIER__');
-    if (adminModStateCache.serverResetTs > 0) {
-      q = q.gt('created_at', new Date(adminModStateCache.serverResetTs).toISOString());
-    }
-    const { data } = await q;
-    proUserIds = new Set((data || []).map(r => r.user_id).filter(Boolean));
-    if (currentUser && localStorage.getItem('grind_pro_' + currentUser.id) === '1') {
-      proUserIds.add(currentUser.id);
-    }
-  } catch (e) {}
+  if (proUserIdsPromise) return proUserIdsPromise;
+  if (!force && proUserIdsFetchedAt && (Date.now() - proUserIdsFetchedAt) < 60000) return;
+  proUserIdsPromise = (async () => {
+    try {
+      let q = sb
+        .from('premium_requests')
+        .select('user_id, created_at')
+        .eq('status', 'approved')
+        .eq('reason', '__PRO_TIER__');
+      if (adminModStateCache.serverResetTs > 0) {
+        q = q.gt('created_at', new Date(adminModStateCache.serverResetTs).toISOString());
+      }
+      const { data } = await q;
+      proUserIds = new Set((data || []).map(r => r.user_id).filter(Boolean));
+      if (currentUser && localStorage.getItem('grind_pro_' + currentUser.id) === '1') {
+        proUserIds.add(currentUser.id);
+      }
+      proUserIdsFetchedAt = Date.now();
+    } catch (e) {}
+  })().finally(() => { proUserIdsPromise = null; });
+  return proUserIdsPromise;
 }
 
 // ---------- Coins & Feed ----------
-async function fetchFeaturedCoins() {
+async function fetchFeaturedCoins(force = false) {
   if (!sb) return [];
-  try {
-    const srvResetTs = adminModStateCache.serverResetTs || 0;
-    let q = sb.from('premium_requests')
-      .select('reason, created_at, profiles(username)')
-      .like('reason', '__FEATURED_COINS__:%')
-      .order('created_at', { ascending: false })
-      .limit(20);
-    if (srvResetTs > 0) {
-      q = q.gt('created_at', new Date(srvResetTs).toISOString());
-    }
-    const { data } = await q;
-    const latest = (data || []).find(r => (r.profiles?.username || '').toLowerCase() === 'dompinator');
-    if (latest?.reason) {
-      const parsed = JSON.parse(String(latest.reason).slice('__FEATURED_COINS__:'.length));
-      if (Array.isArray(parsed?.coinIds)) {
-        featuredCoinIdsCache = parsed.coinIds.map(x => (x ? String(x) : '')).slice(0, 3);
-        return featuredCoinIdsCache;
+  if (featuredCoinsPromise) return featuredCoinsPromise;
+  if (!force && featuredCoinsFetchedAt && (Date.now() - featuredCoinsFetchedAt) < 60000) {
+    return featuredCoinIdsCache;
+  }
+  featuredCoinsPromise = (async () => {
+    try {
+      const srvResetTs = adminModStateCache.serverResetTs || 0;
+      let q = sb.from('premium_requests')
+        .select('reason, created_at, profiles(username)')
+        .like('reason', '__FEATURED_COINS__:%')
+        .order('created_at', { ascending: false })
+        .limit(20);
+      if (srvResetTs > 0) {
+        q = q.gt('created_at', new Date(srvResetTs).toISOString());
       }
-    }
-    featuredCoinIdsCache = [];
-  } catch (e) {}
-  return featuredCoinIdsCache;
+      const { data } = await q;
+      const latest = (data || []).find(r => (r.profiles?.username || '').toLowerCase() === 'dompinator');
+      if (latest?.reason) {
+        const parsed = JSON.parse(String(latest.reason).slice('__FEATURED_COINS__:'.length));
+        if (Array.isArray(parsed?.coinIds)) {
+          featuredCoinIdsCache = parsed.coinIds.map(x => (x ? String(x) : '')).slice(0, 3);
+          featuredCoinsFetchedAt = Date.now();
+          return featuredCoinIdsCache;
+        }
+      }
+      featuredCoinIdsCache = [];
+      featuredCoinsFetchedAt = Date.now();
+    } catch (e) {}
+    return featuredCoinIdsCache;
+  })().finally(() => { featuredCoinsPromise = null; });
+  return featuredCoinsPromise;
 }
 
 function renderFeaturedSection() {
@@ -1845,6 +2022,7 @@ $('#saveFeaturedBtn')?.addEventListener('click', async () => {
     return;
   }
   featuredCoinIdsCache = coinIds;
+  featuredCoinsFetchedAt = Date.now();
   closeFeaturedEditModal();
   renderFeaturedSection();
   toast('Featured coins updated for everyone!');
@@ -1882,7 +2060,7 @@ async function _loadCoinsFresh() {
   const srvResetTs = adminModStateCache.serverResetTs || 0;
   let res = await sb
     .from('coins')
-    .select('*, profiles!coins_creator_id_fkey(id, username, avatar_url, is_premium)')
+    .select('id, name, ticker, description, creator_id, price, change_pct, created_at')
     .order('created_at', { ascending: false });
   if (res.error) {
     res = await sb.from('coins').select('*').order('created_at', { ascending: false });
@@ -1903,67 +2081,119 @@ async function _loadCoinsFresh() {
       const cts = c.created_at ? new Date(c.created_at).getTime() : 0;
       return cts > srvResetTs;
     });
-    const stats = new Map();
-    const openPriceMap = new Map();
-    const tradedTodaySet = new Set();
+
+    // Seed image cache if fallback '*' query returned image_url, otherwise only fetch missing logos once
+    const missingImgIds = [];
+    list.forEach(c => {
+      const cid = String(c.id);
+      if (c.image_url !== undefined) {
+        saveSharedCoinImageToCache(cid, c.image_url);
+      } else if (!sharedCoinImagesCache.has(cid)) {
+        missingImgIds.push(c.id);
+      }
+    });
+    const creatorIds = list.map(c => c.creator_id).filter(Boolean);
+
+    const fetchMissingImgsPromise = missingImgIds.length
+      ? (async () => {
+          for (let i = 0; i < missingImgIds.length; i += 40) {
+            const batch = missingImgIds.slice(i, i + 40);
+            try {
+              const { data: imgRows } = await sb.from('coins').select('id, image_url').in('id', batch);
+              (imgRows || []).forEach(r => saveSharedCoinImageToCache(r.id, r.image_url));
+            } catch (e) {}
+          }
+        })()
+      : Promise.resolve();
+
+    let stats = coinsTradeStatsCache?.stats || new Map();
+    let openPriceMap = coinsTradeStatsCache?.openPriceMap || new Map();
+    let tradedTodaySet = coinsTradeStatsCache?.tradedTodaySet || new Set();
     const startOfTodayIso = getStartOfTodayDate().toISOString();
-    lastCoinsDateKey = getLocalDateKey(0);
-    try {
-      let buyQ = sb.from('trades')
-        .select('coin_id, amount_usd, created_at')
-        .eq('type', 'buy')
-        .order('created_at', { ascending: false })
-        .limit(1000);
-      let todayQ = sb.from('trades')
-        .select('coin_id, created_at')
-        .gte('created_at', startOfTodayIso)
-        .limit(1000);
-      let previousPriceQ = sb.from('trades')
-        .select('coin_id, price_after, created_at')
-        .lt('created_at', startOfTodayIso)
-        .order('created_at', { ascending: false })
-        .limit(1000);
-      if (srvResetTs > 0) {
-        const srvIso = new Date(srvResetTs).toISOString();
-        buyQ = buyQ.gt('created_at', srvIso);
-        todayQ = todayQ.gt('created_at', srvIso);
-        previousPriceQ = previousPriceQ.gt('created_at', srvIso);
-      }
-      const [{ data: buyRows }, { data: todayRows }, { data: previousPriceRows }] = await Promise.all([buyQ, todayQ, previousPriceQ]);
-      const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-      (buyRows || []).forEach(t => {
-        if (!t.coin_id) return;
-        const ts = t.created_at ? new Date(t.created_at).getTime() : 0;
-        const s = stats.get(t.coin_id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
-        s.total += 1;
-        s.volume += Number(t.amount_usd || 0);
-        if (ts >= dayAgo) s.recent += 1;
-        if (ts > s.lastBuy) s.lastBuy = ts;
-        stats.set(t.coin_id, s);
-      });
-      const tradedTodayIds = [...new Set((todayRows || []).map(t => t.coin_id).filter(Boolean))];
-      tradedTodayIds.forEach(id => tradedTodaySet.add(id));
-      (previousPriceRows || []).forEach(row => {
-        if (!row.coin_id || openPriceMap.has(row.coin_id)) return;
-        openPriceMap.set(row.coin_id, row.price_after != null ? Number(row.price_after) : 1);
-      });
-      const missingOpenPriceIds = tradedTodayIds.filter(id => !openPriceMap.has(id));
-      if (missingOpenPriceIds.length) {
-        const fallbackPrices = await Promise.all(missingOpenPriceIds.map(id =>
-          sb.from('trades')
-            .select('price_after')
-            .eq('coin_id', id)
-            .lt('created_at', startOfTodayIso)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle()
-        ));
-        fallbackPrices.forEach((result, index) => {
-          const id = missingOpenPriceIds[index];
-          openPriceMap.set(id, result.data?.price_after != null ? Number(result.data.price_after) : 1);
-        });
-      }
-    } catch (e) {}
+    const currentDateKey = getLocalDateKey(0);
+    const needStatsRefresh =
+      coinsTradeStatsDirty ||
+      !coinsTradeStatsCache ||
+      lastCoinsDateKey !== currentDateKey ||
+      (Date.now() - coinsTradeStatsFetchedAt) > 12000;
+    lastCoinsDateKey = currentDateKey;
+
+    const fetchStatsPromise = needStatsRefresh
+      ? (async () => {
+          const nextStats = new Map();
+          const nextOpenPriceMap = new Map();
+          const nextTradedTodaySet = new Set();
+          try {
+            let buyQ = sb.from('trades')
+              .select('coin_id, amount_usd, created_at')
+              .eq('type', 'buy')
+              .order('created_at', { ascending: false })
+              .limit(1000);
+            let todayQ = sb.from('trades')
+              .select('coin_id, created_at')
+              .gte('created_at', startOfTodayIso)
+              .limit(1000);
+            let previousPriceQ = sb.from('trades')
+              .select('coin_id, price_after, created_at')
+              .lt('created_at', startOfTodayIso)
+              .order('created_at', { ascending: false })
+              .limit(1000);
+            if (srvResetTs > 0) {
+              const srvIso = new Date(srvResetTs).toISOString();
+              buyQ = buyQ.gt('created_at', srvIso);
+              todayQ = todayQ.gt('created_at', srvIso);
+              previousPriceQ = previousPriceQ.gt('created_at', srvIso);
+            }
+            const [{ data: buyRows }, { data: todayRows }, { data: previousPriceRows }] = await Promise.all([buyQ, todayQ, previousPriceQ]);
+            const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+            (buyRows || []).forEach(t => {
+              if (!t.coin_id) return;
+              const ts = t.created_at ? new Date(t.created_at).getTime() : 0;
+              const s = nextStats.get(t.coin_id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
+              s.total += 1;
+              s.volume += Number(t.amount_usd || 0);
+              if (ts >= dayAgo) s.recent += 1;
+              if (ts > s.lastBuy) s.lastBuy = ts;
+              nextStats.set(t.coin_id, s);
+            });
+            const tradedTodayIds = [...new Set((todayRows || []).map(t => t.coin_id).filter(Boolean))];
+            tradedTodayIds.forEach(id => nextTradedTodaySet.add(id));
+            (previousPriceRows || []).forEach(row => {
+              if (!row.coin_id || nextOpenPriceMap.has(row.coin_id)) return;
+              nextOpenPriceMap.set(row.coin_id, row.price_after != null ? Number(row.price_after) : 1);
+            });
+            const missingOpenPriceIds = tradedTodayIds.filter(id => !nextOpenPriceMap.has(id));
+            if (missingOpenPriceIds.length) {
+              const fallbackPrices = await Promise.all(missingOpenPriceIds.map(id =>
+                sb.from('trades')
+                  .select('price_after')
+                  .eq('coin_id', id)
+                  .lt('created_at', startOfTodayIso)
+                  .order('created_at', { ascending: false })
+                  .limit(1)
+                  .maybeSingle()
+              ));
+              fallbackPrices.forEach((result, index) => {
+                const id = missingOpenPriceIds[index];
+                nextOpenPriceMap.set(id, result.data?.price_after != null ? Number(result.data.price_after) : 1);
+              });
+            }
+            stats = nextStats;
+            openPriceMap = nextOpenPriceMap;
+            tradedTodaySet = nextTradedTodaySet;
+            coinsTradeStatsCache = { stats, openPriceMap, tradedTodaySet };
+            coinsTradeStatsFetchedAt = Date.now();
+            coinsTradeStatsDirty = false;
+          } catch (e) {}
+        })()
+      : Promise.resolve();
+
+    await Promise.all([
+      ensureProfilesCached(creatorIds),
+      fetchMissingImgsPromise,
+      fetchStatsPromise
+    ]);
+
     coins = list.map(c => {
       const st = stats.get(c.id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
       const currentPrice = Number(c.price) || 1;
@@ -1973,8 +2203,13 @@ async function _loadCoinsFresh() {
         ? ((currentPrice - openToday) / openToday) * 100
         : 0;
       const todayPct = Math.abs(rawTodayPct) < 0.005 ? 0 : rawTodayPct;
+      const cachedImg = sharedCoinImagesCache.has(String(c.id))
+        ? sharedCoinImagesCache.get(String(c.id))
+        : (c.image_url || null);
       return {
         ...c,
+        image_url: cachedImg,
+        profiles: c.creator_id ? getCachedProfile(c.creator_id, c.profiles) : null,
         today_open_price: openToday,
         change_pct: todayPct,
         recent_buys_24h: st.recent,
@@ -2164,12 +2399,14 @@ $('#createForm')?.addEventListener('submit', async (e) => {
       return;
     }
 
+    if (data?.id) saveSharedCoinImageToCache(data.id, pendingCoinImage);
     pendingCoinImage = null;
     $('#createForm').reset();
     $('#coinPreview').textContent = '＋';
     if (msgEl) msgEl.textContent = 'Currency created!';
     playSound('upload');
     toast('Your coin is live!');
+    coinsTradeStatsDirty = true;
     await loadCoins();
     await updateNetWorth();
     if (data && data.id) {
@@ -2236,7 +2473,7 @@ async function renderCoinDetail() {
   const [{ data: hold }, { data: dbTrades }, { data: myCoinTradesDb }] = await Promise.all([
     sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', c.id).maybeSingle(),
     sb.from('trades')
-      .select('*, profiles(username, avatar_url)')
+      .select('id, coin_id, user_id, type, amount_usd, shares, price_after, created_at, profiles(username, is_premium)')
       .eq('coin_id', c.id)
       .order('created_at', { ascending: false })
       .limit(100),
@@ -2248,10 +2485,16 @@ async function renderCoinDetail() {
       .limit(1000)
   ]);
   const shares = hold?.shares || 0;
+  await ensureProfilesCached((dbTrades || []).map(t => t.user_id).filter(Boolean));
 
   // Combine with any local session trades
   const tradeMap = new Map();
-  (dbTrades || []).forEach(t => tradeMap.set(t.id || (t.created_at + t.shares), t));
+  (dbTrades || []).forEach(t => {
+    tradeMap.set(t.id || (t.created_at + t.shares), {
+      ...t,
+      profiles: t.user_id ? getCachedProfile(t.user_id, t.profiles) : t.profiles
+    });
+  });
   (c.localTrades || []).forEach(t => tradeMap.set(t.id || (t.created_at + t.shares), t));
   const trades = Array.from(tradeMap.values());
   trades.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
@@ -2805,6 +3048,7 @@ $('#saveEditCoinBtn')?.addEventListener('click', async () => {
 
   targetCoin.description = newDesc;
   targetCoin.image_url = newLogo;
+  saveSharedCoinImageToCache(targetCoin.id, newLogo);
   if (selectedCoin && String(selectedCoin.id) === String(targetCoin.id)) {
     selectedCoin.description = newDesc;
     selectedCoin.image_url = newLogo;
@@ -3174,13 +3418,15 @@ async function loadCoinComments(coin) {
   try {
     const { data } = await sb
       .from('premium_requests')
-      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .select('user_id, reason, created_at, profiles(id, username, is_premium)')
       .like('reason', '__CMT_%')
       .order('created_at', { ascending: true })
       .limit(1000);
     rows = data || [];
   } catch (e) {}
 
+  if (!selectedCoin || String(selectedCoin.id) !== coinId) return;
+  await ensureProfilesCached(rows.map(r => r.user_id).filter(Boolean));
   if (!selectedCoin || String(selectedCoin.id) !== coinId) return;
 
   const commentsMap = new Map();
@@ -3211,7 +3457,7 @@ async function loadCoinComments(coin) {
           gif_url: cleanGif,
           gif_title: p.gif_title ? String(p.gif_title) : 'GIF',
           ts,
-          profile: r.profiles || { id: r.user_id, username: 'Trader' }
+          profile: getCachedProfile(r.user_id, r.profiles)
         });
       } catch (e) {}
     } else if (reason.startsWith('__CMT_VOTE__:')) {
@@ -3877,20 +4123,22 @@ async function getCoinSpendLeaderboard(coinId) {
   if (!sb || !coinId) return [];
   const { data, error } = await sb
     .from('trades')
-    .select('user_id, amount_usd, profiles(username, avatar_url, is_premium)')
+    .select('user_id, amount_usd, profiles(username, is_premium)')
     .eq('coin_id', coinId)
     .eq('type', 'buy');
   if (error || !data) return [];
+  await ensureProfilesCached(data.map(t => t.user_id).filter(Boolean));
 
   const totals = new Map();
   for (const t of data) {
     if (!t.user_id) continue;
+    const cachedProf = getCachedProfile(t.user_id, t.profiles);
     const prev = totals.get(t.user_id) || {
       id: t.user_id,
       user_id: t.user_id,
-      username: t.profiles?.username || 'Unknown',
-      avatar_url: t.profiles?.avatar_url || null,
-      is_premium: Boolean(t.profiles?.is_premium),
+      username: cachedProf?.username || t.profiles?.username || 'Unknown',
+      avatar_url: cachedProf?.avatar_url || null,
+      is_premium: Boolean(cachedProf?.is_premium ?? t.profiles?.is_premium),
       spent: 0,
       buys: 0
     };
@@ -4123,7 +4371,7 @@ async function renderLeaderboard() {
   ]);
   if (currentUser) await updateNetWorth();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
-  const { data } = await sb.from('profiles').select('id, username, avatar_url, cash, net_worth, time_played, is_premium').limit(200);
+  const { data } = await sb.from('profiles').select('id, username, cash, net_worth, time_played, is_premium').limit(200);
   if (seq !== lbRenderSeq || modeAtStart !== lbMode) return;
 
   let list = (data || [])
@@ -4136,6 +4384,8 @@ async function renderLeaderboard() {
 
   let bestGainerPid = null;
   let worstLoserPid = null;
+  let weeklyBest = null;
+  let weeklyWorst = null;
 
   if (lbMode === 'weekly') {
     const weeklyMap = await computeWeeklyProfitStats(list);
@@ -4151,35 +4401,10 @@ async function renderLeaderboard() {
     if (pool.length) {
       const sortedUp = [...pool].sort((a, b) => (b.weeklyProfitPct - a.weeklyProfitPct) || (b.weeklyProfitUsd - a.weeklyProfitUsd));
       const sortedDown = [...pool].sort((a, b) => (a.weeklyProfitPct - b.weeklyProfitPct) || (a.weeklyProfitUsd - b.weeklyProfitUsd));
-      const best = sortedUp[0];
-      const worst = sortedDown[0];
-      if (best && best.weeklyProfitPct > 0.005) bestGainerPid = String(best.id);
-      if (worst && worst.weeklyProfitPct < -0.005) worstLoserPid = String(worst.id);
-
-      if (spotlightsEl) {
-        const upCard = best ? `
-          <button type="button" class="lb-spotlight-card up" data-profile="${escapeHtml(best.id)}">
-            <div class="lb-spotlight-label">▲ MOST % UP (7D)</div>
-            <div class="lb-spotlight-user">
-              <div class="avatar" style="width:30px;height:30px;font-size:12px;">${best.avatar_url ? `<img src="${escapeHtml(best.avatar_url)}">` : escapeHtml((best.username || '?')[0].toUpperCase())}</div>
-              <span class="lb-spotlight-name">${escapeHtml(best.username || 'Unknown')}${tierBadgeHtml(best)}</span>
-            </div>
-            <div class="lb-spotlight-stat up">${escapeHtml(formatSignedPct(best.weeklyProfitPct))} <small>${escapeHtml(formatSignedMoney(best.weeklyProfitUsd))}</small></div>
-          </button>` : '';
-        const downCard = worst ? `
-          <button type="button" class="lb-spotlight-card down" data-profile="${escapeHtml(worst.id)}">
-            <div class="lb-spotlight-label">▼ DOWN MOST % (7D)</div>
-            <div class="lb-spotlight-user">
-              <div class="avatar" style="width:30px;height:30px;font-size:12px;">${worst.avatar_url ? `<img src="${escapeHtml(worst.avatar_url)}">` : escapeHtml((worst.username || '?')[0].toUpperCase())}</div>
-              <span class="lb-spotlight-name">${escapeHtml(worst.username || 'Unknown')}${tierBadgeHtml(worst)}</span>
-            </div>
-            <div class="lb-spotlight-stat down">${escapeHtml(formatSignedPct(worst.weeklyProfitPct))} <small>${escapeHtml(formatSignedMoney(worst.weeklyProfitUsd))}</small></div>
-          </button>` : '';
-        spotlightsEl.innerHTML = upCard + downCard;
-        $$('#lbWeeklySpotlights [data-profile]').forEach(el => {
-          el.addEventListener('click', () => openProfileModal(el.dataset.profile));
-        });
-      }
+      weeklyBest = sortedUp[0];
+      weeklyWorst = sortedDown[0];
+      if (weeklyBest && weeklyBest.weeklyProfitPct > 0.005) bestGainerPid = String(weeklyBest.id);
+      if (weeklyWorst && weeklyWorst.weeklyProfitPct < -0.005) worstLoserPid = String(weeklyWorst.id);
     } else if (spotlightsEl) {
       spotlightsEl.innerHTML = '';
     }
@@ -4235,6 +4460,44 @@ async function renderLeaderboard() {
     list.sort((a, b) => Number(b.time_played || 0) - Number(a.time_played || 0));
   }
   list = list.slice(0, 100);
+
+  // Hydrate missing avatars only for rendered top-100 + weekly spotlight users via shared cache
+  const needAvatarIds = list.map(p => p.id);
+  if (weeklyBest?.id) needAvatarIds.push(weeklyBest.id);
+  if (weeklyWorst?.id) needAvatarIds.push(weeklyWorst.id);
+  await ensureProfilesCached(needAvatarIds);
+  if (seq !== lbRenderSeq || modeAtStart !== lbMode) return;
+  list = list.map(p => {
+    const cached = getCachedProfile(p.id, p);
+    return { ...p, avatar_url: cached?.avatar_url ?? null };
+  });
+
+  if (lbMode === 'weekly' && spotlightsEl && (weeklyBest || weeklyWorst)) {
+    const best = weeklyBest ? { ...weeklyBest, avatar_url: getCachedProfile(weeklyBest.id, weeklyBest)?.avatar_url ?? null } : null;
+    const worst = weeklyWorst ? { ...weeklyWorst, avatar_url: getCachedProfile(weeklyWorst.id, weeklyWorst)?.avatar_url ?? null } : null;
+    const upCard = best ? `
+      <button type="button" class="lb-spotlight-card up" data-profile="${escapeHtml(best.id)}">
+        <div class="lb-spotlight-label">▲ MOST % UP (7D)</div>
+        <div class="lb-spotlight-user">
+          <div class="avatar" style="width:30px;height:30px;font-size:12px;">${best.avatar_url ? `<img src="${escapeHtml(best.avatar_url)}">` : escapeHtml((best.username || '?')[0].toUpperCase())}</div>
+          <span class="lb-spotlight-name">${escapeHtml(best.username || 'Unknown')}${tierBadgeHtml(best)}</span>
+        </div>
+        <div class="lb-spotlight-stat up">${escapeHtml(formatSignedPct(best.weeklyProfitPct))} <small>${escapeHtml(formatSignedMoney(best.weeklyProfitUsd))}</small></div>
+      </button>` : '';
+    const downCard = worst ? `
+      <button type="button" class="lb-spotlight-card down" data-profile="${escapeHtml(worst.id)}">
+        <div class="lb-spotlight-label">▼ DOWN MOST % (7D)</div>
+        <div class="lb-spotlight-user">
+          <div class="avatar" style="width:30px;height:30px;font-size:12px;">${worst.avatar_url ? `<img src="${escapeHtml(worst.avatar_url)}">` : escapeHtml((worst.username || '?')[0].toUpperCase())}</div>
+          <span class="lb-spotlight-name">${escapeHtml(worst.username || 'Unknown')}${tierBadgeHtml(worst)}</span>
+        </div>
+        <div class="lb-spotlight-stat down">${escapeHtml(formatSignedPct(worst.weeklyProfitPct))} <small>${escapeHtml(formatSignedMoney(worst.weeklyProfitUsd))}</small></div>
+      </button>` : '';
+    spotlightsEl.innerHTML = upCard + downCard;
+    $$('#lbWeeklySpotlights [data-profile]').forEach(el => {
+      el.addEventListener('click', () => openProfileModal(el.dataset.profile));
+    });
+  }
 
   const storageKey = lbMode === 'weekly'
     ? `grind_lb_ranks_${currentUser?.id || 'guest'}_weekly_${lbWeeklySort}`
@@ -5171,14 +5434,38 @@ async function loadPlayData(force = false) {
   playState.syncPromise = (async () => {
   try {
     const srvResetTs = adminModStateCache.serverResetTs || 0;
+
+    // Hydrate cached lightweight PLAY rows from localStorage on cold load so page refreshes only transfer deltas
+    if (!playState.rawRows.length) {
+      try {
+        const rawLs = localStorage.getItem(PLAY_CACHE_LS_KEY);
+        if (rawLs) {
+          const parsedLs = JSON.parse(rawLs);
+          if (parsedLs && Number(parsedLs.srvResetTs || 0) === Number(srvResetTs || 0) && Array.isArray(parsedLs.rows)) {
+            parsedLs.rows.forEach(row => {
+              if (!row || !row.reason || String(row.reason).includes('data:video/')) return;
+              const rowId = String(row.id || (String(row.created_at || '') + '|' + String(row.user_id || '') + '|' + String(row.reason || '')));
+              if (playState.rawRowIds.has(rowId)) return;
+              playState.rawRowIds.add(rowId);
+              playState.rawRows.push(row);
+              if (row.created_at && (!playState.lastRowCreatedAt || row.created_at > playState.lastRowCreatedAt)) {
+                playState.lastRowCreatedAt = row.created_at;
+              }
+            });
+          }
+        }
+      } catch (e) {}
+    }
+
     let query = sb
       .from('premium_requests')
-      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .select('id, user_id, reason, created_at, profiles(id, username, is_premium)')
       .like('reason', '__PLAY_%')
+      .not('reason', 'like', '%data:video/%')
       .order('created_at', { ascending: true })
       .limit(5000);
 
-    // First load gets the existing history. Later loads only transfer newly-created PLAY rows.
+    // First load gets non-blob history; subsequent loads & refreshes only fetch deltas.
     if (playState.rawRows.length && playState.lastRowCreatedAt) {
       query = query.gte('created_at', playState.lastRowCreatedAt);
     }
@@ -5189,6 +5476,7 @@ async function loadPlayData(force = false) {
         .from('premium_requests')
         .select('id, user_id, reason, created_at')
         .like('reason', '__PLAY_%')
+        .not('reason', 'like', '%data:video/%')
         .order('created_at', { ascending: true })
         .limit(5000);
       if (playState.rawRows.length && playState.lastRowCreatedAt) {
@@ -5200,6 +5488,7 @@ async function loadPlayData(force = false) {
     if (res?.error || !Array.isArray(incoming)) return;
 
     for (const row of incoming) {
+      if (row?.profiles && row.profiles.id) saveSharedProfileToCache(row.profiles);
       const rowId = String(row.id || (String(row.created_at || '') + '|' + String(row.user_id || '') + '|' + String(row.reason || '')));
       if (playState.rawRowIds.has(rowId)) continue;
       playState.rawRowIds.add(rowId);
@@ -5210,6 +5499,28 @@ async function loadPlayData(force = false) {
     }
     playState.rawRows.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
     const data = playState.rawRows;
+
+    // Persist slimmed rows in localStorage (strip nested profile bloat & huge inline blobs)
+    try {
+      const compactRows = data
+        .filter(r => r && r.reason && String(r.reason).length <= 16000)
+        .slice(-3000)
+        .map(r => ({
+          id: r.id,
+          user_id: r.user_id,
+          reason: r.reason,
+          created_at: r.created_at,
+          profiles: r.profiles ? { id: r.profiles.id || r.user_id, username: r.profiles.username || 'Trader', is_premium: Boolean(r.profiles.is_premium) } : undefined
+        }));
+      localStorage.setItem(PLAY_CACHE_LS_KEY, JSON.stringify({
+        srvResetTs: Number(srvResetTs || 0),
+        rows: compactRows
+      }));
+    } catch (e) {}
+
+    // Hydrate cached avatars once for participating users
+    const playUids = data.map(r => r.user_id).filter(Boolean);
+    await ensureProfilesCached(playUids);
 
     const videosMap = new Map();
     const deletedIds = new Set();
@@ -5240,7 +5551,7 @@ async function loadPlayData(force = false) {
         try {
           const p = JSON.parse(reason.slice('__PLAY_VID__:'.length));
           if (!p?.id) return;
-          const voiceUrl = typeof p.voiceoverUrl === 'string' && p.voiceoverUrl.startsWith('data:audio/') ? p.voiceoverUrl : '';
+          const voiceUrl = typeof p.voiceoverUrl === 'string' && (p.voiceoverUrl.startsWith('https://') || p.voiceoverUrl.startsWith('data:audio/')) ? p.voiceoverUrl : '';
           const vid = {
             id: String(p.id),
             user_id: uid,
@@ -5263,7 +5574,7 @@ async function loadPlayData(force = false) {
             musicAudioId: p.musicAudioId ? String(p.musicAudioId).slice(0, 100) : '',
             musicBakedInVideo: Boolean(p.musicBakedInVideo),
             ts: Number(p.ts) || rowTs,
-            profile: r.profiles || { id: uid, username: 'Trader' }
+            profile: getCachedProfile(uid, r.profiles)
           };
           if (vid.kind === 'video' && !vid.videoUrl) return;
           videosMap.set(vid.id, vid);
@@ -5360,7 +5671,7 @@ async function loadPlayData(force = false) {
           donations.push({
             id: String(p.id),
             fromUserId: uid,
-            fromProfile: r.profiles || { id: uid, username: 'Trader' },
+            fromProfile: getCachedProfile(uid, r.profiles),
             toUserId: String(p.toUserId),
             toUsername: String(p.toUsername || 'Creator'),
             videoId: p.videoId ? String(p.videoId) : '',
@@ -5396,7 +5707,7 @@ async function loadPlayData(force = false) {
             gif_url: cleanGif,
             gif_title: String(p.gif_title || 'GIF').slice(0, 80),
             ts: Number(p.ts) || rowTs,
-            profile: r.profiles || { id: uid, username: 'Trader' }
+            profile: getCachedProfile(uid, r.profiles)
           });
         } catch (e) {}
       } else if (reason.startsWith('__PLAY_CMT_VOTE__:')) {
@@ -6080,7 +6391,7 @@ function createPlaySlideHtml(item, idx) {
 
   const v = item.video;
   const sum = getPlayVoteSummary(v.id);
-  const prof = v.profile || { id: v.user_id, username: 'Trader' };
+  const prof = getCachedProfile(v.user_id, v.profile);
   const uname = prof.username || 'Trader';
   const equippedTid = typeof getUserEquippedTitleId === 'function' ? getUserEquippedTitleId(v.user_id) : null;
   const titleHtml = equippedTid && typeof renderTitleBadgeHtml === 'function' ? renderTitleBadgeHtml(equippedTid, true) : '';
@@ -6786,7 +7097,7 @@ function renderPlayCommentsDrawerList() {
   };
 
   listEl.innerHTML = topComments.map(c => {
-    const prof = c.profile || { id: c.user_id, username: 'Trader' };
+    const prof = getCachedProfile(c.user_id, c.profile);
     const uname = prof.username || 'Trader';
     const isPinned = c.id === pinnedId;
     const isCommenterCreator = Boolean(vid && String(c.user_id) === String(vid.user_id));
@@ -6796,7 +7107,7 @@ function renderPlayCommentsDrawerList() {
     const isReplyingHere = playState.activeCommentReplyTarget && playState.activeCommentReplyTarget.parentId === c.id;
 
     const repliesHtml = replies.map(rp => {
-      const rProf = rp.profile || { id: rp.user_id, username: 'Trader' };
+      const rProf = getCachedProfile(rp.user_id, rp.profile);
       const rUname = rProf.username || 'Trader';
       const rIsCreator = Boolean(vid && String(rp.user_id) === String(vid.user_id));
       const rCanDel = currentUser && (String(rp.user_id) === String(currentUser.id) || isViewerVidCreator);
@@ -8301,7 +8612,12 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
   const track = !customAudioUrl && musicName ? (musicCache || []).find(t => t.name === musicName) : null;
   const linkedId = $('#playEditorCoinSelect')?.value || '';
   const linkedCoin = linkedId ? (coins || []).find(c => String(c.id) === String(linkedId)) : null;
-  const voUrl = playVoiceoverState.creatorUrl || '';
+  const rawVoUrl = playVoiceoverState.creatorUrl || '';
+  let voUrl = rawVoUrl;
+  if (rawVoUrl && rawVoUrl.startsWith('data:audio/') && typeof maybeUploadVoiceoverToGitHub === 'function') {
+    if (msgEl) msgEl.textContent = 'Uploading voiceover to GitHub...';
+    voUrl = await maybeUploadVoiceoverToGitHub(rawVoUrl, newVidId);
+  }
   const payload = {
     id: newVidId,
     kind: 'scene',
@@ -8794,6 +9110,21 @@ async function uploadPlayAudioToGitHub(audioFile, songId) {
   return await uploadPlayVideoToGitHub(encoded.dataUrl, 'aud_' + String(songId));
 }
 
+async function maybeUploadVoiceoverToGitHub(voDataUrl, videoId) {
+  if (!voDataUrl) return '';
+  if (voDataUrl.startsWith('https://')) return voDataUrl;
+  try {
+    const resp = await fetch(voDataUrl);
+    const blob = await resp.blob();
+    const ext = String(blob.type || '').includes('mp4') ? 'm4a' : (String(blob.type || '').includes('ogg') ? 'ogg' : 'webm');
+    const file = new File([blob], `vo_${videoId}.${ext}`, { type: blob.type || 'audio/webm' });
+    return await uploadPlayAudioToGitHub(file, 'vo_' + String(videoId));
+  } catch (e) {
+    console.warn('Voiceover GitHub upload fallback:', e);
+    return voDataUrl;
+  }
+}
+
 async function deletePlayVideoFileFromGitHub(video) {
   if (!sb || !currentUser?.id || !video?.id || !video?.user_id) return;
   const { data, error } = await sb.functions.invoke('play-video-storage', {
@@ -9036,7 +9367,8 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
   const track = !hasBakedSong && musicName ? (musicCache || []).find(t => t.name === musicName) : null;
   const linkedId = $('#playUploadCoinSelect')?.value || '';
   const linkedCoin = linkedId ? (coins || []).find(c => String(c.id) === String(linkedId)) : null;
-  const voUrl = playVoiceoverState.uploadUrl || '';
+  const rawVoUrl = playVoiceoverState.uploadUrl || '';
+  let voUrl = rawVoUrl;
   const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
   let githubVideoUrl = '';
   let sharedAudioUrl = '';
@@ -9052,6 +9384,9 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
         sharedAudioUrl = '';
         sharedAudioId = '';
       }
+    }
+    if (rawVoUrl && rawVoUrl.startsWith('data:audio/') && typeof maybeUploadVoiceoverToGitHub === 'function') {
+      voUrl = await maybeUploadVoiceoverToGitHub(rawVoUrl, newVidId);
     }
   } catch (uploadError) {
     if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
@@ -9332,6 +9667,7 @@ $('#saveUsernameBtn')?.addEventListener('click', async () => {
   const { error } = await sb.from('profiles').update({ username: name }).eq('id', currentUser.id);
   if (error) { msg.textContent = error.code === '23505' ? 'That username is taken.' : error.message; return; }
   currentUser.username = name;
+  saveSharedProfileToCache(currentUser);
   msg.textContent = '';
   updateUIProfile();
   toast('Username saved!');
@@ -9345,6 +9681,7 @@ $('#profileImage')?.addEventListener('change', async (e) => {
     const { error } = await sb.from('profiles').update({ avatar_url: dataUrl }).eq('id', currentUser.id);
     if (!error) {
       currentUser.avatar_url = dataUrl;
+      saveSharedProfileToCache(currentUser);
       updateUIProfile();
       toast('Profile picture updated!');
     } else {
@@ -9725,17 +10062,17 @@ async function loadLiveFeed() {
 
   let tradesQ = sb
     .from('trades')
-    .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, image_url, creator_id), profiles(id, username, avatar_url, is_premium)')
+    .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, creator_id), profiles(id, username, is_premium)')
     .order('created_at', { ascending: false })
     .limit(60);
   let coinsQ = sb
     .from('coins')
-    .select('id, name, ticker, price, image_url, creator_id, created_at, profiles!coins_creator_id_fkey(id, username, avatar_url, is_premium)')
+    .select('id, name, ticker, price, creator_id, created_at, profiles!coins_creator_id_fkey(id, username, is_premium)')
     .order('created_at', { ascending: false })
     .limit(40);
   let myTradesQ = currentUser
     ? sb.from('trades')
-        .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, image_url, creator_id), profiles(id, username, avatar_url, is_premium)')
+        .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, creator_id), profiles(id, username, is_premium)')
         .eq('user_id', currentUser.id)
         .order('created_at', { ascending: false })
         .limit(60)
@@ -9743,7 +10080,7 @@ async function loadLiveFeed() {
   const myCoinIds = coins.filter(c => currentUser && c.creator_id === currentUser.id).map(c => c.id);
   let myCoinTradesQ = (currentUser && myCoinIds.length)
     ? sb.from('trades')
-        .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, image_url, creator_id), profiles(id, username, avatar_url, is_premium)')
+        .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, creator_id), profiles(id, username, is_premium)')
         .in('coin_id', myCoinIds)
         .order('created_at', { ascending: false })
         .limit(60)
@@ -9757,12 +10094,26 @@ async function loadLiveFeed() {
     if (currentUser && myCoinIds.length) myCoinTradesQ = myCoinTradesQ.gt('created_at', srvIso);
   }
 
-  let [tRes, cRes, pRes, mtRes, mctRes] = await Promise.all([
+  let lpQ = sb.from('premium_requests')
+    .select('id, user_id, reason, created_at, profiles(id, username, is_premium)')
+    .like('reason', '__LIVE_POST__:%')
+    .order('created_at', { ascending: false })
+    .limit(40);
+  if (srvResetTs > 0) {
+    lpQ = lpQ.gt('created_at', new Date(srvResetTs).toISOString());
+  }
+
+  const safeQuery = async q => {
+    try { return (await q) || { data: [] }; } catch (e) { return { data: [] }; }
+  };
+
+  let [tRes, cRes, mtRes, mctRes, lpRes] = await Promise.all([
     tradesQ,
     coinsQ,
-    sb.from('profiles').select('id, username, avatar_url, is_premium').limit(500),
     myTradesQ,
-    myCoinTradesQ
+    myCoinTradesQ,
+    safeQuery(lpQ),
+    typeof loadPlayData === 'function' ? loadPlayData(false) : Promise.resolve()
   ]);
 
   if (tRes.error) {
@@ -9771,19 +10122,55 @@ async function loadLiveFeed() {
     tRes = await fallbackT;
   }
   if (cRes.error) {
-    let fallbackC = sb.from('coins').select('id, name, ticker, price, image_url, creator_id, created_at').order('created_at', { ascending: false }).limit(40);
+    let fallbackC = sb.from('coins').select('id, name, ticker, price, creator_id, created_at').order('created_at', { ascending: false }).limit(40);
     if (srvResetTs > 0) fallbackC = fallbackC.gt('created_at', new Date(srvResetTs).toISOString());
     cRes = await fallbackC;
   }
+  if (lpRes.error) {
+    let fbLp = sb.from('premium_requests')
+      .select('id, user_id, reason, created_at')
+      .like('reason', '__LIVE_POST__:%')
+      .order('created_at', { ascending: false })
+      .limit(40);
+    if (srvResetTs > 0) fbLp = fbLp.gt('created_at', new Date(srvResetTs).toISOString());
+    lpRes = await safeQuery(fbLp);
+  }
 
-  const profMap = new Map();
-  (pRes?.data || []).forEach(p => {
-    if (p?.id) profMap.set(String(p.id), p);
+  // Hydrate missing profile avatars and missing coin logos via shared caches
+  const liveUserIds = [];
+  [tRes?.data, mtRes?.data, mctRes?.data, lpRes?.data].forEach(arr => {
+    (arr || []).forEach(r => { if (r?.user_id) liveUserIds.push(r.user_id); });
   });
+  (cRes?.data || []).forEach(c => { if (c?.creator_id) liveUserIds.push(c.creator_id); });
+  (playState.donations || []).forEach(d => {
+    if (d.fromUserId) liveUserIds.push(d.fromUserId);
+    if (d.toUserId) liveUserIds.push(d.toUserId);
+  });
+
+  const missingCoinImgIds = (cRes?.data || [])
+    .map(c => c?.id)
+    .filter(cid => cid && !sharedCoinImagesCache.has(String(cid)));
+
+  await Promise.all([
+    ensureProfilesCached(liveUserIds),
+    missingCoinImgIds.length
+      ? sb.from('coins').select('id, image_url').in('id', missingCoinImgIds).then(({ data }) => {
+          (data || []).forEach(r => saveSharedCoinImageToCache(r.id, r.image_url));
+        }).catch(() => {})
+      : Promise.resolve()
+  ]);
+
   const coinMap = new Map();
   coins.forEach(c => coinMap.set(String(c.id), c));
   (cRes?.data || []).forEach(c => {
-    if (c?.id && !coinMap.has(String(c.id))) coinMap.set(String(c.id), c);
+    if (!c?.id) return;
+    const cid = String(c.id);
+    if (!coinMap.has(cid)) {
+      coinMap.set(cid, {
+        ...c,
+        image_url: sharedCoinImagesCache.get(cid) ?? c.image_url ?? null
+      });
+    }
   });
 
   const seenKeys = new Set();
@@ -9794,9 +10181,13 @@ async function loadLiveFeed() {
     const cid = String(t.coin_id || '');
     const uid = String(t.user_id || '');
     if (!cid || delCoins.has(cid) || (uid && delUsers.has(uid))) return;
-    const cObj = t.coins || coinMap.get(cid);
-    if (!cObj) return;
-    const pObj = t.profiles || profMap.get(uid) || { id: uid, username: 'Trader' };
+    const rawCoin = coinMap.get(cid) || t.coins;
+    if (!rawCoin) return;
+    const cObj = {
+      ...rawCoin,
+      image_url: rawCoin.image_url !== undefined ? rawCoin.image_url : (sharedCoinImagesCache.get(cid) ?? null)
+    };
+    const pObj = getCachedProfile(uid, t.profiles);
     const ts = t.created_at ? new Date(t.created_at).getTime() : Date.now();
     if (srvResetTs && ts <= srvResetTs) return;
     seenKeys.add(tidKey);
@@ -9828,7 +10219,8 @@ async function loadLiveFeed() {
     const cKey = 'coin_' + cid;
     if (seenKeys.has(cKey)) return;
     seenKeys.add(cKey);
-    const pObj = c.profiles || profMap.get(uid) || { id: uid, username: 'Trader' };
+    const hydratedCoin = coinMap.get(cid) || { ...c, image_url: sharedCoinImagesCache.get(cid) ?? null };
+    const pObj = getCachedProfile(uid, c.profiles);
     const ts = c.created_at ? new Date(c.created_at).getTime() : Date.now();
     if (srvResetTs && ts <= srvResetTs) return;
     const isSelf = currentUser && uid === String(currentUser.id);
@@ -9837,60 +10229,13 @@ async function loadLiveFeed() {
       ts,
       userId: uid,
       profile: pObj,
-      coin: c,
+      coin: hydratedCoin,
       price: Number(c.price || 1),
       isPersonal: Boolean(isSelf),
       isSelf: Boolean(isSelf),
       isMyCoin: Boolean(isSelf)
     });
   });
-
-  let lpRes = { data: [] };
-  let playLiveRes = { data: [] };
-  try {
-    let lpQ = sb.from('premium_requests')
-      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
-      .like('reason', '__LIVE_POST__:%')
-      .order('created_at', { ascending: false })
-      .limit(40);
-    if (srvResetTs > 0) {
-      lpQ = lpQ.gt('created_at', new Date(srvResetTs).toISOString());
-    }
-
-    const playLiveQ = sb.from('premium_requests')
-      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
-      .like('reason', '__PLAY_%')
-      .order('created_at', { ascending: true })
-      .limit(1200);
-
-    const safeQuery = async q => {
-      try {
-        return (await q) || { data: [] };
-      } catch (e) {
-        return { data: [] };
-      }
-    };
-
-    [lpRes, playLiveRes] = await Promise.all([safeQuery(lpQ), safeQuery(playLiveQ)]);
-
-    if (lpRes.error) {
-      let fbLp = sb.from('premium_requests')
-        .select('id, user_id, reason, created_at')
-        .like('reason', '__LIVE_POST__:%')
-        .order('created_at', { ascending: false })
-        .limit(40);
-      if (srvResetTs > 0) fbLp = fbLp.gt('created_at', new Date(srvResetTs).toISOString());
-      lpRes = await safeQuery(fbLp);
-    }
-    if (playLiveRes.error) {
-      const fbPlayLive = sb.from('premium_requests')
-        .select('id, user_id, reason, created_at')
-        .like('reason', '__PLAY_%')
-        .order('created_at', { ascending: true })
-        .limit(1200);
-      playLiveRes = await safeQuery(fbPlayLive);
-    }
-  } catch (e) {}
 
   const postRows = lpRes?.data || [];
   postRows.forEach(r => {
@@ -9909,10 +10254,10 @@ async function loadLiveFeed() {
         id: cid,
         name: parsed.coin_name || 'Coin',
         ticker: parsed.coin_ticker || 'COIN',
-        image_url: parsed.coin_image || null,
+        image_url: parsed.coin_image || sharedCoinImagesCache.get(cid) || null,
         price: 1
       };
-      const pObj = r.profiles || profMap.get(uid) || { id: uid, username: 'Trader' };
+      const pObj = getCachedProfile(uid, r.profiles);
       const isSelf = currentUser && uid === String(currentUser.id);
       const isMyCoin = currentUser && String(cObj.creator_id || '') === String(currentUser.id);
       events.push({
@@ -9931,85 +10276,48 @@ async function loadLiveFeed() {
     } catch (e) {}
   });
 
-  // Also include all active User Play Videos & Play Donations in LIVE
-  const livePlayVideos = new Map();
-  const liveDeletedVids = new Set();
-  const liveDonates = [];
-  (playLiveRes?.data || []).forEach(r => {
-    const reason = String(r.reason || '');
-    const uid = String(r.user_id || '');
-    const rowTs = r.created_at ? new Date(r.created_at).getTime() : Date.now();
-    if (!uid) return;
-    if (reason.startsWith('__PLAY_VID__:')) {
-      try {
-        const p = JSON.parse(reason.slice('__PLAY_VID__:'.length));
-        if (!p?.id) return;
-        livePlayVideos.set(String(p.id), {
-          id: String(p.id),
-          user_id: uid,
-          kind: p.kind === 'video' ? 'video' : 'scene',
-          title: String(p.title || '').slice(0, 80) || (p.kind === 'video' ? 'Uploaded Video' : 'Play Short'),
-          ts: Number(p.ts) || rowTs,
-          profile: r.profiles || profMap.get(uid) || { id: uid, username: 'Trader' }
-        });
-      } catch (e) {}
-    } else if (reason.startsWith('__PLAY_DEL__:')) {
-      try {
-        const p = JSON.parse(reason.slice('__PLAY_DEL__:'.length));
-        if (p?.videoId) liveDeletedVids.add(String(p.videoId));
-      } catch (e) {}
-    } else if (reason.startsWith('__PLAY_DONATE__:')) {
-      try {
-        const p = JSON.parse(reason.slice('__PLAY_DONATE__:'.length));
-        const amt = Number(p?.amount || 0);
-        if (!p?.id || !p?.toUserId || !Number.isFinite(amt) || amt <= 0) return;
-        const ts = Number(p.ts) || rowTs;
-        if (srvResetTs > 0 && ts <= srvResetTs) return;
-        liveDonates.push({
-          id: String(p.id),
-          fromUserId: uid,
-          fromProfile: r.profiles || profMap.get(uid) || { id: uid, username: 'Trader' },
-          toUserId: String(p.toUserId),
-          toProfile: profMap.get(String(p.toUserId)) || { id: String(p.toUserId), username: p.toUsername || 'Creator' },
-          videoId: p.videoId ? String(p.videoId) : '',
-          videoTitle: String(p.videoTitle || 'Play Video').slice(0, 80),
-          amount: Math.round(amt * 100) / 100,
-          note: String(p.note || '').slice(0, 120),
-          ts
-        });
-      } catch (e) {}
-    }
-  });
-
-  livePlayVideos.forEach((v, vidId) => {
-    if (liveDeletedVids.has(vidId) || delUsers.has(v.user_id)) return;
-    const vKey = 'playvid_' + vidId;
+  // Reuse already-synced & incrementally cached Play Videos & Donations (no duplicate 1,200-row scan!)
+  (playState.videos || []).forEach(v => {
+    if (!v?.id || delUsers.has(String(v.user_id))) return;
+    if (srvResetTs > 0 && Number(v.ts || 0) <= srvResetTs) return;
+    const vKey = 'playvid_' + String(v.id);
     if (seenKeys.has(vKey)) return;
     seenKeys.add(vKey);
-    const isSelf = currentUser && v.user_id === String(currentUser.id);
+    const isSelf = currentUser && String(v.user_id) === String(currentUser.id);
     events.push({
       kind: 'play_video',
-      ts: v.ts,
-      userId: v.user_id,
-      profile: v.profile,
-      video: v,
+      ts: Number(v.ts || 0),
+      userId: String(v.user_id),
+      profile: getCachedProfile(v.user_id, v.profile),
+      video: {
+        id: String(v.id),
+        user_id: String(v.user_id),
+        kind: v.kind === 'video' ? 'video' : 'scene',
+        title: v.title || (v.kind === 'video' ? 'Uploaded Video' : 'Play Short'),
+        ts: Number(v.ts || 0)
+      },
       isPersonal: Boolean(isSelf),
       isSelf: Boolean(isSelf)
     });
   });
 
-  liveDonates.forEach(d => {
-    if (delUsers.has(d.fromUserId) || delUsers.has(d.toUserId)) return;
-    const dKey = 'playdon_' + d.id;
+  (playState.donations || []).forEach(d => {
+    if (!d?.id || delUsers.has(String(d.fromUserId)) || delUsers.has(String(d.toUserId))) return;
+    if (srvResetTs > 0 && Number(d.ts || 0) <= srvResetTs) return;
+    const dKey = 'playdon_' + String(d.id);
     if (seenKeys.has(dKey)) return;
     seenKeys.add(dKey);
-    const isSelf = currentUser && (d.fromUserId === String(currentUser.id) || d.toUserId === String(currentUser.id));
+    const isSelf = currentUser && (String(d.fromUserId) === String(currentUser.id) || String(d.toUserId) === String(currentUser.id));
     events.push({
       kind: 'play_donate',
-      ts: d.ts,
-      userId: d.fromUserId,
-      profile: d.fromProfile,
-      donate: d,
+      ts: Number(d.ts || 0),
+      userId: String(d.fromUserId),
+      profile: getCachedProfile(d.fromUserId, d.fromProfile),
+      donate: {
+        ...d,
+        fromProfile: getCachedProfile(d.fromUserId, d.fromProfile),
+        toProfile: getCachedProfile(d.toUserId, { id: d.toUserId, username: d.toUsername || 'Creator' })
+      },
       isPersonal: Boolean(isSelf),
       isSelf: Boolean(isSelf)
     });
@@ -10366,20 +10674,27 @@ async function _fetchUserNotificationsFresh() {
   const delCoins = adminModStateCache.deletedCoinIds || new Set();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
 
+  // Never query __PLAY_VID__ or data:video/ blobs in notifications; read video titles from cached playState!
   const [updatesList, coinsRes, cmtRes, playRes] = await Promise.all([
     fetchActiveUpdates(),
     sb.from('coins').select('id, name, ticker, creator_id, created_at').limit(500),
     sb.from('premium_requests')
-      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .select('user_id, reason, created_at, profiles(id, username, is_premium)')
       .like('reason', '__CMT_%')
       .order('created_at', { ascending: true })
       .limit(1000),
     sb.from('premium_requests')
-      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
-      .like('reason', '__PLAY_%')
+      .select('user_id, reason, created_at, profiles(id, username, is_premium)')
+      .or('reason.like.__PLAY_VOTE__:%,reason.like.__PLAY_CMT__:%,reason.like.__PLAY_CMT_DEL__:%,reason.like.__PLAY_FOLLOW__:%,reason.like.__PLAY_DONATE__:%,reason.like.__PLAY_DEL__:%')
       .order('created_at', { ascending: true })
-      .limit(2000)
+      .limit(2000),
+    typeof loadPlayData === 'function' ? loadPlayData(false) : Promise.resolve()
   ]);
+
+  const notifUids = [];
+  (cmtRes?.data || []).forEach(r => { if (r?.user_id) notifUids.push(r.user_id); });
+  (playRes?.data || []).forEach(r => { if (r?.user_id) notifUids.push(r.user_id); });
+  await ensureProfilesCached(notifUids);
 
   const items = [];
 
@@ -10441,7 +10756,7 @@ async function _fetchUserNotificationsFresh() {
           replyToUserId: p.reply_to_user_id ? String(p.reply_to_user_id) : null,
           text: cleanText || (hasGif ? 'Sent a GIF' : ''),
           ts,
-          profile: r.profiles || { id: r.user_id, username: 'Trader' }
+          profile: getCachedProfile(r.user_id, r.profiles)
         });
       } catch (e) {}
     } else if (reason.startsWith('__CMT_DEL__:')) {
@@ -10494,7 +10809,15 @@ async function _fetchUserNotificationsFresh() {
 
   // 5. Play Video Likes, Followers, Video Comments, and Creator Donations
   const playVideosMap = new Map();
-  const deletedPlayVidIds = new Set();
+  (playState.videos || []).forEach(v => {
+    playVideosMap.set(String(v.id), {
+      id: String(v.id),
+      userId: String(v.user_id),
+      title: String(v.title || '').slice(0, 80) || (v.kind === 'video' ? 'Uploaded Video' : 'Play Short'),
+      ts: Number(v.ts || 0)
+    });
+  });
+  const deletedPlayVidIds = new Set(playState.deletedIds || []);
   const playVotes = [];
   const playCmts = [];
   const deletedPlayCmtIds = new Set();
@@ -10507,18 +10830,7 @@ async function _fetchUserNotificationsFresh() {
     const rowUid = String(r.user_id || '');
     if (!rowUid) return;
 
-    if (reason.startsWith('__PLAY_VID__:')) {
-      try {
-        const p = JSON.parse(reason.slice('__PLAY_VID__:'.length));
-        if (!p?.id) return;
-        playVideosMap.set(String(p.id), {
-          id: String(p.id),
-          userId: rowUid,
-          title: String(p.title || '').slice(0, 80) || (p.kind === 'video' ? 'Uploaded Video' : 'Play Short'),
-          ts: Number(p.ts) || rowTs
-        });
-      } catch (e) {}
-    } else if (reason.startsWith('__PLAY_DEL__:')) {
+    if (reason.startsWith('__PLAY_DEL__:')) {
       try {
         const p = JSON.parse(reason.slice('__PLAY_DEL__:'.length));
         if (p?.videoId) deletedPlayVidIds.add(String(p.videoId));
@@ -10532,7 +10844,7 @@ async function _fetchUserNotificationsFresh() {
           userId: rowUid,
           vote: p.vote === 'like' || p.vote === 'dislike' ? p.vote : 'none',
           ts: Number(p.ts) || rowTs,
-          profile: r.profiles || { id: rowUid, username: 'Trader' }
+          profile: getCachedProfile(rowUid, r.profiles)
         });
       } catch (e) {}
     } else if (reason.startsWith('__PLAY_FOLLOW__:')) {
@@ -10545,7 +10857,7 @@ async function _fetchUserNotificationsFresh() {
           followerId: rowUid,
           following: Boolean(p.following),
           ts,
-          profile: r.profiles || { id: rowUid, username: 'Trader' }
+          profile: getCachedProfile(rowUid, r.profiles)
         });
       } catch (e) {}
     } else if (reason.startsWith('__PLAY_CMT__:')) {
@@ -10563,7 +10875,7 @@ async function _fetchUserNotificationsFresh() {
           text: cleanText,
           gifUrl: cleanGif,
           ts: Number(p.ts) || rowTs,
-          profile: r.profiles || { id: rowUid, username: 'Trader' }
+          profile: getCachedProfile(rowUid, r.profiles)
         });
       } catch (e) {}
     } else if (reason.startsWith('__PLAY_CMT_DEL__:')) {
@@ -10587,7 +10899,7 @@ async function _fetchUserNotificationsFresh() {
           amount: Math.round(amt * 100) / 100,
           note: String(p.note || '').slice(0, 120),
           ts,
-          profile: r.profiles || { id: rowUid, username: 'Trader' }
+          profile: getCachedProfile(rowUid, r.profiles)
         });
       } catch (e) {}
     }
@@ -10696,7 +11008,7 @@ async function _fetchUserNotificationsFresh() {
 
 let userNotificationsFetchedAt = 0;
 let userNotificationsPromise = null;
-const NOTIFICATION_SCAN_TTL_MS = 60000;
+const NOTIFICATION_SCAN_TTL_MS = 180000;
 
 async function fetchUserNotifications(force = false) {
   if (!sb || !currentUser) return [];
@@ -11815,10 +12127,18 @@ async function handleRealtimePremiumInsertPopup(row) {
   }
 
   let actorName = 'Someone';
-  try {
-    const { data: prof } = await sb.from('profiles').select('username').eq('id', fromId).maybeSingle();
-    if (prof?.username) actorName = prof.username;
-  } catch (e) {}
+  const cachedActor = sharedProfilesCache.get(fromId);
+  if (cachedActor?.username) {
+    actorName = cachedActor.username;
+  } else {
+    try {
+      const { data: prof } = await sb.from('profiles').select('id, username, avatar_url, is_premium').eq('id', fromId).maybeSingle();
+      if (prof?.id) {
+        saveSharedProfileToCache(prof);
+        if (prof.username) actorName = prof.username;
+      }
+    } catch (e) {}
+  }
 
   if (reason.startsWith('__PLAY_DONATE__:')) {
     try {
@@ -11891,62 +12211,171 @@ async function handleRealtimePremiumInsertPopup(row) {
 
 // ---------- Realtime ----------
 let playRealtimeRefreshTimer = null;
+let coinsRealtimeRefreshTimer = null;
+let liveRealtimeRefreshTimer = null;
+let titleRealtimeRefreshTimer = null;
+let notifRealtimeRefreshTimer = null;
+let dmRealtimeRefreshTimer = null;
+let coinCommentsRealtimeTimer = null;
+
 function startRealtime() {
   if (!sb) return;
   realtimeChannel = sb.channel('grind-live', { config: { broadcast: { self: false } } })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'coins' }, () => {
-      loadCoins();
-      if (currentPage === 'live') loadLiveFeed();
+      coinsTradeStatsDirty = true;
+      clearTimeout(coinsRealtimeRefreshTimer);
+      coinsRealtimeRefreshTimer = setTimeout(() => {
+        loadCoins();
+        if (currentPage === 'live') loadLiveFeed();
+      }, 2800);
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
-      loadCoins();
-      if (selectedCoin && currentPage === 'coin') renderCoinDetail();
-      if (currentPage === 'live') loadLiveFeed();
-      if (currentPage === 'global' && lbMode === 'weekly' && Date.now() > lbAnimatingUntil) renderLeaderboard();
+      coinsTradeStatsDirty = true;
+      clearTimeout(coinsRealtimeRefreshTimer);
+      coinsRealtimeRefreshTimer = setTimeout(() => {
+        loadCoins();
+        if (selectedCoin && currentPage === 'coin') renderCoinDetail();
+        if (currentPage === 'live') loadLiveFeed();
+        if (currentPage === 'global' && lbMode === 'weekly' && Date.now() > lbAnimatingUntil) renderLeaderboard();
+      }, 3000);
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, payload => {
       const changedReason = String(payload?.new?.reason || payload?.old?.reason || '');
+      const changedUid = String(payload?.new?.user_id || payload?.old?.user_id || '');
+      const myUid = currentUser?.id ? String(currentUser.id) : '';
+
+      // 1. Admin / server-reset / account moderation commands
       if (/^__(ADMIN_CMD|SERVER_RESET|RESET_DONE|COIN_DEL|ACCOUNT_DELETED|COIN_SELF_SELL)__/.test(changedReason)) {
         invalidateAdminModerationStateCache();
         userNotificationsFetchedAt = 0;
         adminNotificationsFetchedAt = 0;
+        if (currentUser) loadProfile();
       }
-      if (payload?.eventType === 'INSERT' && payload?.new) {
-        handleRealtimePremiumInsertPopup(payload.new);
+
+      // 2. Updates & Warnings & Direct Premium/PRO tier status changes
+      if (changedReason.startsWith('__UPDATE__:') || changedReason.startsWith('__PRO_TIER__')) {
+        if (changedReason.startsWith('__PRO_TIER__')) proUserIdsFetchedAt = 0;
+        if (currentUser && (changedReason.startsWith('__UPDATE__:') || changedUid === myUid)) loadProfile();
+      } else if (!changedReason.startsWith('__') && myUid && changedUid === myUid) {
+        if (currentUser) loadProfile();
       }
-      if (currentUser) loadProfile();
-      if (selectedCoin && currentPage === 'coin') loadCoinComments(selectedCoin);
-      if (currentPage === 'feed') fetchFeaturedCoins().then(() => renderFeaturedSection());
-      if (currentPage === 'live') loadLiveFeed();
-      if (currentPage === 'pass') loadPassState().then(() => renderPassPage());
-      if (typeof loadTitleSystemState === 'function') {
-        loadTitleSystemState(true).then(() => {
-          if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
-          if (currentPage === 'marketplace' && typeof renderMarketplacePage === 'function') renderMarketplacePage();
-          if (currentPage === 'global' && Date.now() > lbAnimatingUntil) renderLeaderboard();
-        });
+
+      // 3. Featured coins
+      if (changedReason.startsWith('__FEATURED_COINS__:')) {
+        featuredCoinsFetchedAt = 0;
+        if (currentPage === 'feed') fetchFeaturedCoins(true).then(() => renderFeaturedSection());
       }
-      // Only PLAY activity can change PLAY state. Other premium_requests rows are unrelated.
-      if (changedReason.startsWith('__PLAY_') && typeof loadPlayData === 'function') {
-        clearTimeout(playRealtimeRefreshTimer);
-        playRealtimeRefreshTimer = setTimeout(() => {
-          loadPlayData(true).then(() => {
-            if (typeof syncAllPlayEarnings === 'function') syncAllPlayEarnings();
-            else {
-              if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
-              if (typeof syncPlayDonations === 'function') syncPlayDonations();
-            }
-            if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
-            if (currentPage === 'account' && typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
-            if (currentPage === 'global' && lbMode === 'creators' && Date.now() > lbAnimatingUntil) renderLeaderboard();
-            if (playState.openCommentsVideoId && typeof renderPlayCommentsDrawerList === 'function') renderPlayCommentsDrawerList();
+
+      // 4. Coin comments
+      if (changedReason.startsWith('__CMT_')) {
+        if (selectedCoin && currentPage === 'coin') {
+          clearTimeout(coinCommentsRealtimeTimer);
+          coinCommentsRealtimeTimer = setTimeout(() => {
+            if (selectedCoin && currentPage === 'coin') loadCoinComments(selectedCoin);
+          }, 1200);
+        }
+      }
+
+      // 5. LIVE shoutouts
+      if (changedReason.startsWith('__LIVE_POST__:') && currentPage === 'live') {
+        clearTimeout(liveRealtimeRefreshTimer);
+        liveRealtimeRefreshTimer = setTimeout(() => {
+          if (currentPage === 'live') loadLiveFeed();
+        }, 1500);
+      }
+
+      // 6. Battle Pass (only reload when current user is viewing their own Pass & it changed)
+      if (changedReason.startsWith('__PASS_') && currentPage === 'pass' && myUid && changedUid === myUid) {
+        loadPassState().then(() => renderPassPage());
+      }
+
+      // 7. Titles & Crates (only when title/crate events actually occur)
+      if ((changedReason.startsWith('__TITLE_EQUIP__:') || changedReason.startsWith('__CRATE_ITEM__:')) && typeof loadTitleSystemState === 'function') {
+        clearTimeout(titleRealtimeRefreshTimer);
+        titleRealtimeRefreshTimer = setTimeout(() => {
+          loadTitleSystemState(true).then(() => {
+            if (currentPage === 'account' && typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+            if (currentPage === 'marketplace' && typeof renderMarketplacePage === 'function') renderMarketplacePage();
+            if (currentPage === 'global' && Date.now() > lbAnimatingUntil) renderLeaderboard();
           });
-        }, 900);
+        }, 2500);
       }
-      if (currentPage === 'notifications') loadRequests();
-      else if (currentUser) updateNotificationsBadge();
-      if (isDompinator() && currentPage === 'admin') loadAdminPage();
-      if (currentUser && typeof refreshDirectMessages === 'function') refreshDirectMessages(true);
+
+      // 8. PLAY events (strictly scoped & debounced)
+      if (changedReason.startsWith('__PLAY_') && typeof loadPlayData === 'function') {
+        if (payload?.eventType === 'INSERT' && payload?.new) {
+          handleRealtimePremiumInsertPopup(payload.new);
+        }
+        const isHighFreqPayoutOrView =
+          changedReason.startsWith('__PLAY_VIEW__:') ||
+          changedReason.startsWith('__PLAY_VIEW_PAID__:') ||
+          changedReason.startsWith('__PLAY_LIKE_PAID__:') ||
+          changedReason.startsWith('__PLAY_LIKER_PAID__:') ||
+          changedReason.startsWith('__PLAY_FOLLOW_PAID__:') ||
+          changedReason.startsWith('__PLAY_DONATE_PAID__:');
+        const relevantPageVisible =
+          currentPage === 'play' ||
+          currentPage === 'account' ||
+          currentPage === 'live' ||
+          (currentPage === 'global' && lbMode === 'creators') ||
+          Boolean(playState.openCommentsVideoId);
+        if (!isHighFreqPayoutOrView || relevantPageVisible) {
+          clearTimeout(playRealtimeRefreshTimer);
+          playRealtimeRefreshTimer = setTimeout(() => {
+            loadPlayData(true).then(() => {
+              if (typeof syncAllPlayEarnings === 'function') syncAllPlayEarnings();
+              else {
+                if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
+                if (typeof syncPlayDonations === 'function') syncPlayDonations();
+              }
+              if (currentPage === 'account') {
+                if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+                if (typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
+              }
+              if (currentPage === 'global' && lbMode === 'creators' && Date.now() > lbAnimatingUntil) renderLeaderboard();
+              if (playState.openCommentsVideoId && typeof renderPlayCommentsDrawerList === 'function') renderPlayCommentsDrawerList();
+              if (currentPage === 'live') loadLiveFeed();
+            });
+          }, 2500);
+        }
+      }
+
+      // 9. Notifications & Admin inbox (only for notification-worthy events, debounced)
+      const isNotifEvent =
+        changedReason.startsWith('__PLAY_VOTE__:') ||
+        changedReason.startsWith('__PLAY_CMT__:') ||
+        changedReason.startsWith('__PLAY_CMT_DEL__:') ||
+        changedReason.startsWith('__PLAY_FOLLOW__:') ||
+        changedReason.startsWith('__PLAY_DONATE__:') ||
+        changedReason.startsWith('__CMT_') ||
+        changedReason.startsWith('__ADMIN_CMD__:') ||
+        changedReason.startsWith('__UPDATE__:') ||
+        changedReason.startsWith('__REPORT__:') ||
+        changedReason.startsWith('__PREM_REQ__:') ||
+        !changedReason.startsWith('__');
+
+      if (isNotifEvent) {
+        userNotificationsFetchedAt = 0;
+        adminNotificationsFetchedAt = 0;
+        if (currentPage === 'notifications') {
+          clearTimeout(notifRealtimeRefreshTimer);
+          notifRealtimeRefreshTimer = setTimeout(() => loadRequests(), 2500);
+        } else if (currentUser) {
+          clearTimeout(notifRealtimeRefreshTimer);
+          notifRealtimeRefreshTimer = setTimeout(() => updateNotificationsBadge(), 5000);
+        }
+        if (isDompinator() && currentPage === 'admin') loadAdminPage();
+      }
+
+      // 10. Direct Messages: ONLY refresh on actual __DM_ events involving current user (or when DM modal is open)!
+      if (changedReason.startsWith('__DM_') && currentUser && typeof refreshDirectMessages === 'function') {
+        const dmOpen = !$('#dmModal')?.classList.contains('hidden');
+        const involvesMe = !myUid || changedUid === myUid || changedReason.includes(myUid);
+        if (dmOpen || involvesMe) {
+          clearTimeout(dmRealtimeRefreshTimer);
+          dmRealtimeRefreshTimer = setTimeout(() => refreshDirectMessages(true), 800);
+        }
+      }
     })
     .on('broadcast', { event: 'dm_typing' }, ({ payload }) => {
       if (typeof handleIncomingDmTyping === 'function') handleIncomingDmTyping(payload);
@@ -12062,7 +12491,7 @@ async function syncPassTimeToRemote(force = false) {
   const key = `grind_pass_sec_s${season}_${currentUser.id}`;
   try { localStorage.setItem(key, String(passState.seconds)); } catch (e) {}
   const now = Date.now();
-  if (!force && now - lastPassRemoteSyncAt < 55000) return;
+  if (!force && now - lastPassRemoteSyncAt < 115000) return;
   lastPassRemoteSyncAt = now;
   try {
     await sb.from('premium_requests').insert({
@@ -12076,7 +12505,6 @@ async function syncPassTimeToRemote(force = false) {
 async function incrementPassTime(addSecs, forceSync = false) {
   if (!currentUser || addSecs <= 0) return;
   passState.seconds = Math.max(0, Number(passState.seconds || 0) + Number(addSecs));
-  lastPassRemoteSyncAt = Date.now();
   const key = `grind_pass_sec_s${passState.season || 1}_${currentUser.id}`;
   try { localStorage.setItem(key, String(passState.seconds)); } catch (e) {}
   await syncPassTimeToRemote(forceSync);
@@ -14505,16 +14933,20 @@ async function openCoinWatchModal(coin) {
   const srvResetTs = adminModStateCache.serverResetTs || 0;
   const { data: fullTrades } = await sb
     .from('trades')
-    .select('*, profiles(username, avatar_url)')
+    .select('id, coin_id, user_id, type, amount_usd, shares, price_after, created_at, profiles(username, is_premium)')
     .eq('coin_id', coin.id)
     .order('created_at', { ascending: true })
     .limit(1000);
+  await ensureProfilesCached((fullTrades || []).map(t => t.user_id).filter(Boolean));
 
   const tradeMap = new Map();
   (fullTrades || []).forEach(t => {
     const tMs = new Date(t.created_at || 0).getTime();
     if (srvResetTs > 0 && tMs <= srvResetTs) return;
-    tradeMap.set(t.id || (t.created_at + t.shares), t);
+    tradeMap.set(t.id || (t.created_at + t.shares), {
+      ...t,
+      profiles: t.user_id ? getCachedProfile(t.user_id, t.profiles) : t.profiles
+    });
   });
   (coin.localTrades || []).forEach(t => {
     const tMs = new Date(t.created_at || 0).getTime();
@@ -14839,6 +15271,9 @@ $$('[data-watch-speed]').forEach(btn => {
 // ============================================================
 const dmState = {
   profilesMap: new Map(),   // userId -> profile
+  rawRows: [],              // cached __DM_% rows for incremental sync
+  rawRowIds: new Set(),
+  lastRowCreatedAt: '',
   messagesByPartner: new Map(), // partnerId -> [{ id, from, to, type, text, ts, ... }]
   partnerReadTsByPartner: new Map(), // partnerId -> latest message ts partner opened/read
   lastSentReadByPartner: new Map(), // partnerId -> latest incoming ts we already acked
@@ -15145,6 +15580,9 @@ function resetDmStateOnLogout() {
   dmState.typingClearTimers.forEach(tid => clearTimeout(tid));
   dmState.typingClearTimers.clear();
   dmState.typingUntilByPartner.clear();
+  dmState.rawRows = [];
+  dmState.rawRowIds.clear();
+  dmState.lastRowCreatedAt = '';
   dmState.messagesByPartner.clear();
   dmState.partnerReadTsByPartner.clear();
   dmState.lastSentReadByPartner.clear();
@@ -15182,18 +15620,34 @@ async function refreshDirectMessages(fromRealtime = false) {
   await fetchAdminModerationState();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
 
-  const [profRes, dmRes] = await Promise.all([
-    sb.from('profiles').select('id, username, avatar_url, is_premium').order('username', { ascending: true }).limit(500),
-    sb.from('premium_requests')
-      .select('id, user_id, reason, created_at')
-      .like('reason', '__DM_%')
-      .order('created_at', { ascending: true })
-      .limit(2000)
+  let dmQ = sb.from('premium_requests')
+    .select('id, user_id, reason, created_at')
+    .like('reason', '__DM_%')
+    .order('created_at', { ascending: true })
+    .limit(2000);
+  if (dmState.rawRows.length && dmState.lastRowCreatedAt) {
+    dmQ = dmQ.gte('created_at', dmState.lastRowCreatedAt);
+  }
+
+  const [dmRes] = await Promise.all([
+    dmQ,
+    ensureProfilesCached([], false)
   ]);
 
+  const incoming = dmRes?.data || [];
+  incoming.forEach(row => {
+    const rowId = String(row.id || (String(row.created_at || '') + '|' + String(row.user_id || '') + '|' + String(row.reason || '')));
+    if (dmState.rawRowIds.has(rowId)) return;
+    dmState.rawRowIds.add(rowId);
+    dmState.rawRows.push(row);
+    if (row.created_at && (!dmState.lastRowCreatedAt || row.created_at > dmState.lastRowCreatedAt)) {
+      dmState.lastRowCreatedAt = row.created_at;
+    }
+  });
+  dmState.rawRows.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+
   const profMap = new Map();
-  (profRes?.data || []).forEach(p => {
-    const pid = String(p.id);
+  sharedProfilesCache.forEach((p, pid) => {
     if (delUsers.has(pid)) return;
     if (adminModStateCache.bans?.get(pid)?.banned) return;
     profMap.set(pid, p);
@@ -15203,7 +15657,7 @@ async function refreshDirectMessages(fromRealtime = false) {
   const grouped = new Map();
   const partnerReadMap = new Map(dmState.partnerReadTsByPartner);
 
-  (dmRes?.data || []).forEach(r => {
+  dmState.rawRows.forEach(r => {
     const raw = String(r.reason || '');
     if (raw.startsWith('__DM_READ__:')) {
       try {
