@@ -82,6 +82,46 @@ Deno.serve(async (req) => {
       return json({ url, path, mime });
     }
 
+    if (action === "upload_audio") {
+      const dataUrl = String(body?.dataUrl || "");
+      const match = dataUrl.match(/^data:(audio\/(?:mpeg|mp3|mp4|x-m4a|aac|ogg|wav|x-wav|webm));base64,([A-Za-z0-9+/=]+)$/);
+      if (!match) return json({ error: "Unsupported audio format." }, 400);
+      const mime = match[1];
+      const encoded = match[2];
+      const approximateBytes = Math.floor(encoded.length * 3 / 4);
+      if (approximateBytes > 3 * 1024 * 1024) {
+        return json({ error: "Audio file exceeds the 3 MB limit." }, 413);
+      }
+      const extMap: Record<string, string> = {
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/mp4": "m4a",
+        "audio/x-m4a": "m4a",
+        "audio/aac": "aac",
+        "audio/ogg": "ogg",
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/webm": "webm",
+      };
+      const extension = extMap[mime] || "mp3";
+      const path = `PLAY_AUDIO/${user.id}/${videoId}.${extension}`;
+      const response = await fetch(`${apiBase}/${path.split("/").map(encodeURIComponent).join("/")}`, {
+        method: "PUT",
+        headers: { ...ghHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: `Add PLAY audio ${videoId}`,
+          branch,
+          content: encoded,
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        return json({ error: result?.message || "GitHub could not save the audio." }, response.status);
+      }
+      const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`;
+      return json({ url, path, mime });
+    }
+
     if (action === "delete") {
       const ownerId = String(body?.ownerId || user.id);
       // Only the authenticated owner may delete their own stored video.
@@ -91,9 +131,26 @@ Deno.serve(async (req) => {
         return json({ error: "Not allowed to delete this video." }, 403);
       }
 
+      const audioId = String(body?.audioId || "");
+      const candidatePaths = [
+        `PLAY/${ownerId}/${videoId}.webm`,
+        `PLAY/${ownerId}/${videoId}.mp4`,
+        `PLAY/${ownerId}/aud_${videoId}.webm`,
+        `PLAY/${ownerId}/aud_${videoId}.mp4`,
+        ...["mp3", "m4a", "aac", "ogg", "wav", "webm"].map(ext => `PLAY_AUDIO/${ownerId}/${videoId}.${ext}`),
+      ];
+      if (/^[A-Za-z0-9_-]{5,100}$/.test(audioId)) {
+        candidatePaths.push(
+          `PLAY/${ownerId}/${audioId}.webm`,
+          `PLAY/${ownerId}/${audioId}.mp4`,
+          `PLAY/${ownerId}/aud_${audioId}.webm`,
+          `PLAY/${ownerId}/aud_${audioId}.mp4`,
+          ...["mp3", "m4a", "aac", "ogg", "wav", "webm"].map(ext => `PLAY_AUDIO/${ownerId}/${audioId}.${ext}`),
+        );
+      }
+
       let deleted = false;
-      for (const extension of ["webm", "mp4"]) {
-        const path = `PLAY/${ownerId}/${videoId}.${extension}`;
+      for (const path of candidatePaths) {
         const url = `${apiBase}/${path.split("/").map(encodeURIComponent).join("/")}`;
         const current = await fetch(`${url}?ref=${encodeURIComponent(branch)}`, { headers: ghHeaders });
         if (current.status === 404) continue;
@@ -103,7 +160,7 @@ Deno.serve(async (req) => {
           method: "DELETE",
           headers: { ...ghHeaders, "Content-Type": "application/json" },
           body: JSON.stringify({
-            message: `Delete PLAY video ${videoId}`,
+            message: `Delete PLAY media ${videoId}`,
             sha: currentData.sha,
             branch,
           }),

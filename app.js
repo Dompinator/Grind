@@ -48,6 +48,167 @@ let passScrollInitDone = false;
 let grindBotHistory = [];
 let grindBotSending = false;
 
+// ---------- Egress Reduction: Shared Profile & Coin Image Caches ----------
+const PROFILES_CACHE_LS_KEY = 'grind_profiles_cache_v1';
+const COIN_IMAGES_CACHE_LS_KEY = 'grind_coin_imgs_v1';
+const PLAY_CACHE_LS_KEY = 'grind_play_cache_v2';
+const SHARED_PROFILE_TTL_MS = 10 * 60 * 1000;
+const sharedProfilesCache = new Map();
+const sharedCoinImagesCache = new Map();
+let sharedProfilesLastBulkFetchAt = 0;
+let sharedProfilesBulkPromise = null;
+let sharedProfilesPersistTimer = null;
+let sharedCoinImagesPersistTimer = null;
+let proUserIdsFetchedAt = 0;
+let proUserIdsPromise = null;
+let featuredCoinsFetchedAt = 0;
+let featuredCoinsPromise = null;
+let coinsTradeStatsCache = null;
+let coinsTradeStatsFetchedAt = 0;
+let coinsTradeStatsDirty = true;
+
+(function hydrateSharedCachesFromStorage() {
+  try {
+    const rawProf = localStorage.getItem(PROFILES_CACHE_LS_KEY);
+    if (rawProf) {
+      const parsed = JSON.parse(rawProf);
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.bulkAt === 'number') sharedProfilesLastBulkFetchAt = parsed.bulkAt;
+        if (Array.isArray(parsed.entries)) {
+          parsed.entries.forEach(p => {
+            if (p && p.id) sharedProfilesCache.set(String(p.id), p);
+          });
+        }
+      }
+    }
+  } catch (e) {}
+  try {
+    const rawImgs = localStorage.getItem(COIN_IMAGES_CACHE_LS_KEY);
+    if (rawImgs) {
+      const parsed = JSON.parse(rawImgs);
+      if (parsed && typeof parsed === 'object') {
+        Object.entries(parsed).forEach(([cid, url]) => {
+          sharedCoinImagesCache.set(String(cid), url || null);
+        });
+      }
+    }
+  } catch (e) {}
+})();
+
+function schedulePersistSharedProfiles() {
+  if (sharedProfilesPersistTimer) return;
+  sharedProfilesPersistTimer = setTimeout(() => {
+    sharedProfilesPersistTimer = null;
+    try {
+      const entries = Array.from(sharedProfilesCache.values())
+        .sort((a, b) => (b._cachedAt || 0) - (a._cachedAt || 0))
+        .slice(0, 120);
+      localStorage.setItem(PROFILES_CACHE_LS_KEY, JSON.stringify({
+        bulkAt: sharedProfilesLastBulkFetchAt,
+        entries
+      }));
+    } catch (e) {}
+  }, 500);
+}
+
+function schedulePersistCoinImages() {
+  if (sharedCoinImagesPersistTimer) return;
+  sharedCoinImagesPersistTimer = setTimeout(() => {
+    sharedCoinImagesPersistTimer = null;
+    try {
+      const obj = {};
+      const entries = Array.from(sharedCoinImagesCache.entries()).slice(-120);
+      entries.forEach(([k, v]) => { obj[k] = v || null; });
+      localStorage.setItem(COIN_IMAGES_CACHE_LS_KEY, JSON.stringify(obj));
+    } catch (e) {}
+  }, 500);
+}
+
+function saveSharedProfileToCache(p) {
+  if (!p || !p.id) return;
+  const pid = String(p.id);
+  const prev = sharedProfilesCache.get(pid) || {};
+  const next = {
+    id: pid,
+    username: p.username || prev.username || 'Trader',
+    avatar_url: p.avatar_url !== undefined ? p.avatar_url : (prev.avatar_url ?? null),
+    is_premium: p.is_premium !== undefined ? Boolean(p.is_premium) : Boolean(prev.is_premium),
+    _cachedAt: Date.now()
+  };
+  sharedProfilesCache.set(pid, next);
+  schedulePersistSharedProfiles();
+}
+
+function saveSharedCoinImageToCache(coinId, imageUrl) {
+  if (!coinId) return;
+  sharedCoinImagesCache.set(String(coinId), imageUrl || null);
+  schedulePersistCoinImages();
+}
+
+function getCachedProfile(userId, fallback = null) {
+  const uid = String(userId || fallback?.id || '');
+  if (!uid) return fallback || { id: '', username: 'Trader', avatar_url: null, is_premium: false };
+  if (currentUser && String(currentUser.id) === uid) {
+    return currentUser;
+  }
+  const cached = sharedProfilesCache.get(uid);
+  if (!cached && !fallback) return { id: uid, username: 'Trader', avatar_url: null, is_premium: false };
+  if (!cached) return { id: uid, username: 'Trader', avatar_url: null, ...fallback };
+  if (!fallback) return cached;
+  return {
+    ...cached,
+    ...fallback,
+    id: uid,
+    username: fallback.username || cached.username || 'Trader',
+    avatar_url: fallback.avatar_url !== undefined ? fallback.avatar_url : (cached.avatar_url ?? null),
+    is_premium: fallback.is_premium !== undefined ? fallback.is_premium : cached.is_premium
+  };
+}
+
+async function ensureProfilesCached(userIds = [], forceBulk = false) {
+  if (!sb) return;
+  const now = Date.now();
+  const ids = Array.isArray(userIds) ? [...new Set(userIds.map(x => String(x || '')).filter(Boolean))] : [];
+
+  if (ids.length > 0) {
+    const missing = ids.filter(uid => {
+      if (currentUser && String(currentUser.id) === uid) return false;
+      const c = sharedProfilesCache.get(uid);
+      return !c || !c._cachedAt || (now - c._cachedAt > SHARED_PROFILE_TTL_MS);
+    });
+    if (!missing.length) return;
+    for (let i = 0; i < missing.length; i += 60) {
+      const batch = missing.slice(i, i + 60);
+      try {
+        const { data } = await sb
+          .from('profiles')
+          .select('id, username, avatar_url, is_premium')
+          .in('id', batch);
+        (data || []).forEach(saveSharedProfileToCache);
+      } catch (e) {}
+    }
+    return;
+  }
+
+  if (sharedProfilesBulkPromise) return sharedProfilesBulkPromise;
+  if (!forceBulk && sharedProfilesCache.size > 0 && (now - sharedProfilesLastBulkFetchAt) < 180000) {
+    return;
+  }
+  sharedProfilesBulkPromise = (async () => {
+    try {
+      const { data } = await sb
+        .from('profiles')
+        .select('id, username, avatar_url, is_premium')
+        .order('username', { ascending: true })
+        .limit(250);
+      (data || []).forEach(saveSharedProfileToCache);
+      sharedProfilesLastBulkFetchAt = Date.now();
+      schedulePersistSharedProfiles();
+    } catch (e) {}
+  })().finally(() => { sharedProfilesBulkPromise = null; });
+  return sharedProfilesBulkPromise;
+}
+
 const PASS_STEP_SECONDS = 300; // 5 minutes between every reward
 const PASS_REWARDS = [
   { tier: 1, minutes: 5, type: 'cash', amount: 5, title: '$5', desc: 'Instant $5.00 cash bonus' },
@@ -158,13 +319,13 @@ function formatTime(seconds) {
   return `${m}m`;
 }
 
-// Compress uploaded images using canvas so any image works regardless of file size
+// Compress uploaded images tightly (128x128 @ 0.72 JPEG) to keep Supabase egress low
 function compressImg(file, cb) {
   const r = new FileReader();
   r.onload = () => {
     const img = new Image();
     img.onload = () => {
-      const max = 256;
+      const max = 128;
       let w = img.width, h = img.height;
       if (w > h) {
         if (w > max) { h = Math.round(h * max / w); w = max; }
@@ -176,7 +337,7 @@ function compressImg(file, cb) {
       canvas.height = h;
       const ctx = canvas.getContext('2d');
       ctx.drawImage(img, 0, 0, w, h);
-      cb(canvas.toDataURL('image/jpeg', 0.85));
+      cb(canvas.toDataURL('image/jpeg', 0.72));
     };
     img.src = r.result;
   };
@@ -510,6 +671,7 @@ async function loadProfile() {
   const prevMemTier = currentUser && currentUser.id === user.id ? getUserTier(currentUser) : null;
   currentUser = data;
   currentUser.auth_created_at = user.created_at || data.created_at || null;
+  saveSharedProfileToCache(currentUser);
 
   // Auto-sync approved premium & PRO status
   await loadProUserIds();
@@ -562,7 +724,7 @@ let adminModStateCache = { bans: new Map(), resets: new Map(), warnings: new Map
 let pendingWarnAckTs = 0;
 let adminModStateFetchedAt = 0;
 let adminModStatePromise = null;
-const ADMIN_MOD_STATE_TTL_MS = 30000;
+const ADMIN_MOD_STATE_TTL_MS = 120000;
 
 async function _fetchAdminModerationStateFresh() {
   const bans = new Map();
@@ -1478,13 +1640,13 @@ function startTimeTracking() {
   if (timeInterval) clearInterval(timeInterval);
   if (passTickerInterval) clearInterval(passTickerInterval);
   timeInterval = setInterval(async () => {
-    if (!currentUser || !sb) return;
-    const add = 30; // seconds
+    if (!currentUser || !sb || document.hidden) return;
+    const add = 120; // seconds (2-min cadence cuts DB writes & broadcasts by 75%)
     const newTime = (currentUser.time_played || 0) + add;
     currentUser.time_played = newTime;
     await sb.from('profiles').update({ time_played: newTime }).eq('id', currentUser.id);
     incrementPassTime(add);
-  }, 30000);
+  }, 120000);
   passTickerInterval = setInterval(() => {
     if (!currentUser || currentUser.is_banned) return;
     if (currentPage === 'pass') updatePassLiveClock();
@@ -1671,50 +1833,65 @@ $('#feedSearch')?.addEventListener('input', e => {
   renderFeed();
 });
 
-async function loadProUserIds() {
+async function loadProUserIds(force = false) {
   if (!sb) return;
-  try {
-    let q = sb
-      .from('premium_requests')
-      .select('user_id, created_at')
-      .eq('status', 'approved')
-      .eq('reason', '__PRO_TIER__');
-    if (adminModStateCache.serverResetTs > 0) {
-      q = q.gt('created_at', new Date(adminModStateCache.serverResetTs).toISOString());
-    }
-    const { data } = await q;
-    proUserIds = new Set((data || []).map(r => r.user_id).filter(Boolean));
-    if (currentUser && localStorage.getItem('grind_pro_' + currentUser.id) === '1') {
-      proUserIds.add(currentUser.id);
-    }
-  } catch (e) {}
+  if (proUserIdsPromise) return proUserIdsPromise;
+  if (!force && proUserIdsFetchedAt && (Date.now() - proUserIdsFetchedAt) < 60000) return;
+  proUserIdsPromise = (async () => {
+    try {
+      let q = sb
+        .from('premium_requests')
+        .select('user_id, created_at')
+        .eq('status', 'approved')
+        .eq('reason', '__PRO_TIER__');
+      if (adminModStateCache.serverResetTs > 0) {
+        q = q.gt('created_at', new Date(adminModStateCache.serverResetTs).toISOString());
+      }
+      const { data } = await q;
+      proUserIds = new Set((data || []).map(r => r.user_id).filter(Boolean));
+      if (currentUser && localStorage.getItem('grind_pro_' + currentUser.id) === '1') {
+        proUserIds.add(currentUser.id);
+      }
+      proUserIdsFetchedAt = Date.now();
+    } catch (e) {}
+  })().finally(() => { proUserIdsPromise = null; });
+  return proUserIdsPromise;
 }
 
 // ---------- Coins & Feed ----------
-async function fetchFeaturedCoins() {
+async function fetchFeaturedCoins(force = false) {
   if (!sb) return [];
-  try {
-    const srvResetTs = adminModStateCache.serverResetTs || 0;
-    let q = sb.from('premium_requests')
-      .select('reason, created_at, profiles(username)')
-      .like('reason', '__FEATURED_COINS__:%')
-      .order('created_at', { ascending: false })
-      .limit(20);
-    if (srvResetTs > 0) {
-      q = q.gt('created_at', new Date(srvResetTs).toISOString());
-    }
-    const { data } = await q;
-    const latest = (data || []).find(r => (r.profiles?.username || '').toLowerCase() === 'dompinator');
-    if (latest?.reason) {
-      const parsed = JSON.parse(String(latest.reason).slice('__FEATURED_COINS__:'.length));
-      if (Array.isArray(parsed?.coinIds)) {
-        featuredCoinIdsCache = parsed.coinIds.map(x => (x ? String(x) : '')).slice(0, 3);
-        return featuredCoinIdsCache;
+  if (featuredCoinsPromise) return featuredCoinsPromise;
+  if (!force && featuredCoinsFetchedAt && (Date.now() - featuredCoinsFetchedAt) < 60000) {
+    return featuredCoinIdsCache;
+  }
+  featuredCoinsPromise = (async () => {
+    try {
+      const srvResetTs = adminModStateCache.serverResetTs || 0;
+      let q = sb.from('premium_requests')
+        .select('reason, created_at, profiles(username)')
+        .like('reason', '__FEATURED_COINS__:%')
+        .order('created_at', { ascending: false })
+        .limit(20);
+      if (srvResetTs > 0) {
+        q = q.gt('created_at', new Date(srvResetTs).toISOString());
       }
-    }
-    featuredCoinIdsCache = [];
-  } catch (e) {}
-  return featuredCoinIdsCache;
+      const { data } = await q;
+      const latest = (data || []).find(r => (r.profiles?.username || '').toLowerCase() === 'dompinator');
+      if (latest?.reason) {
+        const parsed = JSON.parse(String(latest.reason).slice('__FEATURED_COINS__:'.length));
+        if (Array.isArray(parsed?.coinIds)) {
+          featuredCoinIdsCache = parsed.coinIds.map(x => (x ? String(x) : '')).slice(0, 3);
+          featuredCoinsFetchedAt = Date.now();
+          return featuredCoinIdsCache;
+        }
+      }
+      featuredCoinIdsCache = [];
+      featuredCoinsFetchedAt = Date.now();
+    } catch (e) {}
+    return featuredCoinIdsCache;
+  })().finally(() => { featuredCoinsPromise = null; });
+  return featuredCoinsPromise;
 }
 
 function renderFeaturedSection() {
@@ -1845,6 +2022,7 @@ $('#saveFeaturedBtn')?.addEventListener('click', async () => {
     return;
   }
   featuredCoinIdsCache = coinIds;
+  featuredCoinsFetchedAt = Date.now();
   closeFeaturedEditModal();
   renderFeaturedSection();
   toast('Featured coins updated for everyone!');
@@ -1882,7 +2060,7 @@ async function _loadCoinsFresh() {
   const srvResetTs = adminModStateCache.serverResetTs || 0;
   let res = await sb
     .from('coins')
-    .select('*, profiles!coins_creator_id_fkey(id, username, avatar_url, is_premium)')
+    .select('id, name, ticker, description, creator_id, price, change_pct, created_at')
     .order('created_at', { ascending: false });
   if (res.error) {
     res = await sb.from('coins').select('*').order('created_at', { ascending: false });
@@ -1903,67 +2081,119 @@ async function _loadCoinsFresh() {
       const cts = c.created_at ? new Date(c.created_at).getTime() : 0;
       return cts > srvResetTs;
     });
-    const stats = new Map();
-    const openPriceMap = new Map();
-    const tradedTodaySet = new Set();
+
+    // Seed image cache if fallback '*' query returned image_url, otherwise only fetch missing logos once
+    const missingImgIds = [];
+    list.forEach(c => {
+      const cid = String(c.id);
+      if (c.image_url !== undefined) {
+        saveSharedCoinImageToCache(cid, c.image_url);
+      } else if (!sharedCoinImagesCache.has(cid)) {
+        missingImgIds.push(c.id);
+      }
+    });
+    const creatorIds = list.map(c => c.creator_id).filter(Boolean);
+
+    const fetchMissingImgsPromise = missingImgIds.length
+      ? (async () => {
+          for (let i = 0; i < missingImgIds.length; i += 40) {
+            const batch = missingImgIds.slice(i, i + 40);
+            try {
+              const { data: imgRows } = await sb.from('coins').select('id, image_url').in('id', batch);
+              (imgRows || []).forEach(r => saveSharedCoinImageToCache(r.id, r.image_url));
+            } catch (e) {}
+          }
+        })()
+      : Promise.resolve();
+
+    let stats = coinsTradeStatsCache?.stats || new Map();
+    let openPriceMap = coinsTradeStatsCache?.openPriceMap || new Map();
+    let tradedTodaySet = coinsTradeStatsCache?.tradedTodaySet || new Set();
     const startOfTodayIso = getStartOfTodayDate().toISOString();
-    lastCoinsDateKey = getLocalDateKey(0);
-    try {
-      let buyQ = sb.from('trades')
-        .select('coin_id, amount_usd, created_at')
-        .eq('type', 'buy')
-        .order('created_at', { ascending: false })
-        .limit(1000);
-      let todayQ = sb.from('trades')
-        .select('coin_id, created_at')
-        .gte('created_at', startOfTodayIso)
-        .limit(1000);
-      let previousPriceQ = sb.from('trades')
-        .select('coin_id, price_after, created_at')
-        .lt('created_at', startOfTodayIso)
-        .order('created_at', { ascending: false })
-        .limit(1000);
-      if (srvResetTs > 0) {
-        const srvIso = new Date(srvResetTs).toISOString();
-        buyQ = buyQ.gt('created_at', srvIso);
-        todayQ = todayQ.gt('created_at', srvIso);
-        previousPriceQ = previousPriceQ.gt('created_at', srvIso);
-      }
-      const [{ data: buyRows }, { data: todayRows }, { data: previousPriceRows }] = await Promise.all([buyQ, todayQ, previousPriceQ]);
-      const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-      (buyRows || []).forEach(t => {
-        if (!t.coin_id) return;
-        const ts = t.created_at ? new Date(t.created_at).getTime() : 0;
-        const s = stats.get(t.coin_id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
-        s.total += 1;
-        s.volume += Number(t.amount_usd || 0);
-        if (ts >= dayAgo) s.recent += 1;
-        if (ts > s.lastBuy) s.lastBuy = ts;
-        stats.set(t.coin_id, s);
-      });
-      const tradedTodayIds = [...new Set((todayRows || []).map(t => t.coin_id).filter(Boolean))];
-      tradedTodayIds.forEach(id => tradedTodaySet.add(id));
-      (previousPriceRows || []).forEach(row => {
-        if (!row.coin_id || openPriceMap.has(row.coin_id)) return;
-        openPriceMap.set(row.coin_id, row.price_after != null ? Number(row.price_after) : 1);
-      });
-      const missingOpenPriceIds = tradedTodayIds.filter(id => !openPriceMap.has(id));
-      if (missingOpenPriceIds.length) {
-        const fallbackPrices = await Promise.all(missingOpenPriceIds.map(id =>
-          sb.from('trades')
-            .select('price_after')
-            .eq('coin_id', id)
-            .lt('created_at', startOfTodayIso)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle()
-        ));
-        fallbackPrices.forEach((result, index) => {
-          const id = missingOpenPriceIds[index];
-          openPriceMap.set(id, result.data?.price_after != null ? Number(result.data.price_after) : 1);
-        });
-      }
-    } catch (e) {}
+    const currentDateKey = getLocalDateKey(0);
+    const needStatsRefresh =
+      coinsTradeStatsDirty ||
+      !coinsTradeStatsCache ||
+      lastCoinsDateKey !== currentDateKey ||
+      (Date.now() - coinsTradeStatsFetchedAt) > 12000;
+    lastCoinsDateKey = currentDateKey;
+
+    const fetchStatsPromise = needStatsRefresh
+      ? (async () => {
+          const nextStats = new Map();
+          const nextOpenPriceMap = new Map();
+          const nextTradedTodaySet = new Set();
+          try {
+            let buyQ = sb.from('trades')
+              .select('coin_id, amount_usd, created_at')
+              .eq('type', 'buy')
+              .order('created_at', { ascending: false })
+              .limit(1000);
+            let todayQ = sb.from('trades')
+              .select('coin_id, created_at')
+              .gte('created_at', startOfTodayIso)
+              .limit(1000);
+            let previousPriceQ = sb.from('trades')
+              .select('coin_id, price_after, created_at')
+              .lt('created_at', startOfTodayIso)
+              .order('created_at', { ascending: false })
+              .limit(1000);
+            if (srvResetTs > 0) {
+              const srvIso = new Date(srvResetTs).toISOString();
+              buyQ = buyQ.gt('created_at', srvIso);
+              todayQ = todayQ.gt('created_at', srvIso);
+              previousPriceQ = previousPriceQ.gt('created_at', srvIso);
+            }
+            const [{ data: buyRows }, { data: todayRows }, { data: previousPriceRows }] = await Promise.all([buyQ, todayQ, previousPriceQ]);
+            const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+            (buyRows || []).forEach(t => {
+              if (!t.coin_id) return;
+              const ts = t.created_at ? new Date(t.created_at).getTime() : 0;
+              const s = nextStats.get(t.coin_id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
+              s.total += 1;
+              s.volume += Number(t.amount_usd || 0);
+              if (ts >= dayAgo) s.recent += 1;
+              if (ts > s.lastBuy) s.lastBuy = ts;
+              nextStats.set(t.coin_id, s);
+            });
+            const tradedTodayIds = [...new Set((todayRows || []).map(t => t.coin_id).filter(Boolean))];
+            tradedTodayIds.forEach(id => nextTradedTodaySet.add(id));
+            (previousPriceRows || []).forEach(row => {
+              if (!row.coin_id || nextOpenPriceMap.has(row.coin_id)) return;
+              nextOpenPriceMap.set(row.coin_id, row.price_after != null ? Number(row.price_after) : 1);
+            });
+            const missingOpenPriceIds = tradedTodayIds.filter(id => !nextOpenPriceMap.has(id));
+            if (missingOpenPriceIds.length) {
+              const fallbackPrices = await Promise.all(missingOpenPriceIds.map(id =>
+                sb.from('trades')
+                  .select('price_after')
+                  .eq('coin_id', id)
+                  .lt('created_at', startOfTodayIso)
+                  .order('created_at', { ascending: false })
+                  .limit(1)
+                  .maybeSingle()
+              ));
+              fallbackPrices.forEach((result, index) => {
+                const id = missingOpenPriceIds[index];
+                nextOpenPriceMap.set(id, result.data?.price_after != null ? Number(result.data.price_after) : 1);
+              });
+            }
+            stats = nextStats;
+            openPriceMap = nextOpenPriceMap;
+            tradedTodaySet = nextTradedTodaySet;
+            coinsTradeStatsCache = { stats, openPriceMap, tradedTodaySet };
+            coinsTradeStatsFetchedAt = Date.now();
+            coinsTradeStatsDirty = false;
+          } catch (e) {}
+        })()
+      : Promise.resolve();
+
+    await Promise.all([
+      ensureProfilesCached(creatorIds),
+      fetchMissingImgsPromise,
+      fetchStatsPromise
+    ]);
+
     coins = list.map(c => {
       const st = stats.get(c.id) || { total: 0, recent: 0, volume: 0, lastBuy: 0 };
       const currentPrice = Number(c.price) || 1;
@@ -1973,8 +2203,13 @@ async function _loadCoinsFresh() {
         ? ((currentPrice - openToday) / openToday) * 100
         : 0;
       const todayPct = Math.abs(rawTodayPct) < 0.005 ? 0 : rawTodayPct;
+      const cachedImg = sharedCoinImagesCache.has(String(c.id))
+        ? sharedCoinImagesCache.get(String(c.id))
+        : (c.image_url || null);
       return {
         ...c,
+        image_url: cachedImg,
+        profiles: c.creator_id ? getCachedProfile(c.creator_id, c.profiles) : null,
         today_open_price: openToday,
         change_pct: todayPct,
         recent_buys_24h: st.recent,
@@ -2164,12 +2399,14 @@ $('#createForm')?.addEventListener('submit', async (e) => {
       return;
     }
 
+    if (data?.id) saveSharedCoinImageToCache(data.id, pendingCoinImage);
     pendingCoinImage = null;
     $('#createForm').reset();
     $('#coinPreview').textContent = '＋';
     if (msgEl) msgEl.textContent = 'Currency created!';
     playSound('upload');
     toast('Your coin is live!');
+    coinsTradeStatsDirty = true;
     await loadCoins();
     await updateNetWorth();
     if (data && data.id) {
@@ -2236,7 +2473,7 @@ async function renderCoinDetail() {
   const [{ data: hold }, { data: dbTrades }, { data: myCoinTradesDb }] = await Promise.all([
     sb.from('holdings').select('shares').eq('user_id', currentUser.id).eq('coin_id', c.id).maybeSingle(),
     sb.from('trades')
-      .select('*, profiles(username, avatar_url)')
+      .select('id, coin_id, user_id, type, amount_usd, shares, price_after, created_at, profiles(username, is_premium)')
       .eq('coin_id', c.id)
       .order('created_at', { ascending: false })
       .limit(100),
@@ -2248,10 +2485,16 @@ async function renderCoinDetail() {
       .limit(1000)
   ]);
   const shares = hold?.shares || 0;
+  await ensureProfilesCached((dbTrades || []).map(t => t.user_id).filter(Boolean));
 
   // Combine with any local session trades
   const tradeMap = new Map();
-  (dbTrades || []).forEach(t => tradeMap.set(t.id || (t.created_at + t.shares), t));
+  (dbTrades || []).forEach(t => {
+    tradeMap.set(t.id || (t.created_at + t.shares), {
+      ...t,
+      profiles: t.user_id ? getCachedProfile(t.user_id, t.profiles) : t.profiles
+    });
+  });
   (c.localTrades || []).forEach(t => tradeMap.set(t.id || (t.created_at + t.shares), t));
   const trades = Array.from(tradeMap.values());
   trades.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
@@ -2805,6 +3048,7 @@ $('#saveEditCoinBtn')?.addEventListener('click', async () => {
 
   targetCoin.description = newDesc;
   targetCoin.image_url = newLogo;
+  saveSharedCoinImageToCache(targetCoin.id, newLogo);
   if (selectedCoin && String(selectedCoin.id) === String(targetCoin.id)) {
     selectedCoin.description = newDesc;
     selectedCoin.image_url = newLogo;
@@ -3174,13 +3418,15 @@ async function loadCoinComments(coin) {
   try {
     const { data } = await sb
       .from('premium_requests')
-      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .select('user_id, reason, created_at, profiles(id, username, is_premium)')
       .like('reason', '__CMT_%')
       .order('created_at', { ascending: true })
       .limit(1000);
     rows = data || [];
   } catch (e) {}
 
+  if (!selectedCoin || String(selectedCoin.id) !== coinId) return;
+  await ensureProfilesCached(rows.map(r => r.user_id).filter(Boolean));
   if (!selectedCoin || String(selectedCoin.id) !== coinId) return;
 
   const commentsMap = new Map();
@@ -3211,7 +3457,7 @@ async function loadCoinComments(coin) {
           gif_url: cleanGif,
           gif_title: p.gif_title ? String(p.gif_title) : 'GIF',
           ts,
-          profile: r.profiles || { id: r.user_id, username: 'Trader' }
+          profile: getCachedProfile(r.user_id, r.profiles)
         });
       } catch (e) {}
     } else if (reason.startsWith('__CMT_VOTE__:')) {
@@ -3877,20 +4123,22 @@ async function getCoinSpendLeaderboard(coinId) {
   if (!sb || !coinId) return [];
   const { data, error } = await sb
     .from('trades')
-    .select('user_id, amount_usd, profiles(username, avatar_url, is_premium)')
+    .select('user_id, amount_usd, profiles(username, is_premium)')
     .eq('coin_id', coinId)
     .eq('type', 'buy');
   if (error || !data) return [];
+  await ensureProfilesCached(data.map(t => t.user_id).filter(Boolean));
 
   const totals = new Map();
   for (const t of data) {
     if (!t.user_id) continue;
+    const cachedProf = getCachedProfile(t.user_id, t.profiles);
     const prev = totals.get(t.user_id) || {
       id: t.user_id,
       user_id: t.user_id,
-      username: t.profiles?.username || 'Unknown',
-      avatar_url: t.profiles?.avatar_url || null,
-      is_premium: Boolean(t.profiles?.is_premium),
+      username: cachedProf?.username || t.profiles?.username || 'Unknown',
+      avatar_url: cachedProf?.avatar_url || null,
+      is_premium: Boolean(cachedProf?.is_premium ?? t.profiles?.is_premium),
       spent: 0,
       buys: 0
     };
@@ -4123,7 +4371,7 @@ async function renderLeaderboard() {
   ]);
   if (currentUser) await updateNetWorth();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
-  const { data } = await sb.from('profiles').select('id, username, avatar_url, cash, net_worth, time_played, is_premium').limit(200);
+  const { data } = await sb.from('profiles').select('id, username, cash, net_worth, time_played, is_premium').limit(200);
   if (seq !== lbRenderSeq || modeAtStart !== lbMode) return;
 
   let list = (data || [])
@@ -4136,6 +4384,8 @@ async function renderLeaderboard() {
 
   let bestGainerPid = null;
   let worstLoserPid = null;
+  let weeklyBest = null;
+  let weeklyWorst = null;
 
   if (lbMode === 'weekly') {
     const weeklyMap = await computeWeeklyProfitStats(list);
@@ -4151,35 +4401,10 @@ async function renderLeaderboard() {
     if (pool.length) {
       const sortedUp = [...pool].sort((a, b) => (b.weeklyProfitPct - a.weeklyProfitPct) || (b.weeklyProfitUsd - a.weeklyProfitUsd));
       const sortedDown = [...pool].sort((a, b) => (a.weeklyProfitPct - b.weeklyProfitPct) || (a.weeklyProfitUsd - b.weeklyProfitUsd));
-      const best = sortedUp[0];
-      const worst = sortedDown[0];
-      if (best && best.weeklyProfitPct > 0.005) bestGainerPid = String(best.id);
-      if (worst && worst.weeklyProfitPct < -0.005) worstLoserPid = String(worst.id);
-
-      if (spotlightsEl) {
-        const upCard = best ? `
-          <button type="button" class="lb-spotlight-card up" data-profile="${escapeHtml(best.id)}">
-            <div class="lb-spotlight-label">▲ MOST % UP (7D)</div>
-            <div class="lb-spotlight-user">
-              <div class="avatar" style="width:30px;height:30px;font-size:12px;">${best.avatar_url ? `<img src="${escapeHtml(best.avatar_url)}">` : escapeHtml((best.username || '?')[0].toUpperCase())}</div>
-              <span class="lb-spotlight-name">${escapeHtml(best.username || 'Unknown')}${tierBadgeHtml(best)}</span>
-            </div>
-            <div class="lb-spotlight-stat up">${escapeHtml(formatSignedPct(best.weeklyProfitPct))} <small>${escapeHtml(formatSignedMoney(best.weeklyProfitUsd))}</small></div>
-          </button>` : '';
-        const downCard = worst ? `
-          <button type="button" class="lb-spotlight-card down" data-profile="${escapeHtml(worst.id)}">
-            <div class="lb-spotlight-label">▼ DOWN MOST % (7D)</div>
-            <div class="lb-spotlight-user">
-              <div class="avatar" style="width:30px;height:30px;font-size:12px;">${worst.avatar_url ? `<img src="${escapeHtml(worst.avatar_url)}">` : escapeHtml((worst.username || '?')[0].toUpperCase())}</div>
-              <span class="lb-spotlight-name">${escapeHtml(worst.username || 'Unknown')}${tierBadgeHtml(worst)}</span>
-            </div>
-            <div class="lb-spotlight-stat down">${escapeHtml(formatSignedPct(worst.weeklyProfitPct))} <small>${escapeHtml(formatSignedMoney(worst.weeklyProfitUsd))}</small></div>
-          </button>` : '';
-        spotlightsEl.innerHTML = upCard + downCard;
-        $$('#lbWeeklySpotlights [data-profile]').forEach(el => {
-          el.addEventListener('click', () => openProfileModal(el.dataset.profile));
-        });
-      }
+      weeklyBest = sortedUp[0];
+      weeklyWorst = sortedDown[0];
+      if (weeklyBest && weeklyBest.weeklyProfitPct > 0.005) bestGainerPid = String(weeklyBest.id);
+      if (weeklyWorst && weeklyWorst.weeklyProfitPct < -0.005) worstLoserPid = String(weeklyWorst.id);
     } else if (spotlightsEl) {
       spotlightsEl.innerHTML = '';
     }
@@ -4235,6 +4460,44 @@ async function renderLeaderboard() {
     list.sort((a, b) => Number(b.time_played || 0) - Number(a.time_played || 0));
   }
   list = list.slice(0, 100);
+
+  // Hydrate missing avatars only for rendered top-100 + weekly spotlight users via shared cache
+  const needAvatarIds = list.map(p => p.id);
+  if (weeklyBest?.id) needAvatarIds.push(weeklyBest.id);
+  if (weeklyWorst?.id) needAvatarIds.push(weeklyWorst.id);
+  await ensureProfilesCached(needAvatarIds);
+  if (seq !== lbRenderSeq || modeAtStart !== lbMode) return;
+  list = list.map(p => {
+    const cached = getCachedProfile(p.id, p);
+    return { ...p, avatar_url: cached?.avatar_url ?? null };
+  });
+
+  if (lbMode === 'weekly' && spotlightsEl && (weeklyBest || weeklyWorst)) {
+    const best = weeklyBest ? { ...weeklyBest, avatar_url: getCachedProfile(weeklyBest.id, weeklyBest)?.avatar_url ?? null } : null;
+    const worst = weeklyWorst ? { ...weeklyWorst, avatar_url: getCachedProfile(weeklyWorst.id, weeklyWorst)?.avatar_url ?? null } : null;
+    const upCard = best ? `
+      <button type="button" class="lb-spotlight-card up" data-profile="${escapeHtml(best.id)}">
+        <div class="lb-spotlight-label">▲ MOST % UP (7D)</div>
+        <div class="lb-spotlight-user">
+          <div class="avatar" style="width:30px;height:30px;font-size:12px;">${best.avatar_url ? `<img src="${escapeHtml(best.avatar_url)}">` : escapeHtml((best.username || '?')[0].toUpperCase())}</div>
+          <span class="lb-spotlight-name">${escapeHtml(best.username || 'Unknown')}${tierBadgeHtml(best)}</span>
+        </div>
+        <div class="lb-spotlight-stat up">${escapeHtml(formatSignedPct(best.weeklyProfitPct))} <small>${escapeHtml(formatSignedMoney(best.weeklyProfitUsd))}</small></div>
+      </button>` : '';
+    const downCard = worst ? `
+      <button type="button" class="lb-spotlight-card down" data-profile="${escapeHtml(worst.id)}">
+        <div class="lb-spotlight-label">▼ DOWN MOST % (7D)</div>
+        <div class="lb-spotlight-user">
+          <div class="avatar" style="width:30px;height:30px;font-size:12px;">${worst.avatar_url ? `<img src="${escapeHtml(worst.avatar_url)}">` : escapeHtml((worst.username || '?')[0].toUpperCase())}</div>
+          <span class="lb-spotlight-name">${escapeHtml(worst.username || 'Unknown')}${tierBadgeHtml(worst)}</span>
+        </div>
+        <div class="lb-spotlight-stat down">${escapeHtml(formatSignedPct(worst.weeklyProfitPct))} <small>${escapeHtml(formatSignedMoney(worst.weeklyProfitUsd))}</small></div>
+      </button>` : '';
+    spotlightsEl.innerHTML = upCard + downCard;
+    $$('#lbWeeklySpotlights [data-profile]').forEach(el => {
+      el.addEventListener('click', () => openProfileModal(el.dataset.profile));
+    });
+  }
 
   const storageKey = lbMode === 'weekly'
     ? `grind_lb_ranks_${currentUser?.id || 'guest'}_weekly_${lbWeeklySort}`
@@ -5095,6 +5358,9 @@ const playState = {
   donations: [],                     // all __PLAY_DONATE__ rows
   paidDonateIds: new Set(),          // donation IDs already credited to recipient
   commentsByVideo: new Map(),        // videoId -> Array
+  commentVotesById: new Map(),       // commentId -> Map(userId -> 'like'|'dislike'|'none')
+  expandedCommentReplies: new Set(), // commentId set
+  activeCommentReplyTarget: null,    // { parentId, replyToUserId, replyToUsername } | null
   pinnedCommentIdByVideo: new Map(), // videoId -> commentId
   deletedIds: new Set(),
   rawRows: [],                 // Cached PLAY activity; only fetch rows newer than the last sync
@@ -5168,14 +5434,38 @@ async function loadPlayData(force = false) {
   playState.syncPromise = (async () => {
   try {
     const srvResetTs = adminModStateCache.serverResetTs || 0;
+
+    // Hydrate cached lightweight PLAY rows from localStorage on cold load so page refreshes only transfer deltas
+    if (!playState.rawRows.length) {
+      try {
+        const rawLs = localStorage.getItem(PLAY_CACHE_LS_KEY);
+        if (rawLs) {
+          const parsedLs = JSON.parse(rawLs);
+          if (parsedLs && Number(parsedLs.srvResetTs || 0) === Number(srvResetTs || 0) && Array.isArray(parsedLs.rows)) {
+            parsedLs.rows.forEach(row => {
+              if (!row || !row.reason || String(row.reason).includes('data:video/')) return;
+              const rowId = String(row.id || (String(row.created_at || '') + '|' + String(row.user_id || '') + '|' + String(row.reason || '')));
+              if (playState.rawRowIds.has(rowId)) return;
+              playState.rawRowIds.add(rowId);
+              playState.rawRows.push(row);
+              if (row.created_at && (!playState.lastRowCreatedAt || row.created_at > playState.lastRowCreatedAt)) {
+                playState.lastRowCreatedAt = row.created_at;
+              }
+            });
+          }
+        }
+      } catch (e) {}
+    }
+
     let query = sb
       .from('premium_requests')
-      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .select('id, user_id, reason, created_at, profiles(id, username, is_premium)')
       .like('reason', '__PLAY_%')
+      .not('reason', 'like', '%data:video/%')
       .order('created_at', { ascending: true })
       .limit(5000);
 
-    // First load gets the existing history. Later loads only transfer newly-created PLAY rows.
+    // First load gets non-blob history; subsequent loads & refreshes only fetch deltas.
     if (playState.rawRows.length && playState.lastRowCreatedAt) {
       query = query.gte('created_at', playState.lastRowCreatedAt);
     }
@@ -5186,6 +5476,7 @@ async function loadPlayData(force = false) {
         .from('premium_requests')
         .select('id, user_id, reason, created_at')
         .like('reason', '__PLAY_%')
+        .not('reason', 'like', '%data:video/%')
         .order('created_at', { ascending: true })
         .limit(5000);
       if (playState.rawRows.length && playState.lastRowCreatedAt) {
@@ -5197,6 +5488,7 @@ async function loadPlayData(force = false) {
     if (res?.error || !Array.isArray(incoming)) return;
 
     for (const row of incoming) {
+      if (row?.profiles && row.profiles.id) saveSharedProfileToCache(row.profiles);
       const rowId = String(row.id || (String(row.created_at || '') + '|' + String(row.user_id || '') + '|' + String(row.reason || '')));
       if (playState.rawRowIds.has(rowId)) continue;
       playState.rawRowIds.add(rowId);
@@ -5207,6 +5499,28 @@ async function loadPlayData(force = false) {
     }
     playState.rawRows.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
     const data = playState.rawRows;
+
+    // Persist slimmed rows in localStorage (strip nested profile bloat & huge inline blobs)
+    try {
+      const compactRows = data
+        .filter(r => r && r.reason && String(r.reason).length <= 16000)
+        .slice(-3000)
+        .map(r => ({
+          id: r.id,
+          user_id: r.user_id,
+          reason: r.reason,
+          created_at: r.created_at,
+          profiles: r.profiles ? { id: r.profiles.id || r.user_id, username: r.profiles.username || 'Trader', is_premium: Boolean(r.profiles.is_premium) } : undefined
+        }));
+      localStorage.setItem(PLAY_CACHE_LS_KEY, JSON.stringify({
+        srvResetTs: Number(srvResetTs || 0),
+        rows: compactRows
+      }));
+    } catch (e) {}
+
+    // Hydrate cached avatars once for participating users
+    const playUids = data.map(r => r.user_id).filter(Boolean);
+    await ensureProfilesCached(playUids);
 
     const videosMap = new Map();
     const deletedIds = new Set();
@@ -5223,6 +5537,7 @@ async function loadPlayData(force = false) {
     const donations = [];
     const paidDonateIds = new Set();
     const commentsMapByVideo = new Map();
+    const commentVotesById = new Map();
     const pinnedCommentIdByVideo = new Map();
     const deletedCommentIds = new Set();
 
@@ -5236,7 +5551,7 @@ async function loadPlayData(force = false) {
         try {
           const p = JSON.parse(reason.slice('__PLAY_VID__:'.length));
           if (!p?.id) return;
-          const voiceUrl = typeof p.voiceoverUrl === 'string' && p.voiceoverUrl.startsWith('data:audio/') ? p.voiceoverUrl : '';
+          const voiceUrl = typeof p.voiceoverUrl === 'string' && (p.voiceoverUrl.startsWith('https://') || p.voiceoverUrl.startsWith('data:audio/')) ? p.voiceoverUrl : '';
           const vid = {
             id: String(p.id),
             user_id: uid,
@@ -5256,8 +5571,10 @@ async function loadPlayData(force = false) {
             musicName: String(p.musicName || ''),
             musicUrl: String(p.musicUrl || ''),
             musicFallbackUrl: String(p.musicFallbackUrl || ''),
+            musicAudioId: p.musicAudioId ? String(p.musicAudioId).slice(0, 100) : '',
+            musicBakedInVideo: Boolean(p.musicBakedInVideo),
             ts: Number(p.ts) || rowTs,
-            profile: r.profiles || { id: uid, username: 'Trader' }
+            profile: getCachedProfile(uid, r.profiles)
           };
           if (vid.kind === 'video' && !vid.videoUrl) return;
           videosMap.set(vid.id, vid);
@@ -5354,7 +5671,7 @@ async function loadPlayData(force = false) {
           donations.push({
             id: String(p.id),
             fromUserId: uid,
-            fromProfile: r.profiles || { id: uid, username: 'Trader' },
+            fromProfile: getCachedProfile(uid, r.profiles),
             toUserId: String(p.toUserId),
             toUsername: String(p.toUsername || 'Creator'),
             videoId: p.videoId ? String(p.videoId) : '',
@@ -5383,12 +5700,23 @@ async function loadPlayData(force = false) {
             id: String(p.id),
             videoId: vidId,
             user_id: uid,
-            text: cleanText,
+            parent_id: p.parent_id ? String(p.parent_id) : null,
+            reply_to_user_id: p.reply_to_user_id ? String(p.reply_to_user_id) : null,
+            reply_to_username: p.reply_to_username ? String(p.reply_to_username) : null,
+            text: String(p.text || ''),
             gif_url: cleanGif,
             gif_title: String(p.gif_title || 'GIF').slice(0, 80),
             ts: Number(p.ts) || rowTs,
-            profile: r.profiles || { id: uid, username: 'Trader' }
+            profile: getCachedProfile(uid, r.profiles)
           });
+        } catch (e) {}
+      } else if (reason.startsWith('__PLAY_CMT_VOTE__:')) {
+        try {
+          const p = JSON.parse(reason.slice('__PLAY_CMT_VOTE__:'.length));
+          if (!p?.commentId || !p?.videoId) return;
+          let vm = commentVotesById.get(String(p.commentId));
+          if (!vm) { vm = new Map(); commentVotesById.set(String(p.commentId), vm); }
+          vm.set(uid, p.vote === 'like' || p.vote === 'dislike' ? p.vote : 'none');
         } catch (e) {}
       } else if (reason.startsWith('__PLAY_CMT_DEL__:')) {
         try {
@@ -5411,11 +5739,14 @@ async function loadPlayData(force = false) {
     });
 
     deletedIds.forEach(id => videosMap.delete(id));
+    const delUsers = adminModStateCache.deletedUserIds || new Set();
     commentsMapByVideo.forEach((arr, vidId) => {
-      const alive = arr.filter(c => !deletedCommentIds.has(c.id));
+      const aliveRaw = arr.filter(c => !deletedCommentIds.has(c.id) && !delUsers.has(String(c.user_id)));
+      const topIds = new Set(aliveRaw.filter(c => !c.parent_id).map(c => c.id));
+      const alive = aliveRaw.filter(c => !c.parent_id || topIds.has(c.parent_id));
       commentsMapByVideo.set(vidId, alive);
       const pinId = pinnedCommentIdByVideo.get(vidId);
-      if (pinId && !alive.some(c => c.id === pinId)) {
+      if (pinId && !topIds.has(pinId)) {
         pinnedCommentIdByVideo.delete(vidId);
       }
     });
@@ -5437,6 +5768,7 @@ async function loadPlayData(force = false) {
     playState.donations = donations.sort((a, b) => b.ts - a.ts);
     playState.paidDonateIds = paidDonateIds;
     playState.commentsByVideo = commentsMapByVideo;
+    playState.commentVotesById = commentVotesById;
     playState.pinnedCommentIdByVideo = pinnedCommentIdByVideo;
     playState.lastSyncAt = Date.now();
   } catch (e) {
@@ -5807,6 +6139,7 @@ function cleanupPlay() {
   }
   playState.activeSlideIndex = -1;
   playState.openCommentsVideoId = null;
+  playState.activeCommentReplyTarget = null;
   $('#playCommentsDrawer')?.classList.add('hidden');
   setPlayCommentGifPickerOpen(false);
 }
@@ -5936,6 +6269,22 @@ function syncPlayMuteUi() {
   if (playState.activeVoiceAudio) playState.activeVoiceAudio.muted = playState.muted;
 }
 
+function createPlayableAudioElement(url, fallbackUrl = '') {
+  const s = String(url || '');
+  const isVideoCarrier = /\.(mp4|webm)(\?|$)/i.test(s) || s.startsWith('data:video/');
+  const el = isVideoCarrier ? document.createElement('video') : new Audio();
+  if (isVideoCarrier) el.playsInline = true;
+  el.src = s;
+  el.onerror = () => {
+    if (fallbackUrl && !el.dataset.fallbackTried) {
+      el.dataset.fallbackTried = '1';
+      el.src = fallbackUrl;
+      el.play().catch(() => {});
+    }
+  };
+  return el;
+}
+
 function activatePlaySlide(index) {
   const slides = $$('#playFeedTrack .play-slide');
   if (!slides.length || index < 0 || index >= slides.length) return;
@@ -5954,6 +6303,7 @@ function activatePlaySlide(index) {
   const vidEl = slideEl.querySelector('video.play-media-video');
   const musicUrl = item.slideType === 'video' ? item.video.musicUrl : '';
   const musicFallback = item.slideType === 'video' ? item.video.musicFallbackUrl : '';
+  const musicAlreadyBaked = item.slideType === 'video' && Boolean(item.video.musicBakedInVideo);
   const voiceUrl = item.slideType === 'video' ? item.video.voiceoverUrl : '';
   const muteOrig = item.slideType === 'video' ? Boolean(item.video.muteOriginal) : false;
   const speed = item.slideType === 'video' ? Math.min(2.5, Math.max(0.5, Number(item.video.playbackRate || 1))) : 1;
@@ -5972,18 +6322,11 @@ function activatePlaySlide(index) {
     });
   }
 
-  if (musicUrl) {
-    const audio = new Audio(musicUrl);
+  if (musicUrl && !musicAlreadyBaked) {
+    const audio = createPlayableAudioElement(musicUrl, musicFallback);
     audio.loop = true;
     audio.muted = playState.muted;
     audio.volume = voiceUrl ? 0.42 : 0.54;
-    audio.onerror = () => {
-      if (musicFallback && !audio.dataset.fallbackTried) {
-        audio.dataset.fallbackTried = '1';
-        audio.src = musicFallback;
-        audio.play().catch(() => {});
-      }
-    };
     playState.activeAudio = audio;
     audio.play().catch(() => {});
   }
@@ -6048,7 +6391,7 @@ function createPlaySlideHtml(item, idx) {
 
   const v = item.video;
   const sum = getPlayVoteSummary(v.id);
-  const prof = v.profile || { id: v.user_id, username: 'Trader' };
+  const prof = getCachedProfile(v.user_id, v.profile);
   const uname = prof.username || 'Trader';
   const equippedTid = typeof getUserEquippedTitleId === 'function' ? getUserEquippedTitleId(v.user_id) : null;
   const titleHtml = equippedTid && typeof renderTitleBadgeHtml === 'function' ? renderTitleBadgeHtml(equippedTid, true) : '';
@@ -6084,7 +6427,7 @@ function createPlaySlideHtml(item, idx) {
             ${v.title ? `<div class="play-video-title">${escapeHtml(v.title)} ${speedTag}</div>` : (speedTag ? `<div>${speedTag}</div>` : '')}
             <div class="play-chips-row">
               <span class="play-views-tag" data-play-views="${escapeHtml(v.id)}">👁 ${sum.views}</span>
-              ${v.musicName ? `<div class="play-music-chip">♫ ${escapeHtml(cleanMediaDisplayName(v.musicName))}</div>` : ''}
+              ${v.musicName ? `<button type="button" class="play-music-chip play-music-chip-btn" data-play-song="${escapeHtml(v.id)}" title="Download or use this sound">♫ ${escapeHtml(cleanMediaDisplayName(v.musicName))} <span class="play-chip-use-tag">Use</span></button>` : ''}
               ${v.voiceoverUrl ? `<div class="play-vo-chip">🎙 Voiceover</div>` : ''}
               ${v.linkedCoinId ? `<button type="button" class="play-linked-coin-chip" data-play-coin="${escapeHtml(v.linkedCoinId)}">◈ ${escapeHtml(v.linkedCoinName || 'Coin')} ($${escapeHtml(v.linkedCoinTicker || 'COIN')}) →</button>` : ''}
             </div>
@@ -6160,8 +6503,16 @@ function wirePlaySlideInteractions(slideEl) {
   // Tap to pause/play
   slideEl.querySelectorAll('[data-play-tap]').forEach(el => {
     el.addEventListener('click', e => {
-      if (e.target.closest('[data-play-profile],[data-follow-user],[data-play-donate],[data-play-coin]')) return;
+      if (e.target.closest('[data-play-profile],[data-follow-user],[data-play-donate],[data-play-coin],[data-play-song]')) return;
       toggleActiveSlidePause(slideEl);
+    });
+  });
+
+  // Song chip click (download / use sound)
+  slideEl.querySelectorAll('[data-play-song]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      if (btn.dataset.playSong) openPlayUseSongModal(btn.dataset.playSong);
     });
   });
 
@@ -6420,11 +6771,14 @@ async function deletePlayVideo(videoId) {
     toast('Could not delete video: ' + error.message);
     return;
   }
-  if (vid.kind === 'video' && /^https:\/\/raw\.githubusercontent\.com\//i.test(String(vid.videoUrl || ''))) {
+  if (
+    (vid.kind === 'video' && /^https:\/\/raw\.githubusercontent\.com\//i.test(String(vid.videoUrl || ''))) ||
+    (vid.musicAudioId && /^https:\/\/raw\.githubusercontent\.com\//i.test(String(vid.musicUrl || '')))
+  ) {
     try {
       await deletePlayVideoFileFromGitHub(vid);
     } catch (cleanupError) {
-      console.warn('PLAY video file cleanup failed:', cleanupError);
+      console.warn('PLAY media file cleanup failed:', cleanupError);
     }
   }
   playState.deletedIds.add(String(videoId));
@@ -6608,51 +6962,218 @@ async function togglePinPlayComment(videoId, commentId) {
   toast(nextPin ? '📌 Comment pinned!' : 'Comment unpinned');
 }
 
+async function votePlayComment(videoId, commentId, currentVote, clickedType) {
+  if (!sb || !currentUser?.id || !videoId || !commentId) return;
+  const uid = String(currentUser.id);
+  const cid = String(commentId);
+  const nextVote = currentVote === clickedType ? 'none' : clickedType;
+
+  let vm = playState.commentVotesById.get(cid);
+  if (!vm) { vm = new Map(); playState.commentVotesById.set(cid, vm); }
+  vm.set(uid, nextVote);
+  renderPlayCommentsDrawerList();
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_CMT_VOTE__:' + JSON.stringify({
+      videoId: String(videoId),
+      commentId: cid,
+      vote: nextVote,
+      ts: Date.now()
+    }),
+    status: 'denied'
+  });
+  if (error) {
+    toast('Vote error: ' + error.message);
+  }
+}
+
+async function postPlayReplyComment(videoId, replyTarget) {
+  if (!sb || !currentUser?.id || !videoId || !replyTarget?.parentId) return;
+  const input = $(`#playReplyInput-${replyTarget.parentId}`);
+  const sendBtn = $(`#playSendReplyBtn-${replyTarget.parentId}`);
+  const text = (input?.value || '').trim();
+  if (!text) return toast('Write a reply first!');
+  if (text.length > 400) return toast('Reply must be 400 characters or less.');
+  if (sendBtn) sendBtn.disabled = true;
+
+  const payload = {
+    id: 'pcmt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    videoId: String(videoId),
+    text: text.slice(0, 400),
+    parent_id: String(replyTarget.parentId),
+    ...(replyTarget.replyToUserId ? { reply_to_user_id: String(replyTarget.replyToUserId) } : {}),
+    ...(replyTarget.replyToUsername ? { reply_to_username: String(replyTarget.replyToUsername) } : {}),
+    ts: Date.now()
+  };
+
+  const { error } = await sb.from('premium_requests').insert({
+    user_id: currentUser.id,
+    reason: '__PLAY_CMT__:' + JSON.stringify(payload),
+    status: 'denied'
+  });
+  if (sendBtn) sendBtn.disabled = false;
+  if (error) return toast('Reply error: ' + error.message);
+
+  playSound('commenting');
+  playState.expandedCommentReplies.add(String(replyTarget.parentId));
+  playState.activeCommentReplyTarget = null;
+  toast('Reply posted!');
+  await loadPlayData(true);
+  renderPlayCommentsDrawerList();
+}
+
 function renderPlayCommentsDrawerList() {
   const listEl = $('#playCommentsList');
   const titleEl = $('#playCommentsTitle');
   const vidId = playState.openCommentsVideoId;
   if (!listEl || !vidId) return;
+
   const rawCmts = playState.commentsByVideo.get(vidId) || [];
-  const pinnedId = playState.pinnedCommentIdByVideo.get(vidId) || null;
-  const cmts = [...rawCmts].sort((a, b) => {
-    if (a.id === pinnedId && b.id !== pinnedId) return -1;
-    if (b.id === pinnedId && a.id !== pinnedId) return 1;
-    return a.ts - b.ts;
+  const topComments = [];
+  const repliesByParent = new Map();
+
+  rawCmts.forEach(c => {
+    if (!c.parent_id) topComments.push(c);
+  });
+  const activeTopIds = new Set(topComments.map(c => c.id));
+  let totalVisibleCount = topComments.length;
+
+  rawCmts.forEach(c => {
+    if (!c.parent_id || !activeTopIds.has(c.parent_id)) return;
+    const arr = repliesByParent.get(c.parent_id) || [];
+    arr.push(c);
+    repliesByParent.set(c.parent_id, arr);
+    totalVisibleCount += 1;
   });
 
-  if (titleEl) titleEl.textContent = `Comments (${cmts.length})`;
+  let pinnedId = playState.pinnedCommentIdByVideo.get(vidId) || null;
+  if (pinnedId && !activeTopIds.has(pinnedId)) {
+    pinnedId = null;
+  }
 
+  topComments.sort((a, b) => {
+    if (a.id === pinnedId && b.id !== pinnedId) return -1;
+    if (b.id === pinnedId && a.id !== pinnedId) return 1;
+    return b.ts - a.ts;
+  });
+  repliesByParent.forEach(arr => arr.sort((a, b) => a.ts - b.ts));
+
+  if (titleEl) titleEl.textContent = `Comments (${totalVisibleCount})`;
   document.querySelectorAll(`#playFeedTrack .play-slide[data-video-id="${CSS.escape(vidId)}"] [data-play-comment] .play-rail-count`)
-    .forEach(el => { el.textContent = String(cmts.length); });
+    .forEach(el => { el.textContent = String(totalVisibleCount); });
 
-  if (!cmts.length) {
-    listEl.innerHTML = '<div class="empty-state" style="padding:26px 12px;"><p class="muted tiny">No comments yet. Say something!</p></div>';
+  if (!topComments.length) {
+    listEl.innerHTML = '<div class="empty-state" style="padding:26px 12px;"><p class="muted tiny">No comments yet. Be the first to comment!</p></div>';
     return;
   }
-  const vid = playState.videosById.get(vidId);
-  const canPin = Boolean(currentUser && vid && (String(vid.user_id) === String(currentUser.id) || isDompinator()));
 
-  listEl.innerHTML = cmts.map(c => {
-    const prof = c.profile || { id: c.user_id, username: 'Trader' };
+  const vid = playState.videosById.get(vidId);
+  const creatorUsername = vid?.profile?.username || 'Creator';
+  const isViewerVidCreator = Boolean(currentUser && vid && (String(vid.user_id) === String(currentUser.id) || isDompinator()));
+  const myAv = currentUser?.avatar_url
+    ? `<img src="${escapeHtml(currentUser.avatar_url)}">`
+    : escapeHtml((currentUser?.username || 'G')[0].toUpperCase());
+
+  const renderVoteBtns = (cm) => {
+    const vm = playState.commentVotesById.get(cm.id);
+    let likes = 0;
+    let dislikes = 0;
+    if (vm) {
+      vm.forEach(v => {
+        if (v === 'like') likes += 1;
+        else if (v === 'dislike') dislikes += 1;
+      });
+    }
+    const myVote = currentUser && vm ? (vm.get(String(currentUser.id)) || 'none') : 'none';
+    return `
+      <button type="button" class="cmt-action-btn ${myVote === 'like' ? 'liked' : ''}" data-play-cmt-vote="like" data-cid="${escapeHtml(cm.id)}" data-cur="${escapeHtml(myVote)}" title="Like">
+        ${THUMB_UP_SVG}<span>${likes}</span>
+      </button>
+      <button type="button" class="cmt-action-btn ${myVote === 'dislike' ? 'disliked' : ''}" data-play-cmt-vote="dislike" data-cid="${escapeHtml(cm.id)}" data-cur="${escapeHtml(myVote)}" title="Dislike">
+        ${THUMB_DOWN_SVG}<span>${dislikes}</span>
+      </button>
+    `;
+  };
+
+  listEl.innerHTML = topComments.map(c => {
+    const prof = getCachedProfile(c.user_id, c.profile);
     const uname = prof.username || 'Trader';
     const isPinned = c.id === pinnedId;
-    const canDel = currentUser && (String(c.user_id) === String(currentUser.id) || (vid && String(vid.user_id) === String(currentUser.id)) || isDompinator());
-    return `
-      <div class="play-cmt-row ${isPinned ? 'is-pinned' : ''}">
-        <div class="avatar" style="width:30px;height:30px;font-size:12px;" data-play-cmt-prof="${escapeHtml(c.user_id)}">${prof.avatar_url ? `<img src="${escapeHtml(prof.avatar_url)}">` : escapeHtml(uname[0].toUpperCase())}</div>
-        <div class="play-cmt-body">
-          ${isPinned ? `<div class="play-cmt-pinned-badge">📌 Pinned by Creator</div>` : ''}
-          <div class="play-cmt-meta">
-            <strong class="profile-link" data-play-cmt-prof="${escapeHtml(c.user_id)}">${escapeHtml(uname)}${tierBadgeHtml(prof)}</strong>
-            <span class="muted tiny">${typeof timeAgo === 'function' ? timeAgo(c.ts) : ''}</span>
-            <span style="margin-left:auto;display:inline-flex;gap:4px;">
-              ${canPin ? `<button type="button" class="zoom-btn play-cmt-pin-btn ${isPinned ? 'active' : ''}" data-play-cmt-pin="${escapeHtml(c.id)}" title="${isPinned ? 'Unpin comment' : 'Pin comment'}">📌${isPinned ? ' Unpin' : ''}</button>` : ''}
-              ${canDel ? `<button type="button" class="zoom-btn play-cmt-del" data-play-cmt-del="${escapeHtml(c.id)}" style="padding:2px 7px;font-size:11px;">✕</button>` : ''}
-            </span>
+    const isCommenterCreator = Boolean(vid && String(c.user_id) === String(vid.user_id));
+    const canDel = currentUser && (String(c.user_id) === String(currentUser.id) || isViewerVidCreator);
+    const replies = repliesByParent.get(c.id) || [];
+    const isExpanded = playState.expandedCommentReplies.has(c.id);
+    const isReplyingHere = playState.activeCommentReplyTarget && playState.activeCommentReplyTarget.parentId === c.id;
+
+    const repliesHtml = replies.map(rp => {
+      const rProf = getCachedProfile(rp.user_id, rp.profile);
+      const rUname = rProf.username || 'Trader';
+      const rIsCreator = Boolean(vid && String(rp.user_id) === String(vid.user_id));
+      const rCanDel = currentUser && (String(rp.user_id) === String(currentUser.id) || isViewerVidCreator);
+      const mentionHtml = rp.reply_to_username && String(rp.reply_to_user_id) !== String(c.user_id)
+        ? `<span class="cmt-reply-mention">@${escapeHtml(rp.reply_to_username)}</span>`
+        : '';
+      return `
+        <div class="comment-item reply-item" data-play-cmt-id="${escapeHtml(rp.id)}">
+          <div class="avatar" data-play-cmt-prof="${escapeHtml(rp.user_id)}">${rProf.avatar_url ? `<img src="${escapeHtml(rProf.avatar_url)}">` : escapeHtml(rUname[0].toUpperCase())}</div>
+          <div class="comment-main">
+            <div class="comment-meta">
+              <strong class="profile-link" data-play-cmt-prof="${escapeHtml(rp.user_id)}">${escapeHtml(rUname)}${tierBadgeHtml(rProf)}</strong>
+              ${rIsCreator ? '<span class="comment-creator-tag">Creator</span>' : ''}
+              <span class="comment-time">${escapeHtml(formatRelativeTime(rp.ts))}</span>
+            </div>
+            ${rp.text ? `<div class="comment-text">${mentionHtml}${escapeHtml(rp.text).replace(/\n/g, '<br>')}</div>` : (mentionHtml ? `<div class="comment-text">${mentionHtml}</div>` : '')}
+            ${rp.gif_url ? `<div class="comment-gif-wrap"><img src="${escapeHtml(rp.gif_url)}" alt="${escapeHtml(rp.gif_title || 'GIF')}" loading="lazy"></div>` : ''}
+            <div class="comment-actions">
+              ${renderVoteBtns(rp)}
+              <button type="button" class="cmt-action-btn" data-play-cmt-reply="${escapeHtml(c.id)}" data-reply-uid="${escapeHtml(rp.user_id)}" data-reply-name="${escapeHtml(rUname)}">Reply</button>
+              ${rCanDel ? `<button type="button" class="cmt-action-btn del-btn" data-play-cmt-del="${escapeHtml(rp.id)}">Delete</button>` : ''}
+            </div>
           </div>
-          ${c.text ? `<div class="play-cmt-text">${escapeHtml(c.text)}</div>` : ''}
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="comment-item ${isPinned ? 'pinned' : ''}" data-play-cmt-id="${escapeHtml(c.id)}">
+        <div class="avatar" data-play-cmt-prof="${escapeHtml(c.user_id)}">${prof.avatar_url ? `<img src="${escapeHtml(prof.avatar_url)}">` : escapeHtml(uname[0].toUpperCase())}</div>
+        <div class="comment-main">
+          ${isPinned ? `<div class="comment-pinned-badge">${PIN_SVG} Pinned by ${escapeHtml(creatorUsername)}</div>` : ''}
+          <div class="comment-meta">
+            <strong class="profile-link" data-play-cmt-prof="${escapeHtml(c.user_id)}">${escapeHtml(uname)}${tierBadgeHtml(prof)}</strong>
+            ${isCommenterCreator ? '<span class="comment-creator-tag">Creator</span>' : ''}
+            <span class="comment-time">${escapeHtml(formatRelativeTime(c.ts))}</span>
+          </div>
+          ${c.text ? `<div class="comment-text">${escapeHtml(c.text).replace(/\n/g, '<br>')}</div>` : ''}
           ${c.gif_url ? `<div class="comment-gif-wrap"><img src="${escapeHtml(c.gif_url)}" alt="${escapeHtml(c.gif_title || 'GIF')}" loading="lazy"></div>` : ''}
+          <div class="comment-actions">
+            ${renderVoteBtns(c)}
+            <button type="button" class="cmt-action-btn" data-play-cmt-reply="${escapeHtml(c.id)}" data-reply-uid="${escapeHtml(c.user_id)}" data-reply-name="${escapeHtml(uname)}">Reply</button>
+            ${isViewerVidCreator ? `
+              <button type="button" class="cmt-action-btn ${isPinned ? 'pinned-btn' : ''}" data-play-cmt-pin="${escapeHtml(c.id)}" title="${isPinned ? 'Unpin comment' : 'Pin comment'}">
+                ${PIN_SVG}<span>${isPinned ? 'Unpin' : 'Pin'}</span>
+              </button>
+            ` : ''}
+            ${canDel ? `<button type="button" class="cmt-action-btn del-btn" data-play-cmt-del="${escapeHtml(c.id)}">Delete</button>` : ''}
+          </div>
+          ${isReplyingHere ? `
+            <div class="cmt-reply-box">
+              <div class="avatar">${myAv}</div>
+              <div class="cmt-reply-body">
+                <textarea id="playReplyInput-${escapeHtml(c.id)}" rows="2" maxlength="400" placeholder="Replying to @${escapeHtml(playState.activeCommentReplyTarget.replyToUsername || uname)}..."></textarea>
+                <div class="cmt-reply-actions">
+                  <button type="button" class="zoom-btn" data-play-reply-cancel="${escapeHtml(c.id)}">Cancel</button>
+                  <button type="button" class="primary-btn" id="playSendReplyBtn-${escapeHtml(c.id)}" data-play-reply-send="${escapeHtml(c.id)}" style="padding:7px 14px;font-size:12px;">Reply</button>
+                </div>
+              </div>
+            </div>
+          ` : ''}
+          ${replies.length ? `
+            <button type="button" class="cmt-replies-toggle" data-play-toggle-replies="${escapeHtml(c.id)}">
+              ${isExpanded ? `▴ Hide ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}` : `▾ ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`}
+            </button>
+            ${isExpanded ? `<div class="cmt-replies-list">${repliesHtml}</div>` : ''}
+          ` : ''}
         </div>
       </div>`;
   }).join('');
@@ -6660,12 +7181,18 @@ function renderPlayCommentsDrawerList() {
   $$('#playCommentsList [data-play-cmt-prof]').forEach(el => {
     el.addEventListener('click', () => openProfileModal(el.dataset.playCmtProf));
   });
+  $$('#playCommentsList [data-play-cmt-vote]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      votePlayComment(vidId, btn.dataset.cid, btn.dataset.cur, btn.dataset.playCmtVote);
+    });
+  });
   $$('#playCommentsList [data-play-cmt-pin]').forEach(btn => {
     btn.addEventListener('click', () => togglePinPlayComment(vidId, btn.dataset.playCmtPin));
   });
   $$('#playCommentsList [data-play-cmt-del]').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!sb || !currentUser?.id) return;
+      btn.disabled = true;
       const cmtId = btn.dataset.playCmtDel;
       await sb.from('premium_requests').insert({
         user_id: currentUser.id,
@@ -6676,11 +7203,56 @@ function renderPlayCommentsDrawerList() {
       renderPlayCommentsDrawerList();
     });
   });
+  $$('#playCommentsList [data-play-cmt-reply]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const parentId = btn.dataset.playCmtReply;
+      playState.activeCommentReplyTarget = {
+        parentId,
+        replyToUserId: btn.dataset.replyUid || null,
+        replyToUsername: btn.dataset.replyName || 'Trader'
+      };
+      playState.expandedCommentReplies.add(parentId);
+      renderPlayCommentsDrawerList();
+      $(`#playReplyInput-${parentId}`)?.focus();
+    });
+  });
+  $$('#playCommentsList [data-play-reply-cancel]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      playState.activeCommentReplyTarget = null;
+      renderPlayCommentsDrawerList();
+    });
+  });
+  $$('#playCommentsList [data-play-reply-send]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (playState.activeCommentReplyTarget && playState.activeCommentReplyTarget.parentId === btn.dataset.playReplySend) {
+        postPlayReplyComment(vidId, playState.activeCommentReplyTarget);
+      }
+    });
+  });
+  $$('#playCommentsList textarea[id^="playReplyInput-"]').forEach(ta => {
+    ta.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (playState.activeCommentReplyTarget) {
+          postPlayReplyComment(vidId, playState.activeCommentReplyTarget);
+        }
+      }
+    });
+  });
+  $$('#playCommentsList [data-play-toggle-replies]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pid = btn.dataset.playToggleReplies;
+      if (playState.expandedCommentReplies.has(pid)) playState.expandedCommentReplies.delete(pid);
+      else playState.expandedCommentReplies.add(pid);
+      renderPlayCommentsDrawerList();
+    });
+  });
 }
 
 function openPlayCommentsDrawer(videoId) {
   playState.openCommentsVideoId = String(videoId);
   playState.pendingCommentGif = null;
+  playState.activeCommentReplyTarget = null;
   renderPlayCommentGifPreview();
   setPlayCommentGifPickerOpen(false);
   $('#playCommentsDrawer')?.classList.remove('hidden');
@@ -6689,6 +7261,7 @@ function openPlayCommentsDrawer(videoId) {
 
 $('#playCloseCommentsBtn')?.addEventListener('click', () => {
   playState.openCommentsVideoId = null;
+  playState.activeCommentReplyTarget = null;
   $('#playCommentsDrawer')?.classList.add('hidden');
   setPlayCommentGifPickerOpen(false);
 });
@@ -7055,16 +7628,9 @@ function playSelectedMusicPreview(selectEl, btnEl) {
   if (!name) return toast('Pick a track from the Music folder first!');
   const track = (musicCache || []).find(t => t.name === name);
   if (!track) return;
-  const audio = new Audio(track.url);
+  const audio = createPlayableAudioElement(track.url, track.fallbackUrl || '');
   audio.loop = true;
   audio.volume = 0.55;
-  audio.onerror = () => {
-    if (track.fallbackUrl && !audio.dataset.fbTried) {
-      audio.dataset.fbTried = '1';
-      audio.src = track.fallbackUrl;
-      audio.play().catch(() => {});
-    }
-  };
   playState.previewAudio = audio;
   playState.previewBtnEl = btnEl;
   if (btnEl) btnEl.textContent = '■ Stop';
@@ -7582,12 +8148,65 @@ async function loadPlayEditorGifs(query = '') {
   });
 }
 
-async function openPlayCreatorStudio() {
+let pendingEditorAudioFile = null;
+let pendingEditorAudioPreviewEl = null;
+let pendingEditorAudioPreviewObjUrl = '';
+
+function stopEditorCustomAudioPreview() {
+  if (pendingEditorAudioPreviewEl) {
+    try { pendingEditorAudioPreviewEl.pause(); } catch (e) {}
+    pendingEditorAudioPreviewEl = null;
+  }
+  if (pendingEditorAudioPreviewObjUrl) {
+    try { URL.revokeObjectURL(pendingEditorAudioPreviewObjUrl); } catch (e) {}
+    pendingEditorAudioPreviewObjUrl = '';
+  }
+  const prevBtn = $('#playEditorCustomAudioPreviewBtn');
+  if (prevBtn) prevBtn.textContent = '▶ Test';
+}
+
+function syncEditorCustomAudioUi() {
+  const prevBtn = $('#playEditorCustomAudioPreviewBtn');
+  const clearBtn = $('#playEditorCustomAudioClearBtn');
+  const nameInp = $('#playEditorCustomAudioNameInput');
+  const statusEl = $('#playEditorCustomAudioStatus');
+  const musicSel = $('#playEditorMusicSelect');
+  const hasAudio = Boolean(pendingEditorAudioFile);
+
+  if (prevBtn) {
+    prevBtn.classList.toggle('hidden', !hasAudio);
+    prevBtn.textContent = pendingEditorAudioPreviewEl ? '■ Stop' : '▶ Test';
+  }
+  if (clearBtn) clearBtn.classList.toggle('hidden', !hasAudio);
+  if (nameInp) nameInp.classList.toggle('hidden', !hasAudio);
+  if (musicSel) {
+    musicSel.disabled = hasAudio;
+    if (hasAudio) musicSel.value = '';
+  }
+  if (statusEl) {
+    statusEl.textContent = hasAudio
+      ? `♪ ${pendingEditorAudioFile.name} — attached only to this video (viewers can download & use it too!).`
+      : 'Optional — attach your own audio file to this video. Viewers can click the song in the corner to download & use it!';
+  }
+}
+
+async function openPlayCreatorStudio(preloadedSong = null) {
   $('#playUploadChoiceModal')?.classList.add('hidden');
+  stopActivePlayMedia();
+  stopMusicPreviewAudio();
+  stopEditorCustomAudioPreview();
   stopVoiceoverRecorderIfActive();
   stopVoiceoverPreview();
   playVoiceoverState.creatorUrl = '';
   syncVoiceoverUi('creator');
+
+  pendingEditorAudioFile = preloadedSong?.file || null;
+  if ($('#playEditorCustomAudioInput')) $('#playEditorCustomAudioInput').value = '';
+  if ($('#playEditorCustomAudioNameInput')) {
+    $('#playEditorCustomAudioNameInput').value = pendingEditorAudioFile
+      ? cleanMediaDisplayName(preloadedSong?.name || pendingEditorAudioFile.name)
+      : '';
+  }
 
   playEditorState.bgColor = '#161222';
   playEditorState.aspectRatio = '9:16';
@@ -7614,14 +8233,21 @@ async function openPlayCreatorStudio() {
   populatePlayCoinSelect($('#playEditorCoinSelect'), 'No Linked Coin (optional)');
   syncPlayEditorAspectUi();
   renderPlayEditorStage();
+  syncEditorCustomAudioUi();
   $('#playCreatorModal')?.classList.remove('hidden');
   await populateMusicSelect($('#playEditorMusicSelect'), 'No Music');
+  if (!pendingEditorAudioFile && preloadedSong?.builtInTrackName && $('#playEditorMusicSelect')) {
+    $('#playEditorMusicSelect').value = preloadedSong.builtInTrackName;
+  }
+  syncEditorCustomAudioUi();
 }
 
 function closePlayCreatorStudio() {
   stopMusicPreviewAudio();
+  stopEditorCustomAudioPreview();
   stopVoiceoverRecorderIfActive();
   stopVoiceoverPreview();
+  pendingEditorAudioFile = null;
   hideModalSmooth($('#playCreatorModal'));
 }
 
@@ -7888,6 +8514,50 @@ $('#playEditorMusicPreviewBtn')?.addEventListener('click', () => {
   playSelectedMusicPreview($('#playEditorMusicSelect'), $('#playEditorMusicPreviewBtn'));
 });
 
+$('#playEditorCustomAudioInput')?.addEventListener('change', e => {
+  const audioFile = e.target.files?.[0];
+  stopEditorCustomAudioPreview();
+  if (!audioFile) return;
+  if (audioFile.size > 25 * 1024 * 1024) {
+    toast('Audio file must be under 25 MB.');
+    e.target.value = '';
+    return;
+  }
+  stopMusicPreviewAudio();
+  pendingEditorAudioFile = audioFile;
+  if ($('#playEditorCustomAudioNameInput')) {
+    $('#playEditorCustomAudioNameInput').value = cleanMediaDisplayName(audioFile.name);
+  }
+  syncEditorCustomAudioUi();
+  toast(`Attached audio: ${audioFile.name}`);
+});
+
+$('#playEditorCustomAudioPreviewBtn')?.addEventListener('click', () => {
+  if (pendingEditorAudioPreviewEl) {
+    stopEditorCustomAudioPreview();
+    return;
+  }
+  if (!pendingEditorAudioFile) return;
+  stopMusicPreviewAudio();
+  const objUrl = URL.createObjectURL(pendingEditorAudioFile);
+  const audio = createPlayableAudioElement(objUrl);
+  audio.loop = true;
+  audio.volume = 0.72;
+  pendingEditorAudioPreviewObjUrl = objUrl;
+  pendingEditorAudioPreviewEl = audio;
+  const prevBtn = $('#playEditorCustomAudioPreviewBtn');
+  if (prevBtn) prevBtn.textContent = '■ Stop';
+  audio.play().catch(() => toast('Tap again to preview audio'));
+});
+
+$('#playEditorCustomAudioClearBtn')?.addEventListener('click', () => {
+  stopEditorCustomAudioPreview();
+  pendingEditorAudioFile = null;
+  if ($('#playEditorCustomAudioInput')) $('#playEditorCustomAudioInput').value = '';
+  if ($('#playEditorCustomAudioNameInput')) $('#playEditorCustomAudioNameInput').value = '';
+  syncEditorCustomAudioUi();
+});
+
 $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
   if (!sb || !currentUser?.id || playEditorState.saving) return;
   const msgEl = $('#playCreatorMsg');
@@ -7916,12 +8586,38 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
     return;
   }
 
+  const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  let customAudioName = '';
+  let customAudioUrl = '';
+  let customAudioId = '';
+  if (pendingEditorAudioFile) {
+    customAudioName = cleanMediaDisplayName(
+      ($('#playEditorCustomAudioNameInput')?.value || '').trim() || pendingEditorAudioFile.name
+    ) || 'Custom Audio';
+    customAudioId = 'paud_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    try {
+      if (msgEl) msgEl.textContent = 'Saving custom audio to GitHub...';
+      customAudioUrl = await uploadPlayAudioToGitHub(pendingEditorAudioFile, customAudioId);
+    } catch (audErr) {
+      if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
+      playEditorState.saving = false;
+      if (finishBtn) finishBtn.disabled = false;
+      updatePlayUploadFeeUi();
+      if (msgEl) msgEl.textContent = 'Audio upload failed: ' + (audErr?.message || 'Unknown error');
+      return;
+    }
+  }
+
   const musicName = $('#playEditorMusicSelect')?.value || '';
-  const track = musicName ? (musicCache || []).find(t => t.name === musicName) : null;
+  const track = !customAudioUrl && musicName ? (musicCache || []).find(t => t.name === musicName) : null;
   const linkedId = $('#playEditorCoinSelect')?.value || '';
   const linkedCoin = linkedId ? (coins || []).find(c => String(c.id) === String(linkedId)) : null;
-  const voUrl = playVoiceoverState.creatorUrl || '';
-  const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  const rawVoUrl = playVoiceoverState.creatorUrl || '';
+  let voUrl = rawVoUrl;
+  if (rawVoUrl && rawVoUrl.startsWith('data:audio/') && typeof maybeUploadVoiceoverToGitHub === 'function') {
+    if (msgEl) msgEl.textContent = 'Uploading voiceover to GitHub...';
+    voUrl = await maybeUploadVoiceoverToGitHub(rawVoUrl, newVidId);
+  }
   const payload = {
     id: newVidId,
     kind: 'scene',
@@ -7935,9 +8631,10 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
       ...(emoji ? { emoji } : {}),
       ...(text ? { text, color, style, font: font || 'sans' } : {})
     })),
-    musicName: track ? track.name : '',
-    musicUrl: track ? track.url : '',
-    musicFallbackUrl: track ? (track.fallbackUrl || '') : '',
+    musicName: customAudioUrl ? customAudioName : (track ? track.name : ''),
+    musicUrl: customAudioUrl ? customAudioUrl : (track ? track.url : ''),
+    musicFallbackUrl: customAudioUrl ? '' : (track ? (track.fallbackUrl || '') : ''),
+    ...(customAudioId ? { musicAudioId: customAudioId } : {}),
     ...(voUrl ? { voiceoverUrl: voUrl } : {}),
     ...(linkedCoin ? { linkedCoinId: String(linkedCoin.id), linkedCoinName: linkedCoin.name, linkedCoinTicker: linkedCoin.ticker } : {}),
     ts: Date.now()
@@ -7952,6 +8649,9 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
   if (finishBtn) finishBtn.disabled = false;
   updatePlayUploadFeeUi();
   if (error) {
+    if (customAudioId) {
+      try { await deletePlayVideoFileFromGitHub({ id: customAudioId, user_id: currentUser.id, musicAudioId: customAudioId }); } catch (e) {}
+    }
     if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
     if (msgEl) msgEl.textContent = 'Publish error: ' + error.message;
     return;
@@ -7968,6 +8668,11 @@ $('#playCreatorFinishBtn')?.addEventListener('click', async () => {
 let pendingUploadVideoDataUrl = '';
 let pendingUploadVideoAspect = 9 / 16;
 let pendingUploadBusy = false;
+let pendingUploadSourceVideoFile = null;
+let pendingUploadCustomSongFile = null;
+let pendingUploadCustomSongPreviewAudio = null;
+let pendingUploadCustomSongPreviewUrl = '';
+let pendingUploadJobSeq = 0;
 
 function readFileAsDataUrlPromise(file) {
   return new Promise((resolve, reject) => {
@@ -7978,26 +8683,45 @@ function readFileAsDataUrlPromise(file) {
   });
 }
 
-function probeVideoAspectRatio(file) {
-  return new Promise(resolve => {
-    const objectUrl = URL.createObjectURL(file);
-    const vid = document.createElement('video');
-    vid.muted = true;
-    vid.playsInline = true;
-    vid.src = objectUrl;
-    vid.onloadedmetadata = () => {
-      const ar = (vid.videoWidth > 0 && vid.videoHeight > 0) ? (vid.videoWidth / vid.videoHeight) : (9 / 16);
-      URL.revokeObjectURL(objectUrl);
-      resolve(Math.min(2.6, Math.max(0.35, Number(ar.toFixed(4)))));
-    };
-    vid.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve(9 / 16);
-    };
-  });
+function stopCustomSongPreviewAudio() {
+  if (pendingUploadCustomSongPreviewAudio) {
+    try { pendingUploadCustomSongPreviewAudio.pause(); } catch (e) {}
+    pendingUploadCustomSongPreviewAudio = null;
+  }
+  if (pendingUploadCustomSongPreviewUrl) {
+    try { URL.revokeObjectURL(pendingUploadCustomSongPreviewUrl); } catch (e) {}
+    pendingUploadCustomSongPreviewUrl = '';
+  }
+  const prevBtn = $('#playUploadCustomSongPreviewBtn');
+  if (prevBtn) prevBtn.textContent = '▶ Test';
 }
 
-async function compressPlayVideoFile(file, onProgress) {
+function syncCustomSongUi() {
+  const prevBtn = $('#playUploadCustomSongPreviewBtn');
+  const clearBtn = $('#playUploadCustomSongClearBtn');
+  const statusEl = $('#playUploadCustomSongStatus');
+  const musicSel = $('#playUploadMusicSelect');
+  const hasSong = Boolean(pendingUploadCustomSongFile);
+
+  if (prevBtn) {
+    prevBtn.classList.toggle('hidden', !hasSong);
+    prevBtn.textContent = pendingUploadCustomSongPreviewAudio ? '■ Stop' : '▶ Test';
+  }
+  if (clearBtn) clearBtn.classList.toggle('hidden', !hasSong);
+  if (musicSel) {
+    musicSel.disabled = hasSong;
+    if (hasSong) musicSel.value = '';
+  }
+  if (statusEl) {
+    statusEl.textContent = hasSong
+      ? `♪ ${pendingUploadCustomSongFile.name} — baked into your GitHub video file!`
+      : 'Optional — MP3, WAV, OGG, or M4A mixed directly into your GitHub video file.';
+  }
+}
+
+async function compressPlayVideoFile(file, onProgress, options = {}) {
+  const customSongFile = options?.customSongFile || null;
+  const muteOriginal = Boolean(options?.muteOriginal);
   const objectUrl = URL.createObjectURL(file);
   const vid = document.createElement('video');
   vid.muted = false;
@@ -8023,9 +8747,12 @@ async function compressPlayVideoFile(file, onProgress) {
   const canvasStream = canvas.captureStream(24);
   const tracks = [...canvasStream.getVideoTracks()];
 
-  // Preserve original video sound via Web Audio destination (silent to user during encode)
+  // Mix original video audio and optional uploaded custom song via Web Audio (silent during encode)
   let audioCtx = null;
   let audioDest = null;
+  let songBufferSource = null;
+  let fallbackSongAudio = null;
+  let fallbackSongUrl = '';
   let hasAudioTrack = false;
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -8034,9 +8761,44 @@ async function compressPlayVideoFile(file, onProgress) {
       if (audioCtx.state === 'suspended') {
         await audioCtx.resume().catch(() => {});
       }
-      const sourceNode = audioCtx.createMediaElementSource(vid);
       audioDest = audioCtx.createMediaStreamDestination();
-      sourceNode.connect(audioDest);
+
+      const sourceNode = audioCtx.createMediaElementSource(vid);
+      const origGain = audioCtx.createGain();
+      origGain.gain.value = muteOriginal ? 0 : (customSongFile ? 0.8 : 1.0);
+      sourceNode.connect(origGain);
+      origGain.connect(audioDest);
+
+      if (customSongFile) {
+        let decoded = false;
+        try {
+          const arrBuf = await customSongFile.arrayBuffer();
+          const audioBuf = await audioCtx.decodeAudioData(arrBuf);
+          songBufferSource = audioCtx.createBufferSource();
+          songBufferSource.buffer = audioBuf;
+          songBufferSource.loop = true;
+          const songGain = audioCtx.createGain();
+          songGain.gain.value = muteOriginal ? 0.92 : 0.72;
+          songBufferSource.connect(songGain);
+          songGain.connect(audioDest);
+          decoded = true;
+        } catch (decodeErr) {
+          decoded = false;
+        }
+        if (!decoded) {
+          fallbackSongUrl = URL.createObjectURL(customSongFile);
+          fallbackSongAudio = document.createElement('audio');
+          fallbackSongAudio.src = fallbackSongUrl;
+          fallbackSongAudio.loop = true;
+          fallbackSongAudio.playsInline = true;
+          const songNode = audioCtx.createMediaElementSource(fallbackSongAudio);
+          const songGain = audioCtx.createGain();
+          songGain.gain.value = muteOriginal ? 0.92 : 0.72;
+          songNode.connect(songGain);
+          songGain.connect(audioDest);
+        }
+      }
+
       const capturedAudio = audioDest.stream.getAudioTracks();
       if (capturedAudio.length) {
         capturedAudio.forEach(tr => tracks.push(tr));
@@ -8047,6 +8809,10 @@ async function compressPlayVideoFile(file, onProgress) {
     if (audioCtx) { try { audioCtx.close(); } catch (err) {} }
     audioCtx = null;
     audioDest = null;
+    songBufferSource = null;
+    if (fallbackSongUrl) { try { URL.revokeObjectURL(fallbackSongUrl); } catch (err) {} }
+    fallbackSongAudio = null;
+    fallbackSongUrl = '';
   }
 
   // Fallback to video.captureStream audio track if AudioContext had none
@@ -8097,6 +8863,9 @@ async function compressPlayVideoFile(file, onProgress) {
 
   return new Promise((resolve, reject) => {
     const cleanupAudio = () => {
+      if (songBufferSource) { try { songBufferSource.stop(); } catch (e) {} songBufferSource = null; }
+      if (fallbackSongAudio) { try { fallbackSongAudio.pause(); } catch (e) {} fallbackSongAudio = null; }
+      if (fallbackSongUrl) { try { URL.revokeObjectURL(fallbackSongUrl); } catch (e) {} fallbackSongUrl = ''; }
       if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
     };
     recorder.onstop = async () => {
@@ -8123,13 +8892,18 @@ async function compressPlayVideoFile(file, onProgress) {
 
     vid.currentTime = 0;
     recorder.start(250);
+    if (songBufferSource) {
+      try { songBufferSource.start(0); } catch (e) {}
+    } else if (fallbackSongAudio) {
+      fallbackSongAudio.play().catch(() => {});
+    }
     vid.play().catch(err => {
       vid.muted = true;
       vid.play().catch(reject);
     });
 
     const drawLoop = () => {
-      if (vid.paused || vid.ended || vid.currentTime >= maxDur) {
+      if (vid.paused || vid.ended || vid.currentTime >= maxDur || (options?.shouldAbort && options.shouldAbort())) {
         try { vid.pause(); } catch (e) {}
         if (recorder.state !== 'inactive') recorder.stop();
         return;
@@ -8154,13 +8928,211 @@ async function uploadPlayVideoToGitHub(dataUrl, videoId) {
   return data.url;
 }
 
+function inferPlayAudioMimeType(file) {
+  const raw = String(file?.type || '').toLowerCase().split(';')[0].trim();
+  const valid = new Set(['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/webm']);
+  if (valid.has(raw)) return raw;
+  const n = String(file?.name || '').toLowerCase();
+  if (n.endsWith('.mp3')) return 'audio/mpeg';
+  if (n.endsWith('.m4a')) return 'audio/mp4';
+  if (n.endsWith('.aac')) return 'audio/aac';
+  if (n.endsWith('.ogg')) return 'audio/ogg';
+  if (n.endsWith('.wav')) return 'audio/wav';
+  if (n.endsWith('.webm')) return 'audio/webm';
+  return '';
+}
+
+async function encodeAudioToMediaContainerDataUrl(audioFile) {
+  const objectUrl = URL.createObjectURL(audioFile);
+  const el = createPlayableAudioElement(objectUrl);
+  el.preload = 'auto';
+  el.playsInline = true;
+  el.muted = false;
+  el.volume = 1;
+
+  await new Promise((resolve, reject) => {
+    const done = () => resolve();
+    if (el.readyState >= 1) return done();
+    el.onloadedmetadata = done;
+    el.onerror = () => reject(new Error('Could not read audio file'));
+  });
+
+  const maxDur = Math.min(Number(el.duration || 20) || 20, 42);
+  const canvas = document.createElement('canvas');
+  canvas.width = 16;
+  canvas.height = 16;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#090710';
+    ctx.fillRect(0, 0, 16, 16);
+  }
+  const tracks = [];
+  if (canvas.captureStream) {
+    tracks.push(...canvas.captureStream(1).getVideoTracks());
+  }
+
+  let audioCtx = null;
+  let audioDest = null;
+  let songBufferSource = null;
+  let hasAudioTrack = false;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) {
+      audioCtx = new AC();
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume().catch(() => {});
+      }
+      audioDest = audioCtx.createMediaStreamDestination();
+      let decoded = false;
+      try {
+        const arrBuf = await audioFile.arrayBuffer();
+        const audioBuf = await audioCtx.decodeAudioData(arrBuf);
+        songBufferSource = audioCtx.createBufferSource();
+        songBufferSource.buffer = audioBuf;
+        const g = audioCtx.createGain();
+        g.gain.value = 1;
+        songBufferSource.connect(g);
+        g.connect(audioDest);
+        decoded = true;
+      } catch (decodeErr) {
+        decoded = false;
+      }
+      if (!decoded) {
+        const srcNode = audioCtx.createMediaElementSource(el);
+        const g = audioCtx.createGain();
+        g.gain.value = 1;
+        srcNode.connect(g);
+        g.connect(audioDest);
+      }
+      const cap = audioDest.stream.getAudioTracks();
+      if (cap.length) {
+        tracks.push(...cap);
+        hasAudioTrack = true;
+      }
+    }
+  } catch (e) {
+    if (audioCtx) { try { audioCtx.close(); } catch (err) {} }
+    audioCtx = null;
+    audioDest = null;
+    songBufferSource = null;
+  }
+
+  if (!hasAudioTrack) {
+    URL.revokeObjectURL(objectUrl);
+    throw new Error('This browser cannot encode custom audio.');
+  }
+
+  const stream = new MediaStream(tracks);
+  const preferredMimes = [
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+    'video/mp4'
+  ];
+  const mime = preferredMimes.find(m => {
+    try { return MediaRecorder.isTypeSupported(m); } catch (e) { return false; }
+  }) || '';
+
+  const recorder = new MediaRecorder(stream, {
+    ...(mime ? { mimeType: mime } : {}),
+    videoBitsPerSecond: 16000,
+    audioBitsPerSecond: 64000
+  });
+  const chunks = [];
+  let totalBytes = 0;
+  recorder.ondataavailable = ev => {
+    if (ev.data && ev.data.size > 0) {
+      chunks.push(ev.data);
+      totalBytes += ev.data.size;
+      if (totalBytes > 2.4 * 1024 * 1024 && recorder.state !== 'inactive') {
+        try { recorder.stop(); } catch (e) {}
+      }
+    }
+  };
+
+  return new Promise((resolve, reject) => {
+    let stopTimer = null;
+    const cleanup = () => {
+      if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
+      try { el.pause(); } catch (e) {}
+      URL.revokeObjectURL(objectUrl);
+      if (songBufferSource) { try { songBufferSource.stop(); } catch (e) {} songBufferSource = null; }
+      if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+    };
+    recorder.onstop = async () => {
+      cleanup();
+      const outMime = String(recorder.mimeType || mime || chunks[0]?.type || 'video/webm').split(';')[0];
+      const blob = new Blob(chunks, { type: outMime });
+      if (blob.size > 2.8 * 1024 * 1024) {
+        reject(new Error('Custom audio exceeds 2.8 MB after compression. Try a shorter clip.'));
+        return;
+      }
+      const dataUrl = await readFileAsDataUrlPromise(blob);
+      resolve({ dataUrl, mimeType: outMime });
+    };
+    recorder.onerror = () => {
+      cleanup();
+      reject(new Error('Audio encoding failed.'));
+    };
+
+    recorder.start(250);
+    if (songBufferSource) {
+      try { songBufferSource.start(0); } catch (e) {}
+    } else {
+      el.currentTime = 0;
+      el.play().catch(() => {});
+    }
+    stopTimer = setTimeout(() => {
+      if (recorder.state !== 'inactive') {
+        try { recorder.stop(); } catch (e) {}
+      }
+    }, Math.max(1000, Math.round(maxDur * 1000)));
+  });
+}
+
+async function uploadPlayAudioToGitHub(audioFile, songId) {
+  if (!sb || !currentUser?.id) throw new Error('Please sign in again before uploading.');
+  const mime = inferPlayAudioMimeType(audioFile);
+  if (mime && audioFile.size <= 2.65 * 1024 * 1024) {
+    let rawDataUrl = await readFileAsDataUrlPromise(audioFile);
+    if (!rawDataUrl.startsWith('data:audio/')) {
+      const idx = rawDataUrl.indexOf(',');
+      if (idx > 0) rawDataUrl = `data:${mime};base64,${rawDataUrl.slice(idx + 1)}`;
+    }
+    const { data, error } = await sb.functions.invoke('play-video-storage', {
+      body: { action: 'upload_audio', videoId: String(songId), dataUrl: rawDataUrl }
+    });
+    if (!error && data?.url && /^https:\/\/raw\.githubusercontent\.com\//i.test(data.url)) {
+      return data.url;
+    }
+  }
+  const encoded = await encodeAudioToMediaContainerDataUrl(audioFile);
+  return await uploadPlayVideoToGitHub(encoded.dataUrl, 'aud_' + String(songId));
+}
+
+async function maybeUploadVoiceoverToGitHub(voDataUrl, videoId) {
+  if (!voDataUrl) return '';
+  if (voDataUrl.startsWith('https://')) return voDataUrl;
+  try {
+    const resp = await fetch(voDataUrl);
+    const blob = await resp.blob();
+    const ext = String(blob.type || '').includes('mp4') ? 'm4a' : (String(blob.type || '').includes('ogg') ? 'ogg' : 'webm');
+    const file = new File([blob], `vo_${videoId}.${ext}`, { type: blob.type || 'audio/webm' });
+    return await uploadPlayAudioToGitHub(file, 'vo_' + String(videoId));
+  } catch (e) {
+    console.warn('Voiceover GitHub upload fallback:', e);
+    return voDataUrl;
+  }
+}
+
 async function deletePlayVideoFileFromGitHub(video) {
   if (!sb || !currentUser?.id || !video?.id || !video?.user_id) return;
   const { data, error } = await sb.functions.invoke('play-video-storage', {
     body: {
       action: 'delete',
       videoId: String(video.id),
-      ownerId: String(video.user_id)
+      ownerId: String(video.user_id),
+      ...(video.musicAudioId ? { audioId: String(video.musicAudioId) } : {})
     }
   });
   if (error) throw new Error(error.message || 'Could not remove the GitHub video file.');
@@ -8172,24 +9144,94 @@ function syncPlayUploadPreviewEffects() {
   if (!prev) return;
   const f = $('#playUploadFilterSelect')?.value || 'none';
   const spd = Math.min(2.5, Math.max(0.5, Number($('#playUploadSpeedSelect')?.value || 1)));
-  const muteOrig = Boolean($('#playUploadMuteOrigCheckbox')?.checked);
+  // If a custom song was baked into the video file, do not mute the preview's video audio track
+  const muteOrig = pendingUploadCustomSongFile ? false : Boolean($('#playUploadMuteOrigCheckbox')?.checked);
   prev.style.filter = getPlayVideoFilterCss(f);
   try { prev.playbackRate = spd; } catch (e) {}
   prev.muted = muteOrig;
 }
 
-async function openPlayVideoFileModal() {
+async function recompressPendingUploadVideo() {
+  const file = pendingUploadSourceVideoFile;
+  if (!file) return;
+  const myJobId = ++pendingUploadJobSeq;
+  const msgEl = $('#playUploadMsg');
+  const nameEl = $('#playUploadFileName');
+  const pubBtn = $('#publishPlayVideoFileBtn');
+  const prev = $('#playUploadPreviewVideo');
+  const hasCustom = Boolean(pendingUploadCustomSongFile);
+  const muteOrig = Boolean($('#playUploadMuteOrigCheckbox')?.checked);
+
+  pendingUploadVideoDataUrl = '';
+  pendingUploadVideoAspect = 9 / 16;
+  if (pubBtn) pubBtn.disabled = true;
+  if (msgEl) msgEl.textContent = '';
+
+  try {
+    pendingUploadBusy = true;
+    if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) {
+      throw new Error('This browser cannot safely compress videos to 340p. Please try an up-to-date Safari or Chrome browser.');
+    }
+    const labelVerb = hasCustom ? 'Baking custom song & compressing' : 'Optimizing';
+    if (nameEl) nameEl.textContent = `${labelVerb} ${file.name} to 340p... 0%`;
+    const res = await compressPlayVideoFile(
+      file,
+      pct => {
+        if (myJobId === pendingUploadJobSeq && nameEl) {
+          nameEl.textContent = `${labelVerb} ${file.name} to 340p... ${pct}%`;
+        }
+      },
+      {
+        customSongFile: pendingUploadCustomSongFile,
+        muteOriginal: muteOrig,
+        shouldAbort: () => myJobId !== pendingUploadJobSeq
+      }
+    );
+    if (myJobId !== pendingUploadJobSeq) return;
+    pendingUploadVideoDataUrl = res.dataUrl;
+    pendingUploadVideoAspect = res.aspectRatio;
+    if (nameEl) {
+      nameEl.textContent = hasCustom
+        ? `${file.name} · Ready (340p with custom song baked in!)`
+        : `${file.name} · Ready (340p, original audio where supported)!`;
+    }
+    if (prev && pendingUploadVideoDataUrl) {
+      prev.src = pendingUploadVideoDataUrl;
+      prev.classList.remove('hidden');
+      syncPlayUploadPreviewEffects();
+    }
+    if (pubBtn && pendingUploadVideoDataUrl) pubBtn.disabled = false;
+  } catch (err) {
+    if (myJobId === pendingUploadJobSeq && msgEl) {
+      msgEl.textContent = err?.message || 'Could not process video file.';
+    }
+  } finally {
+    if (myJobId === pendingUploadJobSeq) {
+      pendingUploadBusy = false;
+      updatePlayUploadFeeUi();
+    }
+  }
+}
+
+async function openPlayVideoFileModal(preloadedSong = null) {
   $('#playUploadChoiceModal')?.classList.add('hidden');
+  stopActivePlayMedia();
+  stopMusicPreviewAudio();
   stopVoiceoverRecorderIfActive();
   stopVoiceoverPreview();
+  stopCustomSongPreviewAudio();
   playVoiceoverState.uploadUrl = '';
   syncVoiceoverUi('upload');
 
+  pendingUploadJobSeq += 1;
+  pendingUploadSourceVideoFile = null;
+  pendingUploadCustomSongFile = preloadedSong?.file || null;
   pendingUploadVideoDataUrl = '';
   pendingUploadVideoAspect = 9 / 16;
   pendingUploadBusy = false;
   if ($('#playUploadTitleInput')) $('#playUploadTitleInput').value = '';
   if ($('#playUploadFileInput')) $('#playUploadFileInput').value = '';
+  if ($('#playUploadCustomSongInput')) $('#playUploadCustomSongInput').value = '';
   if ($('#playUploadFileName')) $('#playUploadFileName').textContent = 'No video selected';
   if ($('#playUploadMsg')) $('#playUploadMsg').textContent = '';
   if ($('#playUploadFilterSelect')) $('#playUploadFilterSelect').value = 'none';
@@ -8203,10 +9245,16 @@ async function openPlayVideoFileModal() {
   updatePlayUploadFeeUi();
   $('#playVideoFileModal')?.classList.remove('hidden');
   await populateMusicSelect($('#playUploadMusicSelect'), 'Original Video Audio (No extra music)');
+  if (!pendingUploadCustomSongFile && preloadedSong?.builtInTrackName && $('#playUploadMusicSelect')) {
+    $('#playUploadMusicSelect').value = preloadedSong.builtInTrackName;
+  }
+  syncCustomSongUi();
 }
 
 function closePlayVideoFileModal() {
+  pendingUploadJobSeq += 1;
   stopMusicPreviewAudio();
+  stopCustomSongPreviewAudio();
   stopVoiceoverRecorderIfActive();
   stopVoiceoverPreview();
   const prev = $('#playUploadPreviewVideo');
@@ -8214,53 +9262,82 @@ function closePlayVideoFileModal() {
   hideModalSmooth($('#playVideoFileModal'));
 }
 
-$('#playChooseUploadBtn')?.addEventListener('click', openPlayVideoFileModal);
+$('#playChooseUploadBtn')?.addEventListener('click', () => openPlayVideoFileModal());
 $('#closePlayVideoFileBtn')?.addEventListener('click', closePlayVideoFileModal);
 $('#cancelPlayVideoFileBtn')?.addEventListener('click', closePlayVideoFileModal);
 $('#playUploadFilterSelect')?.addEventListener('change', syncPlayUploadPreviewEffects);
 $('#playUploadSpeedSelect')?.addEventListener('change', syncPlayUploadPreviewEffects);
-$('#playUploadMuteOrigCheckbox')?.addEventListener('change', syncPlayUploadPreviewEffects);
+$('#playUploadMuteOrigCheckbox')?.addEventListener('change', () => {
+  if (pendingUploadCustomSongFile && pendingUploadSourceVideoFile) {
+    recompressPendingUploadVideo();
+  } else {
+    syncPlayUploadPreviewEffects();
+  }
+});
 $('#playUploadMusicPreviewBtn')?.addEventListener('click', () => {
   playSelectedMusicPreview($('#playUploadMusicSelect'), $('#playUploadMusicPreviewBtn'));
 });
 
+$('#playUploadCustomSongInput')?.addEventListener('change', async e => {
+  const audioFile = e.target.files?.[0];
+  stopCustomSongPreviewAudio();
+  if (!audioFile) return;
+  if (audioFile.size > 25 * 1024 * 1024) {
+    toast('Custom song file must be under 25 MB.');
+    e.target.value = '';
+    return;
+  }
+  stopMusicPreviewAudio();
+  pendingUploadCustomSongFile = audioFile;
+  syncCustomSongUi();
+  toast(`Selected custom song: ${audioFile.name}`);
+  if (pendingUploadSourceVideoFile) {
+    await recompressPendingUploadVideo();
+  }
+});
+
+$('#playUploadCustomSongPreviewBtn')?.addEventListener('click', () => {
+  if (pendingUploadCustomSongPreviewAudio) {
+    stopCustomSongPreviewAudio();
+    return;
+  }
+  if (!pendingUploadCustomSongFile) return;
+  stopMusicPreviewAudio();
+  const objUrl = URL.createObjectURL(pendingUploadCustomSongFile);
+  const audio = new Audio(objUrl);
+  audio.loop = true;
+  audio.volume = 0.72;
+  pendingUploadCustomSongPreviewUrl = objUrl;
+  pendingUploadCustomSongPreviewAudio = audio;
+  const prevBtn = $('#playUploadCustomSongPreviewBtn');
+  if (prevBtn) prevBtn.textContent = '■ Stop';
+  audio.play().catch(() => toast('Tap again to preview custom song'));
+});
+
+$('#playUploadCustomSongClearBtn')?.addEventListener('click', async () => {
+  stopCustomSongPreviewAudio();
+  const hadSong = Boolean(pendingUploadCustomSongFile);
+  pendingUploadCustomSongFile = null;
+  if ($('#playUploadCustomSongInput')) $('#playUploadCustomSongInput').value = '';
+  syncCustomSongUi();
+  if (hadSong && pendingUploadSourceVideoFile) {
+    await recompressPendingUploadVideo();
+  }
+});
+
 $('#playUploadFileInput')?.addEventListener('change', async e => {
   const file = e.target.files?.[0];
-  const msgEl = $('#playUploadMsg');
-  const nameEl = $('#playUploadFileName');
-  const pubBtn = $('#publishPlayVideoFileBtn');
-  const prev = $('#playUploadPreviewVideo');
-  pendingUploadVideoDataUrl = '';
-  pendingUploadVideoAspect = 9 / 16;
-  if (pubBtn) pubBtn.disabled = true;
-  if (!file) return;
-  if (msgEl) msgEl.textContent = '';
-  if (nameEl) nameEl.textContent = `${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`;
-
-  try {
-    pendingUploadBusy = true;
-    if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) {
-      throw new Error('This browser cannot safely compress videos to 340p. Please try an up-to-date Safari or Chrome browser.');
-    }
-    if (nameEl) nameEl.textContent = `Optimizing ${file.name} to 340p... 0%`;
-    const res = await compressPlayVideoFile(file, pct => {
-      if (nameEl) nameEl.textContent = `Optimizing ${file.name} to 340p... ${pct}%`;
-    });
-    pendingUploadVideoDataUrl = res.dataUrl;
-    pendingUploadVideoAspect = res.aspectRatio;
-    if (nameEl) nameEl.textContent = `${file.name} · Ready (340p, original audio where supported)!`;
-    if (prev && pendingUploadVideoDataUrl) {
-      prev.src = pendingUploadVideoDataUrl;
-      prev.classList.remove('hidden');
-      syncPlayUploadPreviewEffects();
-    }
-    if (pubBtn && pendingUploadVideoDataUrl) pubBtn.disabled = false;
-  } catch (err) {
-    if (msgEl) msgEl.textContent = err?.message || 'Could not process video file.';
-  } finally {
-    pendingUploadBusy = false;
-    updatePlayUploadFeeUi();
+  pendingUploadSourceVideoFile = file || null;
+  if (!file) {
+    pendingUploadVideoDataUrl = '';
+    pendingUploadVideoAspect = 9 / 16;
+    if ($('#publishPlayVideoFileBtn')) $('#publishPlayVideoFileBtn').disabled = true;
+    return;
   }
+  if ($('#playUploadFileName')) {
+    $('#playUploadFileName').textContent = `${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`;
+  }
+  await recompressPendingUploadVideo();
 });
 
 $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
@@ -8283,16 +9360,34 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
     return;
   }
 
-  const musicName = $('#playUploadMusicSelect')?.value || '';
-  const track = musicName ? (musicCache || []).find(t => t.name === musicName) : null;
+  const hasBakedSong = Boolean(pendingUploadCustomSongFile);
+  const musicName = hasBakedSong
+    ? cleanMediaDisplayName(pendingUploadCustomSongFile.name)
+    : ($('#playUploadMusicSelect')?.value || '');
+  const track = !hasBakedSong && musicName ? (musicCache || []).find(t => t.name === musicName) : null;
   const linkedId = $('#playUploadCoinSelect')?.value || '';
   const linkedCoin = linkedId ? (coins || []).find(c => String(c.id) === String(linkedId)) : null;
-  const voUrl = playVoiceoverState.uploadUrl || '';
+  const rawVoUrl = playVoiceoverState.uploadUrl || '';
+  let voUrl = rawVoUrl;
   const newVidId = 'pvid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
   let githubVideoUrl = '';
+  let sharedAudioUrl = '';
+  let sharedAudioId = '';
   try {
     if (msgEl) msgEl.textContent = 'Uploading compressed video to GRIND...';
     githubVideoUrl = await uploadPlayVideoToGitHub(pendingUploadVideoDataUrl, newVidId);
+    if (hasBakedSong) {
+      try {
+        sharedAudioId = 'paud_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+        sharedAudioUrl = await uploadPlayAudioToGitHub(pendingUploadCustomSongFile, sharedAudioId);
+      } catch (audioShareErr) {
+        sharedAudioUrl = '';
+        sharedAudioId = '';
+      }
+    }
+    if (rawVoUrl && rawVoUrl.startsWith('data:audio/') && typeof maybeUploadVoiceoverToGitHub === 'function') {
+      voUrl = await maybeUploadVoiceoverToGitHub(rawVoUrl, newVidId);
+    }
   } catch (uploadError) {
     if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
     pubBtn.disabled = false;
@@ -8310,10 +9405,12 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
     videoUrl: githubVideoUrl,
     videoFilter: $('#playUploadFilterSelect')?.value || 'none',
     playbackRate: Math.min(2.5, Math.max(0.5, Number($('#playUploadSpeedSelect')?.value || 1))),
-    muteOriginal: Boolean($('#playUploadMuteOrigCheckbox')?.checked),
-    musicName: track ? track.name : '',
-    musicUrl: track ? track.url : '',
-    musicFallbackUrl: track ? (track.fallbackUrl || '') : '',
+    muteOriginal: hasBakedSong ? false : Boolean($('#playUploadMuteOrigCheckbox')?.checked),
+    musicName: hasBakedSong ? musicName : (track ? track.name : ''),
+    musicUrl: hasBakedSong ? sharedAudioUrl : (track ? track.url : ''),
+    musicFallbackUrl: hasBakedSong ? '' : (track ? (track.fallbackUrl || '') : ''),
+    ...(hasBakedSong ? { musicBakedInVideo: true } : {}),
+    ...(sharedAudioId ? { musicAudioId: sharedAudioId } : {}),
     ...(voUrl ? { voiceoverUrl: voUrl } : {}),
     ...(linkedCoin ? { linkedCoinId: String(linkedCoin.id), linkedCoinName: linkedCoin.name, linkedCoinTicker: linkedCoin.ticker } : {}),
     ts: Date.now()
@@ -8328,7 +9425,7 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
   pubBtn.disabled = false;
   updatePlayUploadFeeUi();
   if (error) {
-    try { await deletePlayVideoFileFromGitHub({ id: newVidId, user_id: currentUser.id }); } catch (cleanupError) {}
+    try { await deletePlayVideoFileFromGitHub({ id: newVidId, user_id: currentUser.id, musicAudioId: sharedAudioId }); } catch (cleanupError) {}
     if (feeRes.charged > 0) await refundPlayUploadFee(feeRes.charged);
     if (msgEl) msgEl.textContent = 'Upload failed: ' + error.message;
     return;
@@ -8339,6 +9436,216 @@ $('#publishPlayVideoFileBtn')?.addEventListener('click', async () => {
   await loadPlayData(true);
   renderAccountPlayVideos();
   openPlayAtVideo(newVidId);
+});
+
+// ---------- Use / Download Sound Modal (from bottom-corner PLAY song button) ----------
+const playUseSongState = {
+  videoId: '',
+  songTitle: '',
+  creatorName: '',
+  sourceUrl: '',
+  fallbackUrl: '',
+  builtInTrackName: '',
+  downloadedFile: null,
+  downloading: false,
+  previewEl: null,
+  previewObjUrl: ''
+};
+
+function stopPlayUseSongPreview() {
+  if (playUseSongState.previewEl) {
+    try { playUseSongState.previewEl.pause(); } catch (e) {}
+    playUseSongState.previewEl = null;
+  }
+  if (playUseSongState.previewObjUrl) {
+    try { URL.revokeObjectURL(playUseSongState.previewObjUrl); } catch (e) {}
+    playUseSongState.previewObjUrl = '';
+  }
+  const btn = $('#playUseSongPreviewBtn');
+  if (btn) btn.textContent = '▶ Preview Sound';
+}
+
+function closePlayUseSongModal() {
+  stopPlayUseSongPreview();
+  hideModalSmooth($('#playUseSongModal'));
+}
+
+async function ensurePlayUseSongDownloadedFile() {
+  if (playUseSongState.downloadedFile) return playUseSongState.downloadedFile;
+  const candidates = [playUseSongState.sourceUrl, playUseSongState.fallbackUrl].filter(Boolean);
+  if (!candidates.length) {
+    throw new Error('This video has no downloadable audio URL.');
+  }
+  let lastErr = null;
+  for (const url of candidates) {
+    try {
+      const resp = await fetch(url, { mode: 'cors' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const rawType = String(blob.type || '').split(';')[0] || 'audio/mpeg';
+      const extFromUrl = (url.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1] || '').toLowerCase();
+      const extMap = { 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/mp4': 'm4a', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/webm': 'webm', 'video/webm': 'webm', 'video/mp4': 'mp4' };
+      const ext = extFromUrl || extMap[rawType] || 'mp3';
+      const safeBase = (playUseSongState.songTitle || 'grind_sound').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 42) || 'grind_sound';
+      const file = new File([blob], `${safeBase}.${ext}`, { type: rawType });
+      playUseSongState.downloadedFile = file;
+      return file;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('Could not download sound.');
+}
+
+async function openPlayUseSongModal(videoId) {
+  const vid = playState.videosById.get(String(videoId));
+  if (!vid || !vid.musicName) return;
+
+  stopPlayUseSongPreview();
+  const title = cleanMediaDisplayName(vid.musicName) || 'Sound';
+  const creator = vid.profile?.username || 'Creator';
+  const builtInMatch = (musicCache || []).find(t => t.name === vid.musicName || cleanMediaDisplayName(t.name) === title);
+  const srcUrl = vid.musicUrl || builtInMatch?.url || (vid.kind === 'video' ? vid.videoUrl : '');
+  const fbUrl = vid.musicFallbackUrl || builtInMatch?.fallbackUrl || '';
+
+  playUseSongState.videoId = vid.id;
+  playUseSongState.songTitle = title;
+  playUseSongState.creatorName = creator;
+  playUseSongState.sourceUrl = srcUrl;
+  playUseSongState.fallbackUrl = fbUrl;
+  playUseSongState.builtInTrackName = builtInMatch && !/^https:\/\/raw\.githubusercontent\.com\/.+\/(?:PLAY|PLAY_AUDIO)\//i.test(String(srcUrl || '')) ? builtInMatch.name : '';
+  playUseSongState.downloadedFile = null;
+  playUseSongState.downloading = true;
+
+  if ($('#playUseSongHeading')) $('#playUseSongHeading').textContent = `♫ ${title}`;
+  if ($('#playUseSongSub')) $('#playUseSongSub').textContent = `Used by @${creator}`;
+  if ($('#playUseSongMsg')) $('#playUseSongMsg').textContent = '';
+  if ($('#playUseSongStatus')) $('#playUseSongStatus').textContent = 'Downloading sound from GitHub...';
+  if ($('#playUseSongDownloadBtn')) $('#playUseSongDownloadBtn').disabled = true;
+  $('#playUseSongModal')?.classList.remove('hidden');
+
+  try {
+    const file = await ensurePlayUseSongDownloadedFile();
+    if (playUseSongState.videoId !== vid.id) return;
+    playUseSongState.downloading = false;
+    const kb = Math.max(1, Math.round(file.size / 1024));
+    if ($('#playUseSongStatus')) {
+      $('#playUseSongStatus').textContent = `Downloaded (${kb} KB) — ready to preview, save, or use in your video!`;
+    }
+    if ($('#playUseSongDownloadBtn')) $('#playUseSongDownloadBtn').disabled = false;
+  } catch (err) {
+    if (playUseSongState.videoId !== vid.id) return;
+    playUseSongState.downloading = false;
+    if ($('#playUseSongStatus')) $('#playUseSongStatus').textContent = 'Ready — click Preview or Use Sound.';
+    if ($('#playUseSongDownloadBtn')) $('#playUseSongDownloadBtn').disabled = false;
+    if ($('#playUseSongMsg')) $('#playUseSongMsg').textContent = err?.message || '';
+  }
+}
+
+$('#closePlayUseSongBtn')?.addEventListener('click', closePlayUseSongModal);
+$('#playUseSongModal')?.addEventListener('click', e => {
+  if (e.target === $('#playUseSongModal')) closePlayUseSongModal();
+});
+
+$('#playUseSongPreviewBtn')?.addEventListener('click', () => {
+  if (playUseSongState.previewEl) {
+    stopPlayUseSongPreview();
+    return;
+  }
+  stopActivePlayMedia();
+  const prevBtn = $('#playUseSongPreviewBtn');
+  let url = playUseSongState.sourceUrl;
+  if (playUseSongState.downloadedFile) {
+    const objUrl = URL.createObjectURL(playUseSongState.downloadedFile);
+    playUseSongState.previewObjUrl = objUrl;
+    url = objUrl;
+  }
+  if (!url) return toast('No audio preview available');
+  const el = createPlayableAudioElement(url, playUseSongState.fallbackUrl);
+  el.loop = true;
+  el.volume = 0.72;
+  playUseSongState.previewEl = el;
+  if (prevBtn) prevBtn.textContent = '■ Stop';
+  el.play().catch(() => toast('Tap again to preview sound'));
+});
+
+$('#playUseSongDownloadBtn')?.addEventListener('click', async () => {
+  const msgEl = $('#playUseSongMsg');
+  const dlBtn = $('#playUseSongDownloadBtn');
+  if (msgEl) msgEl.textContent = '';
+  if (dlBtn) { dlBtn.disabled = true; dlBtn.textContent = 'Downloading...'; }
+  try {
+    const file = await ensurePlayUseSongDownloadedFile();
+    const objUrl = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = objUrl;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => { try { URL.revokeObjectURL(objUrl); } catch (e) {} }, 2500);
+    toast(`Downloaded ${file.name}`);
+  } catch (err) {
+    if (msgEl) msgEl.textContent = err?.message || 'Download failed.';
+  } finally {
+    if (dlBtn) { dlBtn.disabled = false; dlBtn.textContent = '⬇ Download Audio'; }
+  }
+});
+
+$('#playUseSongInEditorBtn')?.addEventListener('click', async () => {
+  if (!currentUser) {
+    closePlayUseSongModal();
+    toast('Sign in to create a video with this sound!');
+    return;
+  }
+  const msgEl = $('#playUseSongMsg');
+  const btn = $('#playUseSongInEditorBtn');
+  if (msgEl) msgEl.textContent = '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading Sound...'; }
+  try {
+    const builtIn = playUseSongState.builtInTrackName;
+    const file = builtIn ? null : await ensurePlayUseSongDownloadedFile();
+    const songName = playUseSongState.songTitle;
+    closePlayUseSongModal();
+    await openPlayCreatorStudio({
+      file,
+      name: songName,
+      builtInTrackName: builtIn || ''
+    });
+    toast(`♫ "${songName}" ready in Video Editor!`);
+  } catch (err) {
+    if (msgEl) msgEl.textContent = err?.message || 'Could not load sound into Video Editor.';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🎬 Use in Video Editor'; }
+  }
+});
+
+$('#playUseSongInUploadBtn')?.addEventListener('click', async () => {
+  if (!currentUser) {
+    closePlayUseSongModal();
+    toast('Sign in to upload a video with this sound!');
+    return;
+  }
+  const msgEl = $('#playUseSongMsg');
+  const btn = $('#playUseSongInUploadBtn');
+  if (msgEl) msgEl.textContent = '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading Sound...'; }
+  try {
+    const builtIn = playUseSongState.builtInTrackName;
+    const file = builtIn ? null : await ensurePlayUseSongDownloadedFile();
+    const songName = playUseSongState.songTitle;
+    closePlayUseSongModal();
+    await openPlayVideoFileModal({
+      file,
+      name: songName,
+      builtInTrackName: builtIn || ''
+    });
+    toast(`♫ "${songName}" ready in Upload Video!`);
+  } catch (err) {
+    if (msgEl) msgEl.textContent = err?.message || 'Could not load sound into Upload Video.';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '📤 Use in Upload Video'; }
+  }
 });
 
 // ---------- Username (Account menu) ----------
@@ -8360,6 +9667,7 @@ $('#saveUsernameBtn')?.addEventListener('click', async () => {
   const { error } = await sb.from('profiles').update({ username: name }).eq('id', currentUser.id);
   if (error) { msg.textContent = error.code === '23505' ? 'That username is taken.' : error.message; return; }
   currentUser.username = name;
+  saveSharedProfileToCache(currentUser);
   msg.textContent = '';
   updateUIProfile();
   toast('Username saved!');
@@ -8373,6 +9681,7 @@ $('#profileImage')?.addEventListener('change', async (e) => {
     const { error } = await sb.from('profiles').update({ avatar_url: dataUrl }).eq('id', currentUser.id);
     if (!error) {
       currentUser.avatar_url = dataUrl;
+      saveSharedProfileToCache(currentUser);
       updateUIProfile();
       toast('Profile picture updated!');
     } else {
@@ -8753,17 +10062,17 @@ async function loadLiveFeed() {
 
   let tradesQ = sb
     .from('trades')
-    .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, image_url, creator_id), profiles(id, username, avatar_url, is_premium)')
+    .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, creator_id), profiles(id, username, is_premium)')
     .order('created_at', { ascending: false })
     .limit(60);
   let coinsQ = sb
     .from('coins')
-    .select('id, name, ticker, price, image_url, creator_id, created_at, profiles!coins_creator_id_fkey(id, username, avatar_url, is_premium)')
+    .select('id, name, ticker, price, creator_id, created_at, profiles!coins_creator_id_fkey(id, username, is_premium)')
     .order('created_at', { ascending: false })
     .limit(40);
   let myTradesQ = currentUser
     ? sb.from('trades')
-        .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, image_url, creator_id), profiles(id, username, avatar_url, is_premium)')
+        .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, creator_id), profiles(id, username, is_premium)')
         .eq('user_id', currentUser.id)
         .order('created_at', { ascending: false })
         .limit(60)
@@ -8771,7 +10080,7 @@ async function loadLiveFeed() {
   const myCoinIds = coins.filter(c => currentUser && c.creator_id === currentUser.id).map(c => c.id);
   let myCoinTradesQ = (currentUser && myCoinIds.length)
     ? sb.from('trades')
-        .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, image_url, creator_id), profiles(id, username, avatar_url, is_premium)')
+        .select('id, coin_id, user_id, type, amount_usd, price_after, created_at, coins(id, name, ticker, price, creator_id), profiles(id, username, is_premium)')
         .in('coin_id', myCoinIds)
         .order('created_at', { ascending: false })
         .limit(60)
@@ -8785,12 +10094,26 @@ async function loadLiveFeed() {
     if (currentUser && myCoinIds.length) myCoinTradesQ = myCoinTradesQ.gt('created_at', srvIso);
   }
 
-  let [tRes, cRes, pRes, mtRes, mctRes] = await Promise.all([
+  let lpQ = sb.from('premium_requests')
+    .select('id, user_id, reason, created_at, profiles(id, username, is_premium)')
+    .like('reason', '__LIVE_POST__:%')
+    .order('created_at', { ascending: false })
+    .limit(40);
+  if (srvResetTs > 0) {
+    lpQ = lpQ.gt('created_at', new Date(srvResetTs).toISOString());
+  }
+
+  const safeQuery = async q => {
+    try { return (await q) || { data: [] }; } catch (e) { return { data: [] }; }
+  };
+
+  let [tRes, cRes, mtRes, mctRes, lpRes] = await Promise.all([
     tradesQ,
     coinsQ,
-    sb.from('profiles').select('id, username, avatar_url, is_premium').limit(500),
     myTradesQ,
-    myCoinTradesQ
+    myCoinTradesQ,
+    safeQuery(lpQ),
+    typeof loadPlayData === 'function' ? loadPlayData(false) : Promise.resolve()
   ]);
 
   if (tRes.error) {
@@ -8799,19 +10122,55 @@ async function loadLiveFeed() {
     tRes = await fallbackT;
   }
   if (cRes.error) {
-    let fallbackC = sb.from('coins').select('id, name, ticker, price, image_url, creator_id, created_at').order('created_at', { ascending: false }).limit(40);
+    let fallbackC = sb.from('coins').select('id, name, ticker, price, creator_id, created_at').order('created_at', { ascending: false }).limit(40);
     if (srvResetTs > 0) fallbackC = fallbackC.gt('created_at', new Date(srvResetTs).toISOString());
     cRes = await fallbackC;
   }
+  if (lpRes.error) {
+    let fbLp = sb.from('premium_requests')
+      .select('id, user_id, reason, created_at')
+      .like('reason', '__LIVE_POST__:%')
+      .order('created_at', { ascending: false })
+      .limit(40);
+    if (srvResetTs > 0) fbLp = fbLp.gt('created_at', new Date(srvResetTs).toISOString());
+    lpRes = await safeQuery(fbLp);
+  }
 
-  const profMap = new Map();
-  (pRes?.data || []).forEach(p => {
-    if (p?.id) profMap.set(String(p.id), p);
+  // Hydrate missing profile avatars and missing coin logos via shared caches
+  const liveUserIds = [];
+  [tRes?.data, mtRes?.data, mctRes?.data, lpRes?.data].forEach(arr => {
+    (arr || []).forEach(r => { if (r?.user_id) liveUserIds.push(r.user_id); });
   });
+  (cRes?.data || []).forEach(c => { if (c?.creator_id) liveUserIds.push(c.creator_id); });
+  (playState.donations || []).forEach(d => {
+    if (d.fromUserId) liveUserIds.push(d.fromUserId);
+    if (d.toUserId) liveUserIds.push(d.toUserId);
+  });
+
+  const missingCoinImgIds = (cRes?.data || [])
+    .map(c => c?.id)
+    .filter(cid => cid && !sharedCoinImagesCache.has(String(cid)));
+
+  await Promise.all([
+    ensureProfilesCached(liveUserIds),
+    missingCoinImgIds.length
+      ? sb.from('coins').select('id, image_url').in('id', missingCoinImgIds).then(({ data }) => {
+          (data || []).forEach(r => saveSharedCoinImageToCache(r.id, r.image_url));
+        }).catch(() => {})
+      : Promise.resolve()
+  ]);
+
   const coinMap = new Map();
   coins.forEach(c => coinMap.set(String(c.id), c));
   (cRes?.data || []).forEach(c => {
-    if (c?.id && !coinMap.has(String(c.id))) coinMap.set(String(c.id), c);
+    if (!c?.id) return;
+    const cid = String(c.id);
+    if (!coinMap.has(cid)) {
+      coinMap.set(cid, {
+        ...c,
+        image_url: sharedCoinImagesCache.get(cid) ?? c.image_url ?? null
+      });
+    }
   });
 
   const seenKeys = new Set();
@@ -8822,9 +10181,13 @@ async function loadLiveFeed() {
     const cid = String(t.coin_id || '');
     const uid = String(t.user_id || '');
     if (!cid || delCoins.has(cid) || (uid && delUsers.has(uid))) return;
-    const cObj = t.coins || coinMap.get(cid);
-    if (!cObj) return;
-    const pObj = t.profiles || profMap.get(uid) || { id: uid, username: 'Trader' };
+    const rawCoin = coinMap.get(cid) || t.coins;
+    if (!rawCoin) return;
+    const cObj = {
+      ...rawCoin,
+      image_url: rawCoin.image_url !== undefined ? rawCoin.image_url : (sharedCoinImagesCache.get(cid) ?? null)
+    };
+    const pObj = getCachedProfile(uid, t.profiles);
     const ts = t.created_at ? new Date(t.created_at).getTime() : Date.now();
     if (srvResetTs && ts <= srvResetTs) return;
     seenKeys.add(tidKey);
@@ -8856,7 +10219,8 @@ async function loadLiveFeed() {
     const cKey = 'coin_' + cid;
     if (seenKeys.has(cKey)) return;
     seenKeys.add(cKey);
-    const pObj = c.profiles || profMap.get(uid) || { id: uid, username: 'Trader' };
+    const hydratedCoin = coinMap.get(cid) || { ...c, image_url: sharedCoinImagesCache.get(cid) ?? null };
+    const pObj = getCachedProfile(uid, c.profiles);
     const ts = c.created_at ? new Date(c.created_at).getTime() : Date.now();
     if (srvResetTs && ts <= srvResetTs) return;
     const isSelf = currentUser && uid === String(currentUser.id);
@@ -8865,60 +10229,13 @@ async function loadLiveFeed() {
       ts,
       userId: uid,
       profile: pObj,
-      coin: c,
+      coin: hydratedCoin,
       price: Number(c.price || 1),
       isPersonal: Boolean(isSelf),
       isSelf: Boolean(isSelf),
       isMyCoin: Boolean(isSelf)
     });
   });
-
-  let lpRes = { data: [] };
-  let playLiveRes = { data: [] };
-  try {
-    let lpQ = sb.from('premium_requests')
-      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
-      .like('reason', '__LIVE_POST__:%')
-      .order('created_at', { ascending: false })
-      .limit(40);
-    if (srvResetTs > 0) {
-      lpQ = lpQ.gt('created_at', new Date(srvResetTs).toISOString());
-    }
-
-    const playLiveQ = sb.from('premium_requests')
-      .select('id, user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
-      .like('reason', '__PLAY_%')
-      .order('created_at', { ascending: true })
-      .limit(1200);
-
-    const safeQuery = async q => {
-      try {
-        return (await q) || { data: [] };
-      } catch (e) {
-        return { data: [] };
-      }
-    };
-
-    [lpRes, playLiveRes] = await Promise.all([safeQuery(lpQ), safeQuery(playLiveQ)]);
-
-    if (lpRes.error) {
-      let fbLp = sb.from('premium_requests')
-        .select('id, user_id, reason, created_at')
-        .like('reason', '__LIVE_POST__:%')
-        .order('created_at', { ascending: false })
-        .limit(40);
-      if (srvResetTs > 0) fbLp = fbLp.gt('created_at', new Date(srvResetTs).toISOString());
-      lpRes = await safeQuery(fbLp);
-    }
-    if (playLiveRes.error) {
-      const fbPlayLive = sb.from('premium_requests')
-        .select('id, user_id, reason, created_at')
-        .like('reason', '__PLAY_%')
-        .order('created_at', { ascending: true })
-        .limit(1200);
-      playLiveRes = await safeQuery(fbPlayLive);
-    }
-  } catch (e) {}
 
   const postRows = lpRes?.data || [];
   postRows.forEach(r => {
@@ -8937,10 +10254,10 @@ async function loadLiveFeed() {
         id: cid,
         name: parsed.coin_name || 'Coin',
         ticker: parsed.coin_ticker || 'COIN',
-        image_url: parsed.coin_image || null,
+        image_url: parsed.coin_image || sharedCoinImagesCache.get(cid) || null,
         price: 1
       };
-      const pObj = r.profiles || profMap.get(uid) || { id: uid, username: 'Trader' };
+      const pObj = getCachedProfile(uid, r.profiles);
       const isSelf = currentUser && uid === String(currentUser.id);
       const isMyCoin = currentUser && String(cObj.creator_id || '') === String(currentUser.id);
       events.push({
@@ -8959,85 +10276,48 @@ async function loadLiveFeed() {
     } catch (e) {}
   });
 
-  // Also include all active User Play Videos & Play Donations in LIVE
-  const livePlayVideos = new Map();
-  const liveDeletedVids = new Set();
-  const liveDonates = [];
-  (playLiveRes?.data || []).forEach(r => {
-    const reason = String(r.reason || '');
-    const uid = String(r.user_id || '');
-    const rowTs = r.created_at ? new Date(r.created_at).getTime() : Date.now();
-    if (!uid) return;
-    if (reason.startsWith('__PLAY_VID__:')) {
-      try {
-        const p = JSON.parse(reason.slice('__PLAY_VID__:'.length));
-        if (!p?.id) return;
-        livePlayVideos.set(String(p.id), {
-          id: String(p.id),
-          user_id: uid,
-          kind: p.kind === 'video' ? 'video' : 'scene',
-          title: String(p.title || '').slice(0, 80) || (p.kind === 'video' ? 'Uploaded Video' : 'Play Short'),
-          ts: Number(p.ts) || rowTs,
-          profile: r.profiles || profMap.get(uid) || { id: uid, username: 'Trader' }
-        });
-      } catch (e) {}
-    } else if (reason.startsWith('__PLAY_DEL__:')) {
-      try {
-        const p = JSON.parse(reason.slice('__PLAY_DEL__:'.length));
-        if (p?.videoId) liveDeletedVids.add(String(p.videoId));
-      } catch (e) {}
-    } else if (reason.startsWith('__PLAY_DONATE__:')) {
-      try {
-        const p = JSON.parse(reason.slice('__PLAY_DONATE__:'.length));
-        const amt = Number(p?.amount || 0);
-        if (!p?.id || !p?.toUserId || !Number.isFinite(amt) || amt <= 0) return;
-        const ts = Number(p.ts) || rowTs;
-        if (srvResetTs > 0 && ts <= srvResetTs) return;
-        liveDonates.push({
-          id: String(p.id),
-          fromUserId: uid,
-          fromProfile: r.profiles || profMap.get(uid) || { id: uid, username: 'Trader' },
-          toUserId: String(p.toUserId),
-          toProfile: profMap.get(String(p.toUserId)) || { id: String(p.toUserId), username: p.toUsername || 'Creator' },
-          videoId: p.videoId ? String(p.videoId) : '',
-          videoTitle: String(p.videoTitle || 'Play Video').slice(0, 80),
-          amount: Math.round(amt * 100) / 100,
-          note: String(p.note || '').slice(0, 120),
-          ts
-        });
-      } catch (e) {}
-    }
-  });
-
-  livePlayVideos.forEach((v, vidId) => {
-    if (liveDeletedVids.has(vidId) || delUsers.has(v.user_id)) return;
-    const vKey = 'playvid_' + vidId;
+  // Reuse already-synced & incrementally cached Play Videos & Donations (no duplicate 1,200-row scan!)
+  (playState.videos || []).forEach(v => {
+    if (!v?.id || delUsers.has(String(v.user_id))) return;
+    if (srvResetTs > 0 && Number(v.ts || 0) <= srvResetTs) return;
+    const vKey = 'playvid_' + String(v.id);
     if (seenKeys.has(vKey)) return;
     seenKeys.add(vKey);
-    const isSelf = currentUser && v.user_id === String(currentUser.id);
+    const isSelf = currentUser && String(v.user_id) === String(currentUser.id);
     events.push({
       kind: 'play_video',
-      ts: v.ts,
-      userId: v.user_id,
-      profile: v.profile,
-      video: v,
+      ts: Number(v.ts || 0),
+      userId: String(v.user_id),
+      profile: getCachedProfile(v.user_id, v.profile),
+      video: {
+        id: String(v.id),
+        user_id: String(v.user_id),
+        kind: v.kind === 'video' ? 'video' : 'scene',
+        title: v.title || (v.kind === 'video' ? 'Uploaded Video' : 'Play Short'),
+        ts: Number(v.ts || 0)
+      },
       isPersonal: Boolean(isSelf),
       isSelf: Boolean(isSelf)
     });
   });
 
-  liveDonates.forEach(d => {
-    if (delUsers.has(d.fromUserId) || delUsers.has(d.toUserId)) return;
-    const dKey = 'playdon_' + d.id;
+  (playState.donations || []).forEach(d => {
+    if (!d?.id || delUsers.has(String(d.fromUserId)) || delUsers.has(String(d.toUserId))) return;
+    if (srvResetTs > 0 && Number(d.ts || 0) <= srvResetTs) return;
+    const dKey = 'playdon_' + String(d.id);
     if (seenKeys.has(dKey)) return;
     seenKeys.add(dKey);
-    const isSelf = currentUser && (d.fromUserId === String(currentUser.id) || d.toUserId === String(currentUser.id));
+    const isSelf = currentUser && (String(d.fromUserId) === String(currentUser.id) || String(d.toUserId) === String(currentUser.id));
     events.push({
       kind: 'play_donate',
-      ts: d.ts,
-      userId: d.fromUserId,
-      profile: d.fromProfile,
-      donate: d,
+      ts: Number(d.ts || 0),
+      userId: String(d.fromUserId),
+      profile: getCachedProfile(d.fromUserId, d.fromProfile),
+      donate: {
+        ...d,
+        fromProfile: getCachedProfile(d.fromUserId, d.fromProfile),
+        toProfile: getCachedProfile(d.toUserId, { id: d.toUserId, username: d.toUsername || 'Creator' })
+      },
       isPersonal: Boolean(isSelf),
       isSelf: Boolean(isSelf)
     });
@@ -9394,20 +10674,27 @@ async function _fetchUserNotificationsFresh() {
   const delCoins = adminModStateCache.deletedCoinIds || new Set();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
 
+  // Never query __PLAY_VID__ or data:video/ blobs in notifications; read video titles from cached playState!
   const [updatesList, coinsRes, cmtRes, playRes] = await Promise.all([
     fetchActiveUpdates(),
     sb.from('coins').select('id, name, ticker, creator_id, created_at').limit(500),
     sb.from('premium_requests')
-      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
+      .select('user_id, reason, created_at, profiles(id, username, is_premium)')
       .like('reason', '__CMT_%')
       .order('created_at', { ascending: true })
       .limit(1000),
     sb.from('premium_requests')
-      .select('user_id, reason, created_at, profiles(id, username, avatar_url, is_premium)')
-      .like('reason', '__PLAY_%')
+      .select('user_id, reason, created_at, profiles(id, username, is_premium)')
+      .or('reason.like.__PLAY_VOTE__:%,reason.like.__PLAY_CMT__:%,reason.like.__PLAY_CMT_DEL__:%,reason.like.__PLAY_FOLLOW__:%,reason.like.__PLAY_DONATE__:%,reason.like.__PLAY_DEL__:%')
       .order('created_at', { ascending: true })
-      .limit(2000)
+      .limit(2000),
+    typeof loadPlayData === 'function' ? loadPlayData(false) : Promise.resolve()
   ]);
+
+  const notifUids = [];
+  (cmtRes?.data || []).forEach(r => { if (r?.user_id) notifUids.push(r.user_id); });
+  (playRes?.data || []).forEach(r => { if (r?.user_id) notifUids.push(r.user_id); });
+  await ensureProfilesCached(notifUids);
 
   const items = [];
 
@@ -9469,7 +10756,7 @@ async function _fetchUserNotificationsFresh() {
           replyToUserId: p.reply_to_user_id ? String(p.reply_to_user_id) : null,
           text: cleanText || (hasGif ? 'Sent a GIF' : ''),
           ts,
-          profile: r.profiles || { id: r.user_id, username: 'Trader' }
+          profile: getCachedProfile(r.user_id, r.profiles)
         });
       } catch (e) {}
     } else if (reason.startsWith('__CMT_DEL__:')) {
@@ -9522,7 +10809,15 @@ async function _fetchUserNotificationsFresh() {
 
   // 5. Play Video Likes, Followers, Video Comments, and Creator Donations
   const playVideosMap = new Map();
-  const deletedPlayVidIds = new Set();
+  (playState.videos || []).forEach(v => {
+    playVideosMap.set(String(v.id), {
+      id: String(v.id),
+      userId: String(v.user_id),
+      title: String(v.title || '').slice(0, 80) || (v.kind === 'video' ? 'Uploaded Video' : 'Play Short'),
+      ts: Number(v.ts || 0)
+    });
+  });
+  const deletedPlayVidIds = new Set(playState.deletedIds || []);
   const playVotes = [];
   const playCmts = [];
   const deletedPlayCmtIds = new Set();
@@ -9535,18 +10830,7 @@ async function _fetchUserNotificationsFresh() {
     const rowUid = String(r.user_id || '');
     if (!rowUid) return;
 
-    if (reason.startsWith('__PLAY_VID__:')) {
-      try {
-        const p = JSON.parse(reason.slice('__PLAY_VID__:'.length));
-        if (!p?.id) return;
-        playVideosMap.set(String(p.id), {
-          id: String(p.id),
-          userId: rowUid,
-          title: String(p.title || '').slice(0, 80) || (p.kind === 'video' ? 'Uploaded Video' : 'Play Short'),
-          ts: Number(p.ts) || rowTs
-        });
-      } catch (e) {}
-    } else if (reason.startsWith('__PLAY_DEL__:')) {
+    if (reason.startsWith('__PLAY_DEL__:')) {
       try {
         const p = JSON.parse(reason.slice('__PLAY_DEL__:'.length));
         if (p?.videoId) deletedPlayVidIds.add(String(p.videoId));
@@ -9560,7 +10844,7 @@ async function _fetchUserNotificationsFresh() {
           userId: rowUid,
           vote: p.vote === 'like' || p.vote === 'dislike' ? p.vote : 'none',
           ts: Number(p.ts) || rowTs,
-          profile: r.profiles || { id: rowUid, username: 'Trader' }
+          profile: getCachedProfile(rowUid, r.profiles)
         });
       } catch (e) {}
     } else if (reason.startsWith('__PLAY_FOLLOW__:')) {
@@ -9573,7 +10857,7 @@ async function _fetchUserNotificationsFresh() {
           followerId: rowUid,
           following: Boolean(p.following),
           ts,
-          profile: r.profiles || { id: rowUid, username: 'Trader' }
+          profile: getCachedProfile(rowUid, r.profiles)
         });
       } catch (e) {}
     } else if (reason.startsWith('__PLAY_CMT__:')) {
@@ -9586,10 +10870,12 @@ async function _fetchUserNotificationsFresh() {
           id: String(p.id),
           videoId: String(p.videoId),
           userId: rowUid,
+          parentId: p.parent_id ? String(p.parent_id) : null,
+          replyToUserId: p.reply_to_user_id ? String(p.reply_to_user_id) : null,
           text: cleanText,
           gifUrl: cleanGif,
           ts: Number(p.ts) || rowTs,
-          profile: r.profiles || { id: rowUid, username: 'Trader' }
+          profile: getCachedProfile(rowUid, r.profiles)
         });
       } catch (e) {}
     } else if (reason.startsWith('__PLAY_CMT_DEL__:')) {
@@ -9613,7 +10899,7 @@ async function _fetchUserNotificationsFresh() {
           amount: Math.round(amt * 100) / 100,
           note: String(p.note || '').slice(0, 120),
           ts,
-          profile: r.profiles || { id: rowUid, username: 'Trader' }
+          profile: getCachedProfile(rowUid, r.profiles)
         });
       } catch (e) {}
     }
@@ -9654,24 +10940,50 @@ async function _fetchUserNotificationsFresh() {
     });
   });
 
+  const playCmtsById = new Map();
+  playCmts.forEach(pc => playCmtsById.set(pc.id, pc));
+
   playCmts.forEach(pc => {
     if (deletedPlayCmtIds.has(pc.id) || deletedPlayVidIds.has(pc.videoId) || delUsers.has(pc.userId)) return;
     if (pc.userId === uid) return;
     const vid = playVideosMap.get(pc.videoId);
-    if (!vid || vid.userId !== uid) return;
+    if (!vid) return;
     if (srvResetTs > 0 && pc.ts <= srvResetTs) return;
-    items.push({
-      id: 'pcmt_' + pc.id,
-      category: 'play_comment',
-      ts: pc.ts,
-      videoId: pc.videoId,
-      videoTitle: vid.title,
-      authorId: pc.userId,
-      authorProfile: { id: pc.userId, ...pc.profile },
-      authorName: pc.profile?.username || 'Trader',
-      body: pc.text || 'Sent a GIF',
-      gifUrl: pc.gifUrl
-    });
+    const parentPc = pc.parentId ? playCmtsById.get(pc.parentId) : null;
+    if (pc.parentId && (!parentPc || deletedPlayCmtIds.has(parentPc.id))) return;
+
+    const isReplyToMe = Boolean(
+      pc.parentId && (parentPc?.userId === uid || pc.replyToUserId === uid)
+    );
+    const isCommentOnMyVid = vid.userId === uid;
+
+    if (isReplyToMe) {
+      items.push({
+        id: 'prep_' + pc.id,
+        category: 'play_reply',
+        ts: pc.ts,
+        videoId: pc.videoId,
+        videoTitle: vid.title,
+        authorId: pc.userId,
+        authorProfile: { id: pc.userId, ...pc.profile },
+        authorName: pc.profile?.username || 'Trader',
+        body: pc.text || 'Sent a GIF',
+        gifUrl: pc.gifUrl
+      });
+    } else if (isCommentOnMyVid && !pc.parentId) {
+      items.push({
+        id: 'pcmt_' + pc.id,
+        category: 'play_comment',
+        ts: pc.ts,
+        videoId: pc.videoId,
+        videoTitle: vid.title,
+        authorId: pc.userId,
+        authorProfile: { id: pc.userId, ...pc.profile },
+        authorName: pc.profile?.username || 'Trader',
+        body: pc.text || 'Sent a GIF',
+        gifUrl: pc.gifUrl
+      });
+    }
   });
 
   playDonates.forEach(pd => {
@@ -9696,7 +11008,7 @@ async function _fetchUserNotificationsFresh() {
 
 let userNotificationsFetchedAt = 0;
 let userNotificationsPromise = null;
-const NOTIFICATION_SCAN_TTL_MS = 60000;
+const NOTIFICATION_SCAN_TTL_MS = 180000;
 
 async function fetchUserNotifications(force = false) {
   if (!sb || !currentUser) return [];
@@ -9863,7 +11175,7 @@ function renderUserNotifsList() {
     if (userNotifFilter === 'update') return it.category === 'update';
     if (userNotifFilter === 'warning') return it.category === 'warning';
     if (userNotifFilter === 'social') {
-      return it.category === 'comment' || it.category === 'reply' || it.category === 'play_like' || it.category === 'play_comment' || it.category === 'play_follow';
+      return it.category === 'comment' || it.category === 'reply' || it.category === 'play_like' || it.category === 'play_comment' || it.category === 'play_reply' || it.category === 'play_follow';
     }
     if (userNotifFilter === 'donate') return it.category === 'play_donate';
     return true;
@@ -9938,6 +11250,16 @@ function renderUserNotifsList() {
       tagText = 'Video Like';
       headHtml = `<strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}${tierBadgeHtml(it.authorProfile)}</strong> <span class="muted">liked your video</span> <strong>“${escapeHtml(it.videoTitle || 'Play Video')}”</strong> <span style="color:var(--green);font-weight:800;">(+${money(PLAY_LIKE_PAYOUT)})</span>`;
       actionHtml = `<div class="request-actions"><button type="button" class="zoom-btn" data-notif-play-vid="${escapeHtml(it.videoId)}">▶ Watch Video</button></div>`;
+    } else if (it.category === 'play_reply') {
+      tagCls = 'reply';
+      tagText = 'Play Reply';
+      headHtml = `<strong class="profile-link" data-profile="${escapeHtml(it.authorId)}">${escapeHtml(it.authorName)}${tierBadgeHtml(it.authorProfile)}</strong> <span class="muted">replied to your comment on</span> <strong>“${escapeHtml(it.videoTitle || 'Play Video')}”</strong>`;
+      bodyHtml = `
+        <div class="report-details-box">
+          ${escapeHtml(it.body || '').replace(/\n/g, '<br>')}
+          ${it.gifUrl ? `<div class="comment-gif-wrap" style="margin-top:6px;"><img src="${escapeHtml(it.gifUrl)}" alt="GIF" loading="lazy"></div>` : ''}
+        </div>`;
+      actionHtml = `<div class="request-actions"><button type="button" class="zoom-btn" data-notif-play-cmt="${escapeHtml(it.videoId)}">💬 View Reply</button></div>`;
     } else if (it.category === 'play_comment') {
       tagCls = 'play-comment';
       tagText = 'Video Comment';
@@ -10805,10 +12127,18 @@ async function handleRealtimePremiumInsertPopup(row) {
   }
 
   let actorName = 'Someone';
-  try {
-    const { data: prof } = await sb.from('profiles').select('username').eq('id', fromId).maybeSingle();
-    if (prof?.username) actorName = prof.username;
-  } catch (e) {}
+  const cachedActor = sharedProfilesCache.get(fromId);
+  if (cachedActor?.username) {
+    actorName = cachedActor.username;
+  } else {
+    try {
+      const { data: prof } = await sb.from('profiles').select('id, username, avatar_url, is_premium').eq('id', fromId).maybeSingle();
+      if (prof?.id) {
+        saveSharedProfileToCache(prof);
+        if (prof.username) actorName = prof.username;
+      }
+    } catch (e) {}
+  }
 
   if (reason.startsWith('__PLAY_DONATE__:')) {
     try {
@@ -10860,15 +12190,19 @@ async function handleRealtimePremiumInsertPopup(row) {
       const p = JSON.parse(reason.slice('__PLAY_CMT__:'.length));
       if (!p?.videoId) return;
       const vid = playState.videosById.get(String(p.videoId));
-      if (!vid || String(vid.user_id) !== uid) return;
+      const isReplyToMe = Boolean(p.reply_to_user_id && String(p.reply_to_user_id) === uid);
+      const isVidOwner = Boolean(vid && String(vid.user_id) === uid);
+      if (!isReplyToMe && !isVidOwner) return;
       const txt = String(p.text || '').trim() || 'Sent a GIF';
       showLiveNotifPopup({
         key: 'pcmt_' + (p.id || row.id || p.ts),
         kind: 'comment',
         icon: '💬',
-        title: `${actorName} commented on your video`,
+        title: isReplyToMe
+          ? `${actorName} replied to your Play comment`
+          : `${actorName} commented on your video`,
         body: `"${txt}" — Tap to view comment`,
-        onClick: () => openPlayAtVideo(vid.id, true)
+        onClick: () => openPlayAtVideo(p.videoId, true)
       });
       playSound('commenting');
     } catch (e) {}
@@ -10877,62 +12211,171 @@ async function handleRealtimePremiumInsertPopup(row) {
 
 // ---------- Realtime ----------
 let playRealtimeRefreshTimer = null;
+let coinsRealtimeRefreshTimer = null;
+let liveRealtimeRefreshTimer = null;
+let titleRealtimeRefreshTimer = null;
+let notifRealtimeRefreshTimer = null;
+let dmRealtimeRefreshTimer = null;
+let coinCommentsRealtimeTimer = null;
+
 function startRealtime() {
   if (!sb) return;
   realtimeChannel = sb.channel('grind-live', { config: { broadcast: { self: false } } })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'coins' }, () => {
-      loadCoins();
-      if (currentPage === 'live') loadLiveFeed();
+      coinsTradeStatsDirty = true;
+      clearTimeout(coinsRealtimeRefreshTimer);
+      coinsRealtimeRefreshTimer = setTimeout(() => {
+        loadCoins();
+        if (currentPage === 'live') loadLiveFeed();
+      }, 2800);
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
-      loadCoins();
-      if (selectedCoin && currentPage === 'coin') renderCoinDetail();
-      if (currentPage === 'live') loadLiveFeed();
-      if (currentPage === 'global' && lbMode === 'weekly' && Date.now() > lbAnimatingUntil) renderLeaderboard();
+      coinsTradeStatsDirty = true;
+      clearTimeout(coinsRealtimeRefreshTimer);
+      coinsRealtimeRefreshTimer = setTimeout(() => {
+        loadCoins();
+        if (selectedCoin && currentPage === 'coin') renderCoinDetail();
+        if (currentPage === 'live') loadLiveFeed();
+        if (currentPage === 'global' && lbMode === 'weekly' && Date.now() > lbAnimatingUntil) renderLeaderboard();
+      }, 3000);
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'premium_requests' }, payload => {
       const changedReason = String(payload?.new?.reason || payload?.old?.reason || '');
+      const changedUid = String(payload?.new?.user_id || payload?.old?.user_id || '');
+      const myUid = currentUser?.id ? String(currentUser.id) : '';
+
+      // 1. Admin / server-reset / account moderation commands
       if (/^__(ADMIN_CMD|SERVER_RESET|RESET_DONE|COIN_DEL|ACCOUNT_DELETED|COIN_SELF_SELL)__/.test(changedReason)) {
         invalidateAdminModerationStateCache();
         userNotificationsFetchedAt = 0;
         adminNotificationsFetchedAt = 0;
+        if (currentUser) loadProfile();
       }
-      if (payload?.eventType === 'INSERT' && payload?.new) {
-        handleRealtimePremiumInsertPopup(payload.new);
+
+      // 2. Updates & Warnings & Direct Premium/PRO tier status changes
+      if (changedReason.startsWith('__UPDATE__:') || changedReason.startsWith('__PRO_TIER__')) {
+        if (changedReason.startsWith('__PRO_TIER__')) proUserIdsFetchedAt = 0;
+        if (currentUser && (changedReason.startsWith('__UPDATE__:') || changedUid === myUid)) loadProfile();
+      } else if (!changedReason.startsWith('__') && myUid && changedUid === myUid) {
+        if (currentUser) loadProfile();
       }
-      if (currentUser) loadProfile();
-      if (selectedCoin && currentPage === 'coin') loadCoinComments(selectedCoin);
-      if (currentPage === 'feed') fetchFeaturedCoins().then(() => renderFeaturedSection());
-      if (currentPage === 'live') loadLiveFeed();
-      if (currentPage === 'pass') loadPassState().then(() => renderPassPage());
-      if (typeof loadTitleSystemState === 'function') {
-        loadTitleSystemState(true).then(() => {
-          if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
-          if (currentPage === 'marketplace' && typeof renderMarketplacePage === 'function') renderMarketplacePage();
-          if (currentPage === 'global' && Date.now() > lbAnimatingUntil) renderLeaderboard();
-        });
+
+      // 3. Featured coins
+      if (changedReason.startsWith('__FEATURED_COINS__:')) {
+        featuredCoinsFetchedAt = 0;
+        if (currentPage === 'feed') fetchFeaturedCoins(true).then(() => renderFeaturedSection());
       }
-      // Only PLAY activity can change PLAY state. Other premium_requests rows are unrelated.
-      if (changedReason.startsWith('__PLAY_') && typeof loadPlayData === 'function') {
-        clearTimeout(playRealtimeRefreshTimer);
-        playRealtimeRefreshTimer = setTimeout(() => {
-          loadPlayData(true).then(() => {
-            if (typeof syncAllPlayEarnings === 'function') syncAllPlayEarnings();
-            else {
-              if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
-              if (typeof syncPlayDonations === 'function') syncPlayDonations();
-            }
-            if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
-            if (currentPage === 'account' && typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
-            if (currentPage === 'global' && lbMode === 'creators' && Date.now() > lbAnimatingUntil) renderLeaderboard();
-            if (playState.openCommentsVideoId && typeof renderPlayCommentsDrawerList === 'function') renderPlayCommentsDrawerList();
+
+      // 4. Coin comments
+      if (changedReason.startsWith('__CMT_')) {
+        if (selectedCoin && currentPage === 'coin') {
+          clearTimeout(coinCommentsRealtimeTimer);
+          coinCommentsRealtimeTimer = setTimeout(() => {
+            if (selectedCoin && currentPage === 'coin') loadCoinComments(selectedCoin);
+          }, 1200);
+        }
+      }
+
+      // 5. LIVE shoutouts
+      if (changedReason.startsWith('__LIVE_POST__:') && currentPage === 'live') {
+        clearTimeout(liveRealtimeRefreshTimer);
+        liveRealtimeRefreshTimer = setTimeout(() => {
+          if (currentPage === 'live') loadLiveFeed();
+        }, 1500);
+      }
+
+      // 6. Battle Pass (only reload when current user is viewing their own Pass & it changed)
+      if (changedReason.startsWith('__PASS_') && currentPage === 'pass' && myUid && changedUid === myUid) {
+        loadPassState().then(() => renderPassPage());
+      }
+
+      // 7. Titles & Crates (only when title/crate events actually occur)
+      if ((changedReason.startsWith('__TITLE_EQUIP__:') || changedReason.startsWith('__CRATE_ITEM__:')) && typeof loadTitleSystemState === 'function') {
+        clearTimeout(titleRealtimeRefreshTimer);
+        titleRealtimeRefreshTimer = setTimeout(() => {
+          loadTitleSystemState(true).then(() => {
+            if (currentPage === 'account' && typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+            if (currentPage === 'marketplace' && typeof renderMarketplacePage === 'function') renderMarketplacePage();
+            if (currentPage === 'global' && Date.now() > lbAnimatingUntil) renderLeaderboard();
           });
-        }, 900);
+        }, 2500);
       }
-      if (currentPage === 'notifications') loadRequests();
-      else if (currentUser) updateNotificationsBadge();
-      if (isDompinator() && currentPage === 'admin') loadAdminPage();
-      if (currentUser && typeof refreshDirectMessages === 'function') refreshDirectMessages(true);
+
+      // 8. PLAY events (strictly scoped & debounced)
+      if (changedReason.startsWith('__PLAY_') && typeof loadPlayData === 'function') {
+        if (payload?.eventType === 'INSERT' && payload?.new) {
+          handleRealtimePremiumInsertPopup(payload.new);
+        }
+        const isHighFreqPayoutOrView =
+          changedReason.startsWith('__PLAY_VIEW__:') ||
+          changedReason.startsWith('__PLAY_VIEW_PAID__:') ||
+          changedReason.startsWith('__PLAY_LIKE_PAID__:') ||
+          changedReason.startsWith('__PLAY_LIKER_PAID__:') ||
+          changedReason.startsWith('__PLAY_FOLLOW_PAID__:') ||
+          changedReason.startsWith('__PLAY_DONATE_PAID__:');
+        const relevantPageVisible =
+          currentPage === 'play' ||
+          currentPage === 'account' ||
+          currentPage === 'live' ||
+          (currentPage === 'global' && lbMode === 'creators') ||
+          Boolean(playState.openCommentsVideoId);
+        if (!isHighFreqPayoutOrView || relevantPageVisible) {
+          clearTimeout(playRealtimeRefreshTimer);
+          playRealtimeRefreshTimer = setTimeout(() => {
+            loadPlayData(true).then(() => {
+              if (typeof syncAllPlayEarnings === 'function') syncAllPlayEarnings();
+              else {
+                if (typeof syncPlayLikeEarnings === 'function') syncPlayLikeEarnings();
+                if (typeof syncPlayDonations === 'function') syncPlayDonations();
+              }
+              if (currentPage === 'account') {
+                if (typeof renderAccountIdentityAndTitles === 'function') renderAccountIdentityAndTitles();
+                if (typeof renderAccountPlayVideos === 'function') renderAccountPlayVideos();
+              }
+              if (currentPage === 'global' && lbMode === 'creators' && Date.now() > lbAnimatingUntil) renderLeaderboard();
+              if (playState.openCommentsVideoId && typeof renderPlayCommentsDrawerList === 'function') renderPlayCommentsDrawerList();
+              if (currentPage === 'live') loadLiveFeed();
+            });
+          }, 2500);
+        }
+      }
+
+      // 9. Notifications & Admin inbox (only for notification-worthy events, debounced)
+      const isNotifEvent =
+        changedReason.startsWith('__PLAY_VOTE__:') ||
+        changedReason.startsWith('__PLAY_CMT__:') ||
+        changedReason.startsWith('__PLAY_CMT_DEL__:') ||
+        changedReason.startsWith('__PLAY_FOLLOW__:') ||
+        changedReason.startsWith('__PLAY_DONATE__:') ||
+        changedReason.startsWith('__CMT_') ||
+        changedReason.startsWith('__ADMIN_CMD__:') ||
+        changedReason.startsWith('__UPDATE__:') ||
+        changedReason.startsWith('__REPORT__:') ||
+        changedReason.startsWith('__PREM_REQ__:') ||
+        !changedReason.startsWith('__');
+
+      if (isNotifEvent) {
+        userNotificationsFetchedAt = 0;
+        adminNotificationsFetchedAt = 0;
+        if (currentPage === 'notifications') {
+          clearTimeout(notifRealtimeRefreshTimer);
+          notifRealtimeRefreshTimer = setTimeout(() => loadRequests(), 2500);
+        } else if (currentUser) {
+          clearTimeout(notifRealtimeRefreshTimer);
+          notifRealtimeRefreshTimer = setTimeout(() => updateNotificationsBadge(), 5000);
+        }
+        if (isDompinator() && currentPage === 'admin') loadAdminPage();
+      }
+
+      // 10. Direct Messages: ONLY refresh on actual __DM_ events involving current user (or when DM modal is open)!
+      if (changedReason.startsWith('__DM_') && currentUser && typeof refreshDirectMessages === 'function') {
+        const dmOpen = !$('#dmModal')?.classList.contains('hidden');
+        const involvesMe = !myUid || changedUid === myUid || changedReason.includes(myUid);
+        if (dmOpen || involvesMe) {
+          clearTimeout(dmRealtimeRefreshTimer);
+          dmRealtimeRefreshTimer = setTimeout(() => refreshDirectMessages(true), 800);
+        }
+      }
     })
     .on('broadcast', { event: 'dm_typing' }, ({ payload }) => {
       if (typeof handleIncomingDmTyping === 'function') handleIncomingDmTyping(payload);
@@ -11048,7 +12491,7 @@ async function syncPassTimeToRemote(force = false) {
   const key = `grind_pass_sec_s${season}_${currentUser.id}`;
   try { localStorage.setItem(key, String(passState.seconds)); } catch (e) {}
   const now = Date.now();
-  if (!force && now - lastPassRemoteSyncAt < 55000) return;
+  if (!force && now - lastPassRemoteSyncAt < 115000) return;
   lastPassRemoteSyncAt = now;
   try {
     await sb.from('premium_requests').insert({
@@ -11062,7 +12505,6 @@ async function syncPassTimeToRemote(force = false) {
 async function incrementPassTime(addSecs, forceSync = false) {
   if (!currentUser || addSecs <= 0) return;
   passState.seconds = Math.max(0, Number(passState.seconds || 0) + Number(addSecs));
-  lastPassRemoteSyncAt = Date.now();
   const key = `grind_pass_sec_s${passState.season || 1}_${currentUser.id}`;
   try { localStorage.setItem(key, String(passState.seconds)); } catch (e) {}
   await syncPassTimeToRemote(forceSync);
@@ -13491,16 +14933,20 @@ async function openCoinWatchModal(coin) {
   const srvResetTs = adminModStateCache.serverResetTs || 0;
   const { data: fullTrades } = await sb
     .from('trades')
-    .select('*, profiles(username, avatar_url)')
+    .select('id, coin_id, user_id, type, amount_usd, shares, price_after, created_at, profiles(username, is_premium)')
     .eq('coin_id', coin.id)
     .order('created_at', { ascending: true })
     .limit(1000);
+  await ensureProfilesCached((fullTrades || []).map(t => t.user_id).filter(Boolean));
 
   const tradeMap = new Map();
   (fullTrades || []).forEach(t => {
     const tMs = new Date(t.created_at || 0).getTime();
     if (srvResetTs > 0 && tMs <= srvResetTs) return;
-    tradeMap.set(t.id || (t.created_at + t.shares), t);
+    tradeMap.set(t.id || (t.created_at + t.shares), {
+      ...t,
+      profiles: t.user_id ? getCachedProfile(t.user_id, t.profiles) : t.profiles
+    });
   });
   (coin.localTrades || []).forEach(t => {
     const tMs = new Date(t.created_at || 0).getTime();
@@ -13825,6 +15271,9 @@ $$('[data-watch-speed]').forEach(btn => {
 // ============================================================
 const dmState = {
   profilesMap: new Map(),   // userId -> profile
+  rawRows: [],              // cached __DM_% rows for incremental sync
+  rawRowIds: new Set(),
+  lastRowCreatedAt: '',
   messagesByPartner: new Map(), // partnerId -> [{ id, from, to, type, text, ts, ... }]
   partnerReadTsByPartner: new Map(), // partnerId -> latest message ts partner opened/read
   lastSentReadByPartner: new Map(), // partnerId -> latest incoming ts we already acked
@@ -14131,6 +15580,9 @@ function resetDmStateOnLogout() {
   dmState.typingClearTimers.forEach(tid => clearTimeout(tid));
   dmState.typingClearTimers.clear();
   dmState.typingUntilByPartner.clear();
+  dmState.rawRows = [];
+  dmState.rawRowIds.clear();
+  dmState.lastRowCreatedAt = '';
   dmState.messagesByPartner.clear();
   dmState.partnerReadTsByPartner.clear();
   dmState.lastSentReadByPartner.clear();
@@ -14168,18 +15620,34 @@ async function refreshDirectMessages(fromRealtime = false) {
   await fetchAdminModerationState();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
 
-  const [profRes, dmRes] = await Promise.all([
-    sb.from('profiles').select('id, username, avatar_url, is_premium').order('username', { ascending: true }).limit(500),
-    sb.from('premium_requests')
-      .select('id, user_id, reason, created_at')
-      .like('reason', '__DM_%')
-      .order('created_at', { ascending: true })
-      .limit(2000)
+  let dmQ = sb.from('premium_requests')
+    .select('id, user_id, reason, created_at')
+    .like('reason', '__DM_%')
+    .order('created_at', { ascending: true })
+    .limit(2000);
+  if (dmState.rawRows.length && dmState.lastRowCreatedAt) {
+    dmQ = dmQ.gte('created_at', dmState.lastRowCreatedAt);
+  }
+
+  const [dmRes] = await Promise.all([
+    dmQ,
+    ensureProfilesCached([], false)
   ]);
 
+  const incoming = dmRes?.data || [];
+  incoming.forEach(row => {
+    const rowId = String(row.id || (String(row.created_at || '') + '|' + String(row.user_id || '') + '|' + String(row.reason || '')));
+    if (dmState.rawRowIds.has(rowId)) return;
+    dmState.rawRowIds.add(rowId);
+    dmState.rawRows.push(row);
+    if (row.created_at && (!dmState.lastRowCreatedAt || row.created_at > dmState.lastRowCreatedAt)) {
+      dmState.lastRowCreatedAt = row.created_at;
+    }
+  });
+  dmState.rawRows.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+
   const profMap = new Map();
-  (profRes?.data || []).forEach(p => {
-    const pid = String(p.id);
+  sharedProfilesCache.forEach((p, pid) => {
     if (delUsers.has(pid)) return;
     if (adminModStateCache.bans?.get(pid)?.banned) return;
     profMap.set(pid, p);
@@ -14189,7 +15657,7 @@ async function refreshDirectMessages(fromRealtime = false) {
   const grouped = new Map();
   const partnerReadMap = new Map(dmState.partnerReadTsByPartner);
 
-  (dmRes?.data || []).forEach(r => {
+  dmState.rawRows.forEach(r => {
     const raw = String(r.reason || '');
     if (raw.startsWith('__DM_READ__:')) {
       try {
@@ -14838,6 +16306,10 @@ window.addEventListener('keydown', e => {
   }
   if (!$('#crateOpenModal')?.classList.contains('hidden')) {
     if (!titleSystemState.isSpinning) closeCrateModal();
+    return;
+  }
+  if (!$('#playUseSongModal')?.classList.contains('hidden')) {
+    closePlayUseSongModal();
     return;
   }
   if (!$('#playCreatorModal')?.classList.contains('hidden')) {
