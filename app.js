@@ -4139,7 +4139,9 @@ async function getCoinSpendLeaderboard(coinId) {
   const totals = new Map();
   for (const t of data) {
     if (!t.user_id) continue;
+    if (String(t.profiles?.username || '').trim().toLowerCase() === 'grind_test') continue;
     const cachedProf = getCachedProfile(t.user_id, t.profiles);
+    if (String(cachedProf?.username || '').trim().toLowerCase() === 'grind_test') continue;
     const prev = totals.get(t.user_id) || {
       id: t.user_id,
       user_id: t.user_id,
@@ -4382,7 +4384,7 @@ async function renderLeaderboard() {
   if (seq !== lbRenderSeq || modeAtStart !== lbMode) return;
 
   let list = (data || [])
-    .filter(p => !delUsers.has(String(p.id)))
+    .filter(p => !delUsers.has(String(p.id)) && String(p.username || '').trim().toLowerCase() !== 'grind_test')
     .map(getEffectiveProfileStats);
 
   const weeklyWrap = $('#lbWeeklyControls');
