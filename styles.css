@@ -6914,3 +6914,12 @@ body[data-theme="rose-amethyst"] .featured-slot-badge {
 
 
 
+
+
+/* Friday update countdown */
+.brand { width:100%; justify-content:space-between; gap:7px; }
+.brand-main { display:flex; align-items:center; gap:10px; min-width:0; flex-shrink:0; }
+.update-countdown { display:flex; flex-direction:column; align-items:flex-end; justify-content:center; gap:3px; min-width:0; padding:6px 8px; border:1px solid rgba(192,132,252,.28); border-radius:10px; background:linear-gradient(135deg,rgba(192,132,252,.13),rgba(109,40,217,.08)); line-height:1; }
+.update-countdown-label { color:#c4a2f4; font-size:8px; font-weight:800; letter-spacing:1px; white-space:nowrap; }
+.update-countdown-time { color:#fff; font-size:13px; font-weight:850; font-variant-numeric:tabular-nums; letter-spacing:.35px; white-space:nowrap; }
+@media(max-width:360px){.brand{gap:4px;font-size:19px}.brand-main{gap:6px}.brand-icon{width:34px;height:34px}.update-countdown{padding:5px 6px}.update-countdown-time{font-size:12px}}
