@@ -19257,3 +19257,24 @@ $('#traderBattleResultModal')?.addEventListener('click', e => {
 
 
 
+
+
+// Countdown to Friday, November 27, 2026 at 06:30 in the browser's local timezone.
+(function initGrindUpdateCountdown(){
+  const el=document.getElementById('grindUpdateCountdown');
+  if(!el)return;
+  const target=new Date(2026,10,27,6,30,0,0);
+  const pad=n=>String(n).padStart(2,'0');
+  const render=()=>{
+    const remaining=Math.max(0,target.getTime()-Date.now());
+    const total=Math.floor(remaining/1000);
+    const days=Math.floor(total/86400);
+    const hours=Math.floor((total%86400)/3600);
+    const minutes=Math.floor((total%3600)/60);
+    const seconds=total%60;
+    el.textContent=days>0?days+'d '+pad(hours)+':'+pad(minutes)+':'+pad(seconds):pad(hours)+':'+pad(minutes)+':'+pad(seconds);
+    if(remaining===0){const label=el.parentElement?.querySelector('.update-countdown-label');if(label)label.textContent='UPDATE TIME';}
+  };
+  render();
+  window.setInterval(render,1000);
+})();
