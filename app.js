@@ -4380,11 +4380,11 @@ async function renderLeaderboard() {
   ]);
   if (currentUser) await updateNetWorth();
   const delUsers = adminModStateCache.deletedUserIds || new Set();
-  const { data } = await sb.from('profiles').select('id, username, cash, net_worth, time_played, is_premium').neq('id', '6480431e-0f8b-4d0a-9dd9-6269ff872f77').limit(200);
+  const { data } = await sb.from('profiles').select('id, username, cash, net_worth, time_played, is_premium, is_test_account').neq('id', '6480431e-0f8b-4d0a-9dd9-6269ff872f77').limit(200);
   if (seq !== lbRenderSeq || modeAtStart !== lbMode) return;
 
   let list = (data || [])
-    .filter(p => String(p.id) !== '6480431e-0f8b-4d0a-9dd9-6269ff872f77' && !delUsers.has(String(p.id)) && String(p.username || '').trim().toLowerCase() !== 'grind_test')
+    .filter(p => p.is_test_account !== true && String(p.id) !== '6480431e-0f8b-4d0a-9dd9-6269ff872f77' && !delUsers.has(String(p.id)) && String(p.username || '').trim().toLowerCase() !== 'grind_test')
     .map(getEffectiveProfileStats);
 
   const weeklyWrap = $('#lbWeeklyControls');
