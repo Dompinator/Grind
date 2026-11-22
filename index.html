@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c0916">
   <title>GRIND — Grind your way through the market</title>
-  <link rel="stylesheet" href="styles.css?v=57">
+  <link rel="stylesheet" href="styles.css?v=58">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -45,7 +45,7 @@
 
   <div id="appView" class="app hidden">
     <aside class="sidebar">
-      <a class="brand" href="#"><span class="brand-icon">G</span><span>GRIND<span class="brand-dot">.</span></span></a>
+      <a class="brand" href="#"><span class="brand-main"><span class="brand-icon">G</span><span>GRIND<span class="brand-dot">.</span></span></span><span class="update-countdown" aria-label="Countdown to Friday update"><span class="update-countdown-label">UPDATE IN</span><span class="update-countdown-time" id="grindUpdateCountdown">--:--:--</span></span></a>
       <div class="sidebar-scroll">
         <div class="side-label">MARKET</div>
         <nav class="main-nav">
@@ -1695,6 +1695,6 @@
   <div id="rewardBurstLayer" class="reward-burst-layer" aria-hidden="true"></div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="app.js?v=63"></script>
+  <script src="app.js?v=64"></script>
 </body>
 </html>
