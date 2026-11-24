@@ -648,28 +648,33 @@ async function loadProfile() {
     authMsg('This account has been permanently deleted.');
     return;
   }
-  const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).single();
-  if (error || !data) {
+  // Read only columns granted to authenticated users. The profiles.email
+  // column is intentionally private; selecting '*' makes this query fail.
+  const { data, error } = await sb.from('profiles')
+    .select('id, username, avatar_url, cash, is_premium, net_worth, time_played, created_at, is_test_account, user_color')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  // A permission/network error is NOT a missing profile. Never substitute a
+  // fake starting balance or zero playtime when saved data cannot be read.
+  if (error) {
+    console.error('Profile load failed; saved account data was not changed:', error);
+    authMsg('Could not load your saved account data. Please try refreshing in a moment. Your data has not been reset.');
+    return;
+  }
+
+  if (!data) {
     const { error: cErr } = await createProfile(user);
     if (cErr) {
-      console.warn('Profile create error in Supabase:', cErr);
-      // Fallback so currentUser is always defined and app/coin creation is never silently blocked
-      currentUser = {
-        id: user.id,
-        username: (user.email || 'trader').split('@')[0],
-        email: user.email,
-        cash: 15,
-        is_premium: (user.email || '').toLowerCase().includes('dompinator'),
-        net_worth: 15,
-        time_played: 0
-      };
-      updateUIProfile();
+      console.error('Profile creation failed:', cErr);
+      authMsg('Could not create your profile: ' + cErr.message);
       return;
     }
     return loadProfile();
   }
   const prevMemTier = currentUser && currentUser.id === user.id ? getUserTier(currentUser) : null;
   currentUser = data;
+  currentUser.email = user.email || null; // Auth email for this signed-in user only.
   currentUser.auth_created_at = user.created_at || data.created_at || null;
   saveSharedProfileToCache(currentUser);
 
